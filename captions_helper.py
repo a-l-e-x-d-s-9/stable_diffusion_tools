@@ -1,9 +1,9 @@
 import os
 import sys
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QSpinBox
-from PyQt5.QtGui import QPixmap
-from PyQt5.QtCore import Qt, QSize
-
+from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
+                             QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame)
+from PyQt5.QtGui import QPixmap, QColor, QIcon
+from PyQt5.QtCore import Qt, QSize, QPoint
 
 class ImageDropWidget(QWidget):
     def __init__(self, parent=None):
@@ -49,6 +49,10 @@ class ImageDropWidget(QWidget):
         self.bottom_layout.addWidget(self.add_captions_button)
         self.add_captions_button.clicked.connect(self.add_captions)  # Connect the button to the add_captions method
 
+        self.clear_button = QPushButton("Clear", self)
+        self.bottom_layout.addWidget(self.clear_button)
+        self.clear_button.clicked.connect(self.clear_grid)
+
         # Captions layout
         self.captions_layout = QHBoxLayout()
         self.captions_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
@@ -80,12 +84,21 @@ class ImageDropWidget(QWidget):
                     label.path = path
                     label.setPixmap(pixmap)
 
+                    # Add close button to the label
+                    close_button = QPushButton("X", label)
+                    close_button.setStyleSheet("QPushButton { color: red; }")
+                    close_button.setFlat(True)
+                    close_button.setFixedSize(QSize(16, 16))
+                    close_button.clicked.connect(lambda checked, lbl=label: self.remove_item(lbl))
+
                     self.images.append(label)
                     self.update_grid_layout()
+
                 else:
                     print(f"{path} already exists in the widget!")
         else:
             event.ignore()
+
 
     def add_captions(self):
         caption_text = self.caption_input.text()
@@ -126,11 +139,28 @@ class ImageDropWidget(QWidget):
         for i, label in enumerate(self.images):
             self.grid_layout.addWidget(label, i // items_in_grid_line, i % items_in_grid_line)
 
+            # Position close button at the top-right corner of the label
+            close_button = label.findChild(QPushButton)
+            close_button.move(QPoint(0, 0))
+
         self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
     def minimumSizeHint(self):
         """Override minimumSizeHint to return a minimum size of 500x300 pixels."""
         return QSize(500, 300)
+
+    def clear_grid(self):
+        for label in self.images:
+            self.grid_layout.removeWidget(label)
+            label.deleteLater()
+        self.images.clear()
+
+    def remove_item(self, label):
+        self.images.remove(label)
+        self.grid_layout.removeWidget(label)
+        label.deleteLater()
+        self.update_grid_layout()
+
 
 
 if __name__ == '__main__':
