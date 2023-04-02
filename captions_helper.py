@@ -1,7 +1,8 @@
 import os
 import sys
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
-                             QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame, QTextEdit)
+                             QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame, QTextEdit,
+                             QScrollArea)
 from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette
 from PyQt5.QtCore import Qt, QSize, QPoint
 
@@ -61,7 +62,14 @@ class ImageDropWidget(QWidget):
         self.grid_widget.setLayout(self.grid_layout)
         self.grid_widget.setStyleSheet("background-color: #dddddd;")  # Set the background color of the grid
 
-        self.main_layout.addWidget(self.grid_widget, stretch=10)  # Set the vertical stretch factor to 10
+        # Scroll Area
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setWidget(self.grid_widget)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        self.main_layout.addWidget(self.scroll_area, stretch=10)
 
         # Bottom layout
         self.bottom_layout = QHBoxLayout()
@@ -203,6 +211,7 @@ class ImageDropWidget(QWidget):
         items_in_grid_line = max(1, int(window_size.width() / (self.grid_item_width + self.grid_spacing)))
 
         for i, label in enumerate(self.images):
+            label.setMinimumSize(self.grid_item_width, self.grid_item_height)
             self.grid_layout.addWidget(label, i // items_in_grid_line, i % items_in_grid_line)
 
             # Position close button at the top-right corner of the label
