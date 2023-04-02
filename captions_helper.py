@@ -1,3 +1,4 @@
+import os
 import sys
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QSpinBox
 from PyQt5.QtGui import QPixmap
@@ -42,9 +43,11 @@ class ImageDropWidget(QWidget):
         self.comma_place_input = QSpinBox(self)
         self.bottom_layout.addWidget(self.comma_place_input)
 
+
         # Add captions button
         self.add_captions_button = QPushButton("Add captions", self)
         self.bottom_layout.addWidget(self.add_captions_button)
+        self.add_captions_button.clicked.connect(self.add_captions)  # Connect the button to the add_captions method
 
         # Captions layout
         self.captions_layout = QHBoxLayout()
@@ -83,6 +86,34 @@ class ImageDropWidget(QWidget):
                     print(f"{path} already exists in the widget!")
         else:
             event.ignore()
+
+    def add_captions(self):
+        caption_text = self.caption_input.text()
+        comma_place = self.comma_place_input.value()
+
+        for label in self.images:
+            path = label.path
+            txt_path = os.path.splitext(path)[0] + '.txt'
+
+            if not os.path.exists(txt_path):
+                with open(txt_path, 'w') as txt_file:
+                    pass  # Create an empty txt file if it doesn't exist
+
+            with open(txt_path, 'r') as txt_file:
+                captions = txt_file.read().strip().split(',')
+
+            if comma_place > len(captions):
+                comma_place = len(captions)
+
+            if not caption_text.startswith(' '):
+                caption_text = ' ' + caption_text
+
+            captions.insert(comma_place, caption_text)
+
+
+
+            with open(txt_path, 'w') as txt_file:
+                txt_file.write(','.join(captions))
 
     def resizeEvent(self, event):
         self.update_grid_layout()
