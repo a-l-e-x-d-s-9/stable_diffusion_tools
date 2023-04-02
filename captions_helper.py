@@ -1,9 +1,36 @@
 import os
 import sys
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
-                             QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame)
-from PyQt5.QtGui import QPixmap, QColor, QIcon
+                             QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame, QTextEdit)
+from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette
 from PyQt5.QtCore import Qt, QSize, QPoint
+
+
+class ImageLabel(QLabel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.path = None
+        self.setFrameShape(QFrame.Panel)
+        self.setLineWidth(3)
+        self.set_default_frame_color()
+
+    def set_default_frame_color(self):
+        # Set the default frame color to the background color
+        palette = self.palette()
+        palette.setColor(QPalette.WindowText, palette.color(QPalette.Background))
+        self.setPalette(palette)
+
+    def set_frame_color(self, color):
+        # Set the frame color to a specific color
+        palette = self.palette()
+        palette.setColor(QPalette.WindowText, color)
+        self.setPalette(palette)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.parent().on_image_clicked(self)
+        super().mousePressEvent(event)
+
 
 class ImageDropWidget(QWidget):
     def __init__(self, parent=None):
@@ -53,18 +80,38 @@ class ImageDropWidget(QWidget):
         self.bottom_layout.addWidget(self.clear_button)
         self.clear_button.clicked.connect(self.clear_grid)
 
+
+
         # Captions layout
         self.captions_layout = QHBoxLayout()
         self.captions_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
         self.main_layout.addLayout(self.captions_layout)
 
         # Add captions text input/output
-        self.captions_io = QLineEdit(self)
+
+        self.captions_io = QTextEdit(self)
+        self.captions_io.setPlaceholderText("Enter text here...")
+        self.captions_io.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.captions_io.textChanged.connect(self.adjust_text_height)
         self.captions_layout.addWidget(self.captions_io)
+
+        self.save_captions_button = QPushButton("Save caption", self)
+        self.captions_layout.addWidget(self.save_captions_button)
+        self.save_captions_button.clicked.connect(self.save_captions)
 
         self.images = []
         self.resize(self.min_width, self.min_height)
         self.setMinimumSize(self.min_width, self.min_height)
+
+        self.adjust_text_height()
+
+    def adjust_text_height(self):
+        document_height = self.captions_io.document().size().height()
+        scroll_bar_height = self.captions_io.verticalScrollBar().sizeHint().height()
+        widget_height = self.captions_io.sizeHint().height()
+
+        if document_height + scroll_bar_height > widget_height:
+            self.captions_io.setFixedHeight(document_height + scroll_bar_height)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -80,7 +127,7 @@ class ImageDropWidget(QWidget):
                 if path not in [label.path for label in self.images]:
                     pixmap = QPixmap(path)
                     pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height, aspectRatioMode=Qt.KeepAspectRatio)
-                    label = QLabel(self)
+                    label = ImageLabel(self)
                     label.path = path
                     label.setPixmap(pixmap)
 
@@ -161,7 +208,32 @@ class ImageDropWidget(QWidget):
         label.deleteLater()
         self.update_grid_layout()
 
+    def on_image_clicked(self, label):
+        self.current_label = label
+        for img in self.images:
+            if img == label:
+                img.setAutoFillBackground(True)
+                palette = img.palette()
+                palette.setColor(QPalette.Background, QColor(100, 100, 100, 127))
+                img.setPalette(palette)
+            else:
+                img.setAutoFillBackground(False)
+                img.setPalette(QPalette())
 
+        txt_path = os.path.splitext(label.path)[0] + '.txt'
+        if os.path.exists(txt_path):
+            with open(txt_path, 'r') as txt_file:
+                content = txt_file.read()
+                self.captions_io.setText(content)
+        else:
+            self.captions_io.clear()
+
+    def save_captions(self):
+        if self.current_label is not None:
+            txt_path = os.path.splitext(self.current_label.path)[0] + '.txt'
+            content = self.captions_io.text()
+            with open(txt_path, 'w') as txt_file:
+                txt_file.write(content)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
