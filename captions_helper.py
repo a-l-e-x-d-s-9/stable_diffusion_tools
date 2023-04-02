@@ -179,7 +179,7 @@ class ImageDropWidget(QWidget):
 
     def add_captions(self):
         caption_text = self.caption_input.text()
-        comma_place = self.comma_place_input.value()
+        comma_place_desired = self.comma_place_input.value()
 
         for label in self.images:
             path = label.path
@@ -192,6 +192,7 @@ class ImageDropWidget(QWidget):
             with open(txt_path, 'r') as txt_file:
                 captions = txt_file.read().strip().split(',')
 
+            comma_place = comma_place_desired
             if comma_place > len(captions):
                 comma_place = len(captions)
 
