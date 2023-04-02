@@ -55,17 +55,8 @@ class ImageDropWidget(QWidget):
         self.grid_layout = QGridLayout()
         self.grid_layout.setSpacing(self.grid_spacing)
         self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        # self.main_layout.addLayout(self.grid_layout)
 
-        # Set the background color of the grid
-        #self.grid_layout.setStyleSheet("background-color: #dddddd;")
-
-        # Set stretch factor for rows and columns to make the grid expand when empty
-        # self.grid_layout.setColumnStretch(0, 1)
-        # self.grid_layout.setRowStretch(0, 1)
-
-        #self.main_layout.addLayout(self.grid_layout)
-
+        # Grid Widget
         self.grid_widget = QWidget()
         self.grid_widget.setLayout(self.grid_layout)
         self.grid_widget.setStyleSheet("background-color: #dddddd;")  # Set the background color of the grid
@@ -83,6 +74,7 @@ class ImageDropWidget(QWidget):
 
         # Add caption text input
         self.caption_input = QLineEdit(self)
+        self.caption_input.setPlaceholderText("Add caption to all shown images")
         self.bottom_layout.addWidget(self.caption_input)
 
         self.caption_label = QLabel("Comma position:", self)
@@ -98,7 +90,7 @@ class ImageDropWidget(QWidget):
         self.bottom_layout.addWidget(self.add_captions_button)
         self.add_captions_button.clicked.connect(self.add_captions)  # Connect the button to the add_captions method
 
-        self.clear_button = QPushButton("Clear", self)
+        self.clear_button = QPushButton("Clear Images", self)
         self.bottom_layout.addWidget(self.clear_button)
         self.clear_button.clicked.connect(self.clear_all)
 
@@ -237,25 +229,6 @@ class ImageDropWidget(QWidget):
         label.deleteLater()
         self.update_grid_layout()
 
-    # def on_image_clicked(self, label):
-    #     self.current_label = label
-    #     for img in self.images:
-    #         if img == label:
-    #             img.setAutoFillBackground(True)
-    #             palette = img.palette()
-    #             palette.setColor(QPalette.Background, QColor(100, 100, 100, 127))
-    #             img.setPalette(palette)
-    #         else:
-    #             img.setAutoFillBackground(False)
-    #             img.setPalette(QPalette())
-    #
-    #     txt_path = os.path.splitext(label.path)[0] + '.txt'
-    #     if os.path.exists(txt_path):
-    #         with open(txt_path, 'r') as txt_file:
-    #             content = txt_file.read()
-    #             self.captions_io.setText(content)
-    #     else:
-    #         self.captions_io.clear()
 
     def on_image_clicked(self, label):
         self.current_label = label
