@@ -2,7 +2,7 @@ import os
 import sys
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame, QTextEdit,
-                             QScrollArea)
+                             QScrollArea, QMessageBox)
 from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette
 from PyQt5.QtCore import Qt, QSize, QPoint
 
@@ -33,7 +33,7 @@ class ImageLabel(QLabel):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.parent().parent().on_image_clicked(self)
+            self.parent().parent().parent().parent().on_image_clicked(self)
         super().mousePressEvent(event)
 
 
@@ -119,6 +119,9 @@ class ImageDropWidget(QWidget):
         self.captions_io.setLineWrapMode(QTextEdit.WidgetWidth)
         self.captions_io.textChanged.connect(self.adjust_text_height)
         self.captions_layout.addWidget(self.captions_io)
+
+        self.current_label = None
+        self.captions_io.textChanged.connect(self.on_captions_io_text_changed)
 
         self.save_captions_button = QPushButton("Save caption", self)
         self.captions_layout.addWidget(self.save_captions_button)
@@ -238,8 +241,23 @@ class ImageDropWidget(QWidget):
         label.deleteLater()
         self.update_grid_layout()
 
+    def ensure_txt_file_exists(self, txt_path):
+        if not os.path.exists(txt_path):
+            with open(txt_path, 'w') as txt_file:
+                pass  # Create an empty txt file if it doesn't exist
 
     def on_image_clicked(self, label):
+        if self.current_label is not None and self.captions_io.property("text_modified"):
+            reply = QMessageBox.question(
+                self, "Save changes", "Do you want to save changes to the current caption?",
+                QMessageBox.Save | QMessageBox.Ignore | QMessageBox.Cancel
+            )
+
+            if reply == QMessageBox.Save:
+                self.save_captions()
+            elif reply == QMessageBox.Cancel:
+                return
+
         self.current_label = label
         for img in self.images:
             if img == label:
@@ -248,19 +266,30 @@ class ImageDropWidget(QWidget):
                 img.set_unselected_frame_color()
 
         txt_path = os.path.splitext(label.path)[0] + '.txt'
-        if os.path.exists(txt_path):
-            with open(txt_path, 'r') as txt_file:
-                content = txt_file.read()
-                self.captions_io.setText(content)
-        else:
-            self.captions_io.clear()
+        self.ensure_txt_file_exists(txt_path)
+
+        with open(txt_path, 'r') as txt_file:
+            content = txt_file.read()
+            self.captions_io.blockSignals(True)  # Block signals to avoid triggering textChanged
+            self.captions_io.setText(content)
+            self.captions_io.blockSignals(False)  # Unblock signals
+
+        self.captions_io.setProperty("text_modified", False)
+        self.captions_io.setStyleSheet("")
+
+    def on_captions_io_text_changed(self):
+        self.captions_io.setProperty("text_modified", True)
+        self.captions_io.setStyleSheet("QTextEdit { border: 2px solid yellow; }")
 
     def save_captions(self):
         if self.current_label is not None:
             txt_path = os.path.splitext(self.current_label.path)[0] + '.txt'
-            content = self.captions_io.text()
+            content = self.captions_io.toPlainText()
             with open(txt_path, 'w') as txt_file:
                 txt_file.write(content)
+
+            self.captions_io.setProperty("text_modified", False)
+            self.captions_io.setStyleSheet("")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
