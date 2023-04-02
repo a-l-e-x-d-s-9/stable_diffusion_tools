@@ -20,15 +20,19 @@ class ImageLabel(QLabel):
         palette.setColor(QPalette.WindowText, palette.color(QPalette.Background))
         self.setPalette(palette)
 
-    def set_frame_color(self, color):
-        # Set the frame color to a specific color
+    def set_selected_frame_color(self):
+        # Set the frame color to red
         palette = self.palette()
-        palette.setColor(QPalette.WindowText, color)
+        palette.setColor(QPalette.WindowText, QColor(Qt.red))
         self.setPalette(palette)
+
+    def set_unselected_frame_color(self):
+        # Set the frame color to the background color
+        self.set_default_frame_color()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.parent().on_image_clicked(self)
+            self.parent().parent().on_image_clicked(self)
         super().mousePressEvent(event)
 
 
@@ -51,7 +55,22 @@ class ImageDropWidget(QWidget):
         self.grid_layout = QGridLayout()
         self.grid_layout.setSpacing(self.grid_spacing)
         self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.main_layout.addLayout(self.grid_layout)
+        # self.main_layout.addLayout(self.grid_layout)
+
+        # Set the background color of the grid
+        #self.grid_layout.setStyleSheet("background-color: #dddddd;")
+
+        # Set stretch factor for rows and columns to make the grid expand when empty
+        # self.grid_layout.setColumnStretch(0, 1)
+        # self.grid_layout.setRowStretch(0, 1)
+
+        #self.main_layout.addLayout(self.grid_layout)
+
+        self.grid_widget = QWidget()
+        self.grid_widget.setLayout(self.grid_layout)
+        self.grid_widget.setStyleSheet("background-color: #dddddd;")  # Set the background color of the grid
+
+        self.main_layout.addWidget(self.grid_widget)
 
         # Bottom layout
         self.bottom_layout = QHBoxLayout()
@@ -78,7 +97,7 @@ class ImageDropWidget(QWidget):
 
         self.clear_button = QPushButton("Clear", self)
         self.bottom_layout.addWidget(self.clear_button)
-        self.clear_button.clicked.connect(self.clear_grid)
+        self.clear_button.clicked.connect(self.clear_all)
 
 
 
@@ -110,7 +129,9 @@ class ImageDropWidget(QWidget):
         scroll_bar_height = self.captions_io.verticalScrollBar().sizeHint().height()
         widget_height = self.captions_io.sizeHint().height()
 
-        if document_height + scroll_bar_height > widget_height:
+        if self.captions_io.toPlainText() == "":
+            self.captions_io.setFixedHeight(min(100, widget_height))
+        elif document_height + scroll_bar_height > widget_height:
             self.captions_io.setFixedHeight(document_height + scroll_bar_height)
 
     def dragEnterEvent(self, event):
@@ -196,11 +217,13 @@ class ImageDropWidget(QWidget):
         """Override minimumSizeHint to return a minimum size of 500x300 pixels."""
         return QSize(500, 300)
 
-    def clear_grid(self):
+    def clear_all(self):
         for label in self.images:
             self.grid_layout.removeWidget(label)
             label.deleteLater()
         self.images.clear()
+
+        self.captions_io.setText("")
 
     def remove_item(self, label):
         self.images.remove(label)
@@ -208,17 +231,33 @@ class ImageDropWidget(QWidget):
         label.deleteLater()
         self.update_grid_layout()
 
+    # def on_image_clicked(self, label):
+    #     self.current_label = label
+    #     for img in self.images:
+    #         if img == label:
+    #             img.setAutoFillBackground(True)
+    #             palette = img.palette()
+    #             palette.setColor(QPalette.Background, QColor(100, 100, 100, 127))
+    #             img.setPalette(palette)
+    #         else:
+    #             img.setAutoFillBackground(False)
+    #             img.setPalette(QPalette())
+    #
+    #     txt_path = os.path.splitext(label.path)[0] + '.txt'
+    #     if os.path.exists(txt_path):
+    #         with open(txt_path, 'r') as txt_file:
+    #             content = txt_file.read()
+    #             self.captions_io.setText(content)
+    #     else:
+    #         self.captions_io.clear()
+
     def on_image_clicked(self, label):
         self.current_label = label
         for img in self.images:
             if img == label:
-                img.setAutoFillBackground(True)
-                palette = img.palette()
-                palette.setColor(QPalette.Background, QColor(100, 100, 100, 127))
-                img.setPalette(palette)
+                img.set_selected_frame_color()
             else:
-                img.setAutoFillBackground(False)
-                img.setPalette(QPalette())
+                img.set_unselected_frame_color()
 
         txt_path = os.path.splitext(label.path)[0] + '.txt'
         if os.path.exists(txt_path):
