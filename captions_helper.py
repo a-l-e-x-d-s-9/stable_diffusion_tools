@@ -43,8 +43,8 @@ class ImageDropWidget(QWidget):
         self.grid_item_width = 128
         self.grid_item_height = 128
         self.grid_spacing = 10
-        self.min_width = 500
-        self.min_height = 300
+        self.min_width = 800
+        self.min_height = 400
         self.setAcceptDrops(True)
 
         # Main layout
@@ -70,7 +70,7 @@ class ImageDropWidget(QWidget):
         self.grid_widget.setLayout(self.grid_layout)
         self.grid_widget.setStyleSheet("background-color: #dddddd;")  # Set the background color of the grid
 
-        self.main_layout.addWidget(self.grid_widget)
+        self.main_layout.addWidget(self.grid_widget, stretch=10)  # Set the vertical stretch factor to 10
 
         # Bottom layout
         self.bottom_layout = QHBoxLayout()
@@ -78,12 +78,15 @@ class ImageDropWidget(QWidget):
         self.main_layout.addLayout(self.bottom_layout)
 
         # Add caption label
-        self.caption_label = QLabel("Add caption", self)
+        self.caption_label = QLabel("Add caption for all:", self)
         self.bottom_layout.addWidget(self.caption_label)
 
         # Add caption text input
         self.caption_input = QLineEdit(self)
         self.bottom_layout.addWidget(self.caption_input)
+
+        self.caption_label = QLabel("Comma position:", self)
+        self.bottom_layout.addWidget(self.caption_label)
 
         # Add comma place input
         self.comma_place_input = QSpinBox(self)
@@ -91,7 +94,7 @@ class ImageDropWidget(QWidget):
 
 
         # Add captions button
-        self.add_captions_button = QPushButton("Add captions", self)
+        self.add_captions_button = QPushButton("Add to all", self)
         self.bottom_layout.addWidget(self.add_captions_button)
         self.add_captions_button.clicked.connect(self.add_captions)  # Connect the button to the add_captions method
 
@@ -108,8 +111,11 @@ class ImageDropWidget(QWidget):
 
         # Add captions text input/output
 
+        self.caption_label = QLabel("For image:", self)
+        self.captions_layout.addWidget(self.caption_label)
+
         self.captions_io = QTextEdit(self)
-        self.captions_io.setPlaceholderText("Enter text here...")
+        self.captions_io.setPlaceholderText("Select image to edit captions")
         self.captions_io.setLineWrapMode(QTextEdit.WidgetWidth)
         self.captions_io.textChanged.connect(self.adjust_text_height)
         self.captions_layout.addWidget(self.captions_io)
@@ -132,7 +138,7 @@ class ImageDropWidget(QWidget):
         if self.captions_io.toPlainText() == "":
             self.captions_io.setFixedHeight(min(100, widget_height))
         elif document_height + scroll_bar_height > widget_height:
-            self.captions_io.setFixedHeight(document_height + scroll_bar_height)
+            self.captions_io.setFixedHeight(int(document_height + scroll_bar_height))
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -214,8 +220,8 @@ class ImageDropWidget(QWidget):
         self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
     def minimumSizeHint(self):
-        """Override minimumSizeHint to return a minimum size of 500x300 pixels."""
-        return QSize(500, 300)
+        """Override minimumSizeHint to return a minimum size of 800x400 pixels."""
+        return QSize(self.min_width, self.min_height)
 
     def clear_all(self):
         for label in self.images:
