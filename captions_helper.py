@@ -245,10 +245,21 @@ class ImageDropWidget(QWidget):
         self.captions_io.setText("")
 
     def remove_item(self, label):
+        was_selected = False
+        if self.current_label == label:
+            was_selected = True
+
         self.images.remove(label)
         self.grid_layout.removeWidget(label)
         label.deleteLater()
         self.update_grid_layout()
+
+        # Clear captions_io and reset frame color if the removed label was currently selected
+        if was_selected:
+            self.current_label = None
+            self.captions_io.setText("")
+            for img in self.images:
+                img.set_unselected_frame_color()
 
     def ensure_txt_file_exists(self, txt_path):
         if not os.path.exists(txt_path):
