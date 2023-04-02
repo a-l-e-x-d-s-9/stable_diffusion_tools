@@ -45,6 +45,7 @@ class ImageLabel(QLabel):
             elif sys.platform.startswith('darwin'):
                 os.system(f"open '{self.path}'")
 
+
 class ImageDropWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -57,7 +58,7 @@ class ImageDropWidget(QWidget):
         self.setAcceptDrops(True)
         self.last_preview = None
         self.resize_timer = QTimer()
-        self.resize_timer.timeout.connect( self.resize_done )
+        self.resize_timer.timeout.connect(self.resize_done)
 
         # Create horizontal layout
         self.h_layout = QHBoxLayout(self)
@@ -110,7 +111,6 @@ class ImageDropWidget(QWidget):
         self.comma_place_input = QSpinBox(self)
         self.bottom_layout.addWidget(self.comma_place_input)
 
-
         # Add captions button
         self.add_captions_button = QPushButton("Add to all", self)
         self.bottom_layout.addWidget(self.add_captions_button)
@@ -119,8 +119,6 @@ class ImageDropWidget(QWidget):
         self.clear_button = QPushButton("Clear Images", self)
         self.bottom_layout.addWidget(self.clear_button)
         self.clear_button.clicked.connect(self.clear_all)
-
-
 
         # Captions layout
         self.captions_layout = QHBoxLayout()
@@ -148,13 +146,11 @@ class ImageDropWidget(QWidget):
         # Preview label
         self.preview_label = QLabel(self)
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumSize( self.min_width // 2, self.min_height - 10)
+        self.preview_label.setMinimumSize(int(self.min_width // 3), int(self.min_height - 10))
         self.preview_label.setFrameShape(QFrame.Box)
         self.preview_label.setFrameShadow(QFrame.Sunken)
         self.preview_label.setStyleSheet("background-color: #ffffff;")
         self.preview_layout.addWidget(self.preview_label, stretch=2)
-
-
 
         self.images = []
         self.resize(self.min_width, self.min_height)
@@ -185,7 +181,8 @@ class ImageDropWidget(QWidget):
             if path.endswith('.jpg') or path.endswith('.png'):
                 if path not in [label.path for label in self.images]:
                     pixmap = QPixmap(path)
-                    pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height, aspectRatioMode=Qt.KeepAspectRatio)
+                    pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
+                                           aspectRatioMode=Qt.KeepAspectRatio)
                     label = ImageLabel(self)
                     label.path = path
                     label.setPixmap(pixmap)
@@ -204,7 +201,6 @@ class ImageDropWidget(QWidget):
                     print(f"{path} already exists in the widget!")
         else:
             event.ignore()
-
 
     def add_captions(self):
         caption_text = self.caption_input.text()
@@ -230,8 +226,6 @@ class ImageDropWidget(QWidget):
 
             captions.insert(comma_place, caption_text)
 
-
-
             with open(txt_path, 'w') as txt_file:
                 txt_file.write(','.join(captions))
 
@@ -242,7 +236,7 @@ class ImageDropWidget(QWidget):
 
     def update_grid_layout(self):
         window_size = self.size()
-        items_in_grid_line = max(1, int(window_size.width() / (self.grid_item_width + self.grid_spacing)))
+        items_in_grid_line = max(1, int(window_size.width() * 0.666 / (self.grid_item_width + self.grid_spacing)))
 
         for i, label in enumerate(self.images):
             label.setMinimumSize(self.grid_item_width, self.grid_item_height)
@@ -289,7 +283,6 @@ class ImageDropWidget(QWidget):
             with open(txt_path, 'w') as txt_file:
                 pass  # Create an empty txt file if it doesn't exist
 
-
     def update_preview_clear(self):
         self.resize_timer.stop()
         self.last_preview = None
@@ -302,13 +295,15 @@ class ImageDropWidget(QWidget):
         self.last_preview = label
         self.preview_label.setPixmap(pixmap)
 
-
     def update_preview_simple(self):
         if (None != self.last_preview):
-            pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio, transformMode=Qt.SmoothTransformation)
+            pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio,
+                                                       transformMode=Qt.SmoothTransformation)
             pixmap = pixmap.scaledToHeight(self.preview_label.height())
 
             self.preview_label.setPixmap(pixmap)
+            self.preview_label.setMinimumSize(int(self.window().size().width() // 3),
+                                              int(self.window().size().height() - 10))
             self.resize_timer.stop()
             self.resize_timer.setInterval(500)
             self.resize_timer.setSingleShot(True)
@@ -320,7 +315,6 @@ class ImageDropWidget(QWidget):
             # print("resize_done")
 
             self.update_preview_with_image_resize(self.last_preview)
-
 
     def on_image_clicked(self, label):
         if self.current_label is not None and self.captions_io.property("text_modified"):
@@ -368,6 +362,7 @@ class ImageDropWidget(QWidget):
 
             self.captions_io.setProperty("text_modified", False)
             self.captions_io.setStyleSheet("")
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
