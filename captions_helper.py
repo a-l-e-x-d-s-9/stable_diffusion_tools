@@ -36,6 +36,14 @@ class ImageLabel(QLabel):
             self.parent().parent().parent().parent().on_image_clicked(self)
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        if self.path:
+            if sys.platform.startswith('linux'):
+                os.system(f"xdg-open '{self.path}'")
+            elif sys.platform.startswith('win'):
+                os.system(f"start '{self.path}'")
+            elif sys.platform.startswith('darwin'):
+                os.system(f"open '{self.path}'")
 
 class ImageDropWidget(QWidget):
     def __init__(self, parent=None):
