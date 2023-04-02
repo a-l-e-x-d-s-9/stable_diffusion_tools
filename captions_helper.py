@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLa
                              QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame, QTextEdit,
                              QScrollArea, QMessageBox)
 from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette
-from PyQt5.QtCore import Qt, QSize, QPoint
+from PyQt5.QtCore import Qt, QSize, QPoint, QTimer
 
 
 class ImageLabel(QLabel):
@@ -55,10 +55,20 @@ class ImageDropWidget(QWidget):
         self.min_width = 800
         self.min_height = 400
         self.setAcceptDrops(True)
+        self.last_preview = None
+        self.resize_timer = QTimer()
+        self.resize_timer.timeout.connect( self.resize_done )
+
+        # Create horizontal layout
+        self.h_layout = QHBoxLayout(self)
 
         # Main layout
-        self.main_layout = QVBoxLayout(self)
-        self.setLayout(self.main_layout)
+        self.main_layout = QVBoxLayout()
+        self.preview_layout = QVBoxLayout()
+
+        self.h_layout.addLayout(self.main_layout)
+        self.h_layout.addLayout(self.preview_layout)
+        self.setLayout(self.h_layout)
 
         # Grid layout
         self.grid_layout = QGridLayout()
@@ -134,6 +144,17 @@ class ImageDropWidget(QWidget):
         self.save_captions_button = QPushButton("Save caption", self)
         self.captions_layout.addWidget(self.save_captions_button)
         self.save_captions_button.clicked.connect(self.save_captions)
+
+        # Preview label
+        self.preview_label = QLabel(self)
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setMinimumSize( self.min_width // 2, self.min_height - 10)
+        self.preview_label.setFrameShape(QFrame.Box)
+        self.preview_label.setFrameShadow(QFrame.Sunken)
+        self.preview_label.setStyleSheet("background-color: #ffffff;")
+        self.preview_layout.addWidget(self.preview_label, stretch=2)
+
+
 
         self.images = []
         self.resize(self.min_width, self.min_height)
@@ -216,6 +237,7 @@ class ImageDropWidget(QWidget):
 
     def resizeEvent(self, event):
         self.update_grid_layout()
+        self.update_preview_simple()
         super().resizeEvent(event)
 
     def update_grid_layout(self):
@@ -256,6 +278,7 @@ class ImageDropWidget(QWidget):
 
         # Clear captions_io and reset frame color if the removed label was currently selected
         if was_selected:
+            self.update_preview_clear()
             self.current_label = None
             self.captions_io.setText("")
             for img in self.images:
@@ -265,6 +288,39 @@ class ImageDropWidget(QWidget):
         if not os.path.exists(txt_path):
             with open(txt_path, 'w') as txt_file:
                 pass  # Create an empty txt file if it doesn't exist
+
+
+    def update_preview_clear(self):
+        self.resize_timer.stop()
+        self.last_preview = None
+        self.preview_label.setPixmap(QPixmap())
+
+    def update_preview_with_image_resize(self, label):
+
+        pixmap = QPixmap(label.path)
+        pixmap = pixmap.scaledToHeight(self.preview_label.height())
+        self.last_preview = label
+        self.preview_label.setPixmap(pixmap)
+
+
+    def update_preview_simple(self):
+        if (None != self.last_preview):
+            pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio, transformMode=Qt.SmoothTransformation)
+            pixmap = pixmap.scaledToHeight(self.preview_label.height())
+
+            self.preview_label.setPixmap(pixmap)
+            self.resize_timer.stop()
+            self.resize_timer.setInterval(500)
+            self.resize_timer.setSingleShot(True)
+            self.resize_timer.start()
+
+    def resize_done(self):
+        self.resize_timer.stop()
+        if (None != self.last_preview):
+            # print("resize_done")
+
+            self.update_preview_with_image_resize(self.last_preview)
+
 
     def on_image_clicked(self, label):
         if self.current_label is not None and self.captions_io.property("text_modified"):
@@ -296,6 +352,8 @@ class ImageDropWidget(QWidget):
 
         self.captions_io.setProperty("text_modified", False)
         self.captions_io.setStyleSheet("")
+
+        self.update_preview_with_image_resize(label)
 
     def on_captions_io_text_changed(self):
         self.captions_io.setProperty("text_modified", True)
