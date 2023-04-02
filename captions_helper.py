@@ -1,5 +1,5 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QGridLayout
+from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QSpinBox
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt, QSize
 
@@ -14,9 +14,47 @@ class ImageDropWidget(QWidget):
         self.min_width = 500
         self.min_height = 300
         self.setAcceptDrops(True)
-        self.grid_layout = QGridLayout(self)
+
+        # Main layout
+        self.main_layout = QVBoxLayout(self)
+        self.setLayout(self.main_layout)
+
+        # Grid layout
+        self.grid_layout = QGridLayout()
         self.grid_layout.setSpacing(self.grid_spacing)
         self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.main_layout.addLayout(self.grid_layout)
+
+        # Bottom layout
+        self.bottom_layout = QHBoxLayout()
+        self.bottom_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.main_layout.addLayout(self.bottom_layout)
+
+        # Add caption label
+        self.caption_label = QLabel("Add caption", self)
+        self.bottom_layout.addWidget(self.caption_label)
+
+        # Add caption text input
+        self.caption_input = QLineEdit(self)
+        self.bottom_layout.addWidget(self.caption_input)
+
+        # Add comma place input
+        self.comma_place_input = QSpinBox(self)
+        self.bottom_layout.addWidget(self.comma_place_input)
+
+        # Add captions button
+        self.add_captions_button = QPushButton("Add captions", self)
+        self.bottom_layout.addWidget(self.add_captions_button)
+
+        # Captions layout
+        self.captions_layout = QHBoxLayout()
+        self.captions_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.main_layout.addLayout(self.captions_layout)
+
+        # Add captions text input/output
+        self.captions_io = QLineEdit(self)
+        self.captions_layout.addWidget(self.captions_io)
+
         self.images = []
         self.resize(self.min_width, self.min_height)
         self.setMinimumSize(self.min_width, self.min_height)
@@ -28,6 +66,7 @@ class ImageDropWidget(QWidget):
             event.ignore()
 
     def dropEvent(self, event):
+        print(f"dropEvent, urls len: {len(event.mimeData().urls())}")
         for url in event.mimeData().urls():
             path = url.toLocalFile()
             if path.endswith('.jpg') or path.endswith('.png'):
@@ -37,9 +76,9 @@ class ImageDropWidget(QWidget):
                     label = QLabel(self)
                     label.path = path
                     label.setPixmap(pixmap)
+
                     self.images.append(label)
                     self.update_grid_layout()
-                    break
                 else:
                     print(f"{path} already exists in the widget!")
         else:
