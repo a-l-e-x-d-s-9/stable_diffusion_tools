@@ -146,7 +146,7 @@ class ImageDropWidget(QWidget):
         # Preview label
         self.preview_label = QLabel(self)
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumSize(int(self.min_width // 3), int(self.min_height - 10))
+        self.preview_label.setMinimumSize(int(self.min_width // 3), int(self.min_height - 20))
         self.preview_label.setFrameShape(QFrame.Box)
         self.preview_label.setFrameShadow(QFrame.Sunken)
         self.preview_label.setStyleSheet("background-color: #ffffff;")
@@ -288,23 +288,46 @@ class ImageDropWidget(QWidget):
         self.last_preview = None
         self.preview_label.setPixmap(QPixmap())
 
+    def  reserved_for_preview_size(self) -> QPoint:
+        window_size = self.size()
+        return QPoint(int(window_size.width() // 3), int(window_size.height() - 20))
+
+    def update_preview_image_size(self, pixmap) -> QPixmap:
+        reserved_for_preview = self.reserved_for_preview_size()
+
+        preview_aspect_ratio = reserved_for_preview.x() / reserved_for_preview.y()
+        image_aspect_ratio = pixmap.width() / pixmap.height()
+
+        if image_aspect_ratio > preview_aspect_ratio:
+            # Image is wider compared to the preview area, so scale based on width
+            new_width = reserved_for_preview.x()
+            new_height = int(new_width / image_aspect_ratio)
+        else:
+            # Image is taller compared to the preview area, so scale based on height
+            new_height = reserved_for_preview.y()
+            new_width = int(new_height * image_aspect_ratio)
+
+        return pixmap.scaledToHeight(int(new_height), Qt.SmoothTransformation)  # self.preview_label.height()
 
     def update_preview_with_image_resize(self, label):
         pixmap = QPixmap(label.path)
 
         # pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio,
         #                                            transformMode=Qt.SmoothTransformation)
-        pixmap = pixmap.scaledToHeight(int(self.preview_label.height()), Qt.SmoothTransformation)
-
         # pixmap = pixmap.scaledToHeight(self.preview_label.height(), Qt.SmoothTransformation)
         self.last_preview = label
+
+        pixmap = self.update_preview_image_size(pixmap)
+
         self.preview_label.setPixmap(pixmap)
 
     def update_preview_simple(self):
         if (None != self.last_preview):
             pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio,
                                                        transformMode=Qt.SmoothTransformation)
-            pixmap = pixmap.scaledToHeight(int(self.preview_label.height()), Qt.SmoothTransformation)
+            # pixmap = pixmap.scaledToHeight(int(self.preview_label.height()), Qt.SmoothTransformation)
+
+            pixmap = self.update_preview_image_size(pixmap)
 
             self.preview_label.setPixmap(pixmap)
             self.preview_label.setMinimumSize(int(self.window().size().width() // 3),
