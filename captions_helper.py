@@ -236,7 +236,7 @@ class ImageDropWidget(QWidget):
 
     def update_grid_layout(self):
         window_size = self.size()
-        items_in_grid_line = max(1, int(window_size.width() * 0.666 / (self.grid_item_width + self.grid_spacing)))
+        items_in_grid_line = max(1, int((window_size.width() - self.preview_label.size().width()) / (self.grid_item_width + self.grid_spacing)))
 
         for i, label in enumerate(self.images):
             label.setMinimumSize(self.grid_item_width, self.grid_item_height)
@@ -288,10 +288,15 @@ class ImageDropWidget(QWidget):
         self.last_preview = None
         self.preview_label.setPixmap(QPixmap())
 
-    def update_preview_with_image_resize(self, label):
 
+    def update_preview_with_image_resize(self, label):
         pixmap = QPixmap(label.path)
-        pixmap = pixmap.scaledToHeight(self.preview_label.height())
+
+        # pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio,
+        #                                            transformMode=Qt.SmoothTransformation)
+        pixmap = pixmap.scaledToHeight(int(self.preview_label.height()), Qt.SmoothTransformation)
+
+        # pixmap = pixmap.scaledToHeight(self.preview_label.height(), Qt.SmoothTransformation)
         self.last_preview = label
         self.preview_label.setPixmap(pixmap)
 
@@ -299,7 +304,7 @@ class ImageDropWidget(QWidget):
         if (None != self.last_preview):
             pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio,
                                                        transformMode=Qt.SmoothTransformation)
-            pixmap = pixmap.scaledToHeight(self.preview_label.height())
+            pixmap = pixmap.scaledToHeight(int(self.preview_label.height()), Qt.SmoothTransformation)
 
             self.preview_label.setPixmap(pixmap)
             self.preview_label.setMinimumSize(int(self.window().size().width() // 3),
