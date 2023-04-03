@@ -257,6 +257,7 @@ class ImageDropWidget(QWidget):
             self.grid_layout.removeWidget(label)
             label.deleteLater()
         self.images.clear()
+        self.update_preview_clear()
 
         self.captions_io.setText("")
 
@@ -322,7 +323,7 @@ class ImageDropWidget(QWidget):
         self.preview_label.setPixmap(pixmap)
 
     def update_preview_simple(self):
-        if (None != self.last_preview):
+        if (None != self.last_preview) and (None != self.last_preview.pixmap()):
             pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio,
                                                        transformMode=Qt.SmoothTransformation)
             # pixmap = pixmap.scaledToHeight(int(self.preview_label.height()), Qt.SmoothTransformation)
