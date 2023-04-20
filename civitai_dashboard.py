@@ -7,6 +7,7 @@ import dash
 from dash import dcc
 from dash import html
 from dash.dependencies import Input, Output
+import argparse
 
 DB_NAME = "downloads.db"
 
@@ -57,7 +58,6 @@ def extract_download_data(data):
     return download_data
 
 
-username = 'alexds9'
 page = 1
 limit = 10
 download_data = []
@@ -121,6 +121,18 @@ app.layout = html.Div([
         ],
         value=60
     ),
+    html.Label('Pull from server every:'),
+    dcc.Dropdown(
+        id='pull-interval-dropdown',
+        options=[
+            {'label': '10 sec', 'value': 10},
+            {'label': '30 sec', 'value': 30},
+            {'label': '1 min', 'value': 60},
+            {'label': '5 min', 'value': 300},
+            {'label': '30 min', 'value': 1800},
+        ],
+        value=60
+    ),
     dcc.Graph(id='downloads-graph'),
     dcc.Interval(
         id='interval-component',
@@ -128,6 +140,8 @@ app.layout = html.Div([
         n_intervals=0
     )
 ])
+
+
 
 @app.callback(Output('downloads-graph', 'figure'), [Input('interval-component', 'n_intervals'), Input('timeframe-dropdown', 'value')])
 def update_graph(n, timeframe):
@@ -138,6 +152,16 @@ def update_graph(n, timeframe):
     fig = px.bar(df, x='model_name', y='downloads', title=f'Download Count per Model for Last {timeframe} Minutes')
     fig.update_layout(xaxis_tickangle=-45)
     return fig
+
+@app.callback(Output('interval-component', 'interval'), [Input('pull-interval-dropdown', 'value')])
+def update_pull_interval(pull_interval):
+    return pull_interval * 1000  # Convert to milliseconds
+
+# Parse the command-line arguments
+parser = argparse.ArgumentParser(description='CivitAI Dashboard')
+parser.add_argument('--username', type=str, required=True, help='The username to fetch data for')
+args = parser.parse_args()
+username = args.username
 
 if __name__ == '__main__':
     app.run_server(debug=True)
