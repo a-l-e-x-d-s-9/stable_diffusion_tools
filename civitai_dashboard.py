@@ -8,8 +8,19 @@ from dash import dcc
 from dash import html
 from dash.dependencies import Input, Output
 import argparse
+import time
+import threading
 
 DB_NAME = "downloads.db"
+
+# Parse the command-line arguments
+parser = argparse.ArgumentParser(description='CivitAI Dashboard')
+parser.add_argument('--username', type=str, required=True, help='The username to fetch data for')
+parser.add_argument('--pull-interval', type=int, default=60, help='The interval in seconds to fetch data from the server')
+args = parser.parse_args()
+username = args.username
+pull_interval = args.pull_interval
+
 
 # Initialize the database
 def init_db():
@@ -64,25 +75,27 @@ download_data = []
 
 
 # Fetch data from the database for a specific time frame
-def get_downloads_for_timeframe(timeframe_minutes):
+def get_downloads_for_timeframe(timeframe_minutes, interval_minutes):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     time_threshold = datetime.datetime.now() - datetime.timedelta(minutes=timeframe_minutes)
+    interval_seconds = interval_minutes * 60
     cur.execute("""
-    SELECT model_name, MAX(download_count) - MIN(download_count) as downloads
+    SELECT model_name,
+           (strftime('%s', timestamp) / ?) * ? AS interval_time,
+           MAX(download_count) - MIN(download_count) as downloads
     FROM downloads
     WHERE timestamp >= ?
-    GROUP BY model_id, model_name
-    """, (time_threshold,))
+    GROUP BY model_id, model_name, interval_time
+    """, (interval_seconds, interval_seconds, time_threshold))
     data = cur.fetchall()
     conn.close()
     return data
 
 
 
-
 # Pull and store data every minute
-def pull_and_store_data(username):
+def pull_and_store_data(username, sleep_interval):
     page = 1
     limit = 100
 
@@ -95,6 +108,7 @@ def pull_and_store_data(username):
             page += 1
         else:
             break
+        time.sleep(sleep_interval)
 
 
 conn = init_db()
@@ -104,6 +118,12 @@ conn = init_db()
 app = dash.Dash(__name__)
 
 app.layout = html.Div([
+    html.Label('Username:'),
+    dcc.Input(id='username-input', value=username, type='text'),
+    html.Button('Update Username', id='username-update-button', n_clicks=0),
+    dcc.Store(id='current-username', data=username),
+    html.Br(),
+    html.Br(),
     html.Label('Timeframe:'),
     dcc.Dropdown(
         id='timeframe-dropdown',
@@ -139,29 +159,51 @@ app.layout = html.Div([
         interval=60*1000,  # Update every minute
         n_intervals=0
     )
-])
+], id='main-layout')
 
 
+@app.callback(Output('downloads-graph', 'figure'),
+              [Input('interval-component', 'n_intervals'),
+               Input('timeframe-dropdown', 'value'),
+               Input('pull-interval-dropdown', 'value'),
+               Input('current-username', 'data')])
+def update_graph(n, timeframe, interval, current_username):
+    data = get_downloads_for_timeframe(timeframe, interval)
+    df = pd.DataFrame(data, columns=['model_name', 'interval_time', 'downloads'])
+    df['interval_time'] = pd.to_datetime(df['interval_time'], unit='s')
 
-@app.callback(Output('downloads-graph', 'figure'), [Input('interval-component', 'n_intervals'), Input('timeframe-dropdown', 'value')])
-def update_graph(n, timeframe):
-    pull_and_store_data(username)
-    data = get_downloads_for_timeframe(timeframe)
-    df = pd.DataFrame(data, columns=['model_name', 'downloads'])
-
-    fig = px.bar(df, x='model_name', y='downloads', title=f'Download Count per Model for Last {timeframe} Minutes')
-    fig.update_layout(xaxis_tickangle=-45)
+    fig = px.line(df, x='interval_time', y='downloads', color='model_name',
+                  title=f'Download Count per Model for Last {timeframe} Minutes',
+                  labels={'interval_time': 'Time', 'downloads': 'Downloads'})
+    fig.update_traces(mode='markers+lines', marker=dict(size=10))  # Adjust marker size here
     return fig
+
+@app.callback(Output('current-username', 'data'),
+              [Input('username-update-button', 'n_clicks')],
+              [dash.dependencies.State('username-input', 'value'),
+               dash.dependencies.State('pull-interval-dropdown', 'value')])
+def update_data_fetching_thread(n_clicks, username, pull_interval):
+    if n_clicks > 0:
+        start_data_fetching_thread(username, pull_interval)
+    return username
+
+def start_data_fetching_thread(username, pull_interval):
+    thread = threading.Thread(target=pull_and_store_data, args=(username, pull_interval))
+    thread.daemon = True
+    thread.start()
 
 @app.callback(Output('interval-component', 'interval'), [Input('pull-interval-dropdown', 'value')])
 def update_pull_interval(pull_interval):
     return pull_interval * 1000  # Convert to milliseconds
 
-# Parse the command-line arguments
-parser = argparse.ArgumentParser(description='CivitAI Dashboard')
-parser.add_argument('--username', type=str, required=True, help='The username to fetch data for')
-args = parser.parse_args()
-username = args.username
+
+def set_initial_pull_interval(app, pull_interval):
+    app.layout['pull-interval-dropdown'].value = pull_interval
+
+
+
 
 if __name__ == '__main__':
+    set_initial_pull_interval(app, pull_interval)
+    start_data_fetching_thread(username, pull_interval)
     app.run_server(debug=True)
