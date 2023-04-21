@@ -27,6 +27,13 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS models (
+        id INTEGER PRIMARY KEY,
+        model_name TEXT NOT NULL,
+        username TEXT NOT NULL
+    );
+    """)
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS downloads (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         model_id INTEGER NOT NULL,
@@ -38,17 +45,20 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 # Store data in the database
-def store_data_in_db(download_data):
+def store_data_in_db(download_data, username):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     for item in download_data:
+        cur.execute("INSERT OR IGNORE INTO models (id, model_name, username) VALUES (?, ?, ?)", (item['id'], item['name'], username))
         cur.execute("""
         INSERT INTO downloads (model_id, model_name, download_count, timestamp)
         VALUES (?, ?, ?, ?)
         """, (item['id'], item['name'], item['download_count'], datetime.datetime.now()))
     conn.commit()
     conn.close()
+
 
 # Fetch models for a user
 def get_models_for_user(username, page=1, limit=100):
@@ -75,40 +85,46 @@ download_data = []
 
 
 # Fetch data from the database for a specific time frame
-def get_downloads_for_timeframe(timeframe_minutes, interval_minutes):
+def get_downloads_for_timeframe(timeframe_minutes, interval_minutes, username):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     time_threshold = datetime.datetime.now() - datetime.timedelta(minutes=timeframe_minutes)
     interval_seconds = interval_minutes * 60
     cur.execute("""
-    SELECT model_name,
-           (strftime('%s', timestamp) / ?) * ? AS interval_time,
-           MAX(download_count) - MIN(download_count) as downloads
-    FROM downloads
-    WHERE timestamp >= ?
-    GROUP BY model_id, model_name, interval_time
-    """, (interval_seconds, interval_seconds, time_threshold))
+    SELECT d.model_name,
+           (strftime('%s', d.timestamp) / ?) * ? AS interval_time,
+           MAX(d.download_count) - MIN(d.download_count) as downloads
+    FROM downloads d
+    JOIN models m ON d.model_id = m.id
+    WHERE d.timestamp >= ? AND m.username = ?
+    GROUP BY d.model_id, d.model_name, interval_time
+    """, (interval_seconds, interval_seconds, time_threshold, username))
     data = cur.fetchall()
     conn.close()
     return data
 
 
 
+
 # Pull and store data every minute
 def pull_and_store_data(username, sleep_interval):
-    page = 1
-    limit = 100
-
     while True:
-        data = get_models_for_user(username, page, limit)
-        download_data = extract_download_data(data)
-        store_data_in_db(download_data)
+        page = 1
+        limit = 100
+        has_more_data = True
 
-        if 'nextPage' in data['metadata']:
-            page += 1
-        else:
-            break
+        while has_more_data:
+            data = get_models_for_user(username, page, limit)
+            download_data = extract_download_data(data)
+            store_data_in_db(download_data, username)
+
+            if 'nextPage' in data['metadata']:
+                page += 1
+            else:
+                has_more_data = False
+
         time.sleep(sleep_interval)
+
 
 
 conn = init_db()
@@ -168,7 +184,7 @@ app.layout = html.Div([
                Input('pull-interval-dropdown', 'value'),
                Input('current-username', 'data')])
 def update_graph(n, timeframe, interval, current_username):
-    data = get_downloads_for_timeframe(timeframe, interval)
+    data = get_downloads_for_timeframe(timeframe, interval, current_username)
     df = pd.DataFrame(data, columns=['model_name', 'interval_time', 'downloads'])
     df['interval_time'] = pd.to_datetime(df['interval_time'], unit='s')
 
@@ -177,6 +193,7 @@ def update_graph(n, timeframe, interval, current_username):
                   labels={'interval_time': 'Time', 'downloads': 'Downloads'})
     fig.update_traces(mode='markers+lines', marker=dict(size=10))  # Adjust marker size here
     return fig
+
 
 @app.callback(Output('current-username', 'data'),
               [Input('username-update-button', 'n_clicks')],
