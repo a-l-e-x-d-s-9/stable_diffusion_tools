@@ -127,6 +127,7 @@ def pull_and_store_data(username, sleep_interval):
 
 
 
+
 conn = init_db()
 
 
@@ -134,6 +135,7 @@ conn = init_db()
 app = dash.Dash(__name__)
 
 app.layout = html.Div([
+    dcc.Store(id='last-update-timestamp', data=datetime.datetime.now().isoformat()),
     html.Label('Username:'),
     dcc.Input(id='username-input', value=username, type='text'),
     html.Button('Update Username', id='username-update-button', n_clicks=0),
@@ -182,8 +184,9 @@ app.layout = html.Div([
               [Input('interval-component', 'n_intervals'),
                Input('timeframe-dropdown', 'value'),
                Input('pull-interval-dropdown', 'value'),
-               Input('current-username', 'data')])
-def update_graph(n, timeframe, interval, current_username):
+               Input('current-username', 'data'),
+               Input('last-update-timestamp', 'data')])
+def update_graph(n, timeframe, interval, current_username, last_update_timestamp):
     data = get_downloads_for_timeframe(timeframe, interval, current_username)
     df = pd.DataFrame(data, columns=['model_name', 'interval_time', 'downloads'])
     df['interval_time'] = pd.to_datetime(df['interval_time'], unit='s')
@@ -203,6 +206,11 @@ def update_data_fetching_thread(n_clicks, username, pull_interval):
     if n_clicks > 0:
         start_data_fetching_thread(username, pull_interval)
     return username
+
+@app.callback(Output('last-update-timestamp', 'data'),
+              [Input('interval-component', 'n_intervals')])
+def update_last_update_timestamp(n_intervals):
+    return datetime.datetime.now().isoformat()
 
 def start_data_fetching_thread(username, pull_interval):
     thread = threading.Thread(target=pull_and_store_data, args=(username, pull_interval))
