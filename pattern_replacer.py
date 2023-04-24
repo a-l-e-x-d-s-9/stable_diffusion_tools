@@ -38,6 +38,16 @@ def update_window_size():
     num_rows = len(regex_replacements) + 1
     window.geometry(f"800x{base_height + num_rows * row_height}")
 
+def validate_regex(event, entry_widget=None):
+    if entry_widget is None:
+        entry_widget = event.widget
+
+    try:
+        re.compile(entry_widget.get())
+        entry_widget.configure(bg="#98FB98")  # Light green
+    except re.error:
+        entry_widget.configure(bg="#F08080")  # Light coral (a soft red shade)
+
 
 def add_regex_pair(pattern="", replacement=""):
     row_index = len(regex_replacements) + 2
@@ -51,6 +61,9 @@ def add_regex_pair(pattern="", replacement=""):
     pattern_entry.grid(row=row_index, column=0, padx=5, pady=5)
     replacement_entry.grid(row=row_index, column=1, padx=5, pady=5)
     remove_pair_button.grid(row=row_index, column=2, padx=5, pady=5)
+
+    pattern_entry.bind('<KeyRelease>', validate_regex)  # Bind the validate_regex function to the KeyRelease event
+    validate_regex(tk.Event(), pattern_entry)  # Call the validate_regex function to set the initial background color
 
     regex_replacements.append((pattern_entry, replacement_entry, remove_pair_button))
     update_window_size()
@@ -100,9 +113,19 @@ def load_memory():
 
 
 def schedule_memory_save():
-    save_memory()
-    threading.Timer(60, schedule_memory_save).start()
+    global stop_event
+    if not stop_event.is_set():
+        save_memory()
+        stop_event.wait(60)  # Wait for 60 seconds or until the stop_event is set
+        schedule_memory_save()
 
+def close_window():
+    global stop_event
+    save_memory()
+    stop_event.set()  # Set the stop_event to stop the schedule_memory_save function
+    window.destroy()
+
+stop_event = threading.Event()
 
 undo_stack = []
 regex_replacements = []
@@ -124,7 +147,11 @@ add_pair_button = tk.Button(window, text="Add Pair", command=add_regex_pair)
 add_pair_button.grid(row=1000, column=0, padx=5, pady=5)
 
 load_memory()
-schedule_memory_save()
 
-window.protocol("WM_DELETE_WINDOW", lambda: (save_memory(), window.destroy()))
+window.protocol("WM_DELETE_WINDOW", close_window)
+
+# Run schedule_memory_save in a separate thread
+save_memory_thread = threading.Thread(target=schedule_memory_save)
+save_memory_thread.start()
+
 window.mainloop()
