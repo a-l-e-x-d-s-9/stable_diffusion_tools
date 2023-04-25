@@ -1,1 +1,4 @@
 /pattern_replacer_memory.json
+/venv/
+/downloads.db
+/.idea/*
