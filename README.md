@@ -93,7 +93,7 @@ pip install -r requirements.txt
 ### Features:
 1. Images sort into folders by aspect ratio of the image.
 
-[Civitai Download](civitai_download.py)
+## [Civitai Download](civitai_download.py)
 ### TODO:
 1. Download by model URL or model name.
 ### Features:
