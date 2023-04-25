@@ -1,7 +1,7 @@
 # Setup
 ## Create requirements:
 ``` python
-pipreqs .
+p ipreqs .
 ```
 
 ## Install  requirements:
@@ -10,7 +10,21 @@ pip install -r requirements.txt
 ```
 
 # My articles:
-##  
+* [Can we identify most Stable Diffusion Model issues with just a few circles?](https://www.reddit.com/r/StableDiffusion/comments/12u6c76/can_we_identify_most_stable_diffusion_model/?utm_source=share&utm_medium=web2x&context=3)
+* [Stable Diffusion 2.1 - What is a woman? NSFW Models comparison, no. 1.](https://www.reddit.com/r/unstable_diffusion/comments/zg27jv/stable_diffusion_21_what_is_a_woman_nsfw_models/?utm_source=share&utm_medium=web2x&context=3)
+* [Stable Diffusion 2.1 - What is a woman? NSFW Models comparison, no. 2.](https://www.reddit.com/r/unstable_diffusion/comments/zg73ba/stable_diffusion_21_what_is_a_woman_nsfw_models/?utm_source=share&utm_medium=web2x&context=3)
+* [Stable Diffusion 2.1 - What is a woman? NSFW Models comparison, no. 3.](https://www.reddit.com/r/unstable_diffusion/comments/zg8cd7/stable_diffusion_21_what_is_a_woman_nsfw_models/?utm_source=share&utm_medium=web2x&context=3)
+* [Stable Diffusion 2.1 - What is a woman? NSFW Models comparison, no. 4.](https://www.reddit.com/r/unstable_diffusion/comments/zg971f/stable_diffusion_21_what_is_a_woman_nsfw_models/?utm_source=share&utm_medium=web2x&context=3)
+* [SD 2.1 Hands - are they better?](https://www.reddit.com/r/StableDiffusion/comments/zfel6y/sd_21_hands_are_they_better/?utm_source=share&utm_medium=web2x&context=3)
+* [Only Hands, comparison of 23 models](https://www.reddit.com/r/StableDiffusion/comments/ze2ooc/stable_hands_hands_comparison_in_23_models/?utm_source=share&utm_medium=web2x&context=3)
+* [Only Hands, comparison of 23 models, no. 2](https://www.reddit.com/r/StableDiffusion/comments/zez6y3/only_hands_comparison_of_23_models_no_2/?utm_source=share&utm_medium=web2x&context=3)
+* [What is your favorite model?](https://www.reddit.com/r/StableDiffusion/comments/za1bj2/what_is_your_favorite_model/?utm_source=share&utm_medium=web2x&context=3)
+
+# My Stable Diffusion Models:
+* [Babes](https://civitai.com/models/2220/babes)
+* [Babes Kissable Lips
+](https://civitai.com/models/26566/babes-kissable-lips)
+* [Sexy Toons feat. Pipa](https://civitai.com/models/35549/sexy-toons-feat-pipa)
 
 # Scripts:
 
@@ -26,7 +40,7 @@ pip install -r requirements.txt
 ### Features:
 1. Replace multiple patterns at text.
 2. Add/remove couples of regex and replacement string.
-3. Save/load automatically state to file.
+3. Save/load automatically the state to file.
 ![Pattern Replacer Preview](readme_files/pattern_replacer_preview_01.png)
 
 ## [Civitai Dashboard](civitai_dashboard.py)
@@ -35,7 +49,7 @@ pip install -r requirements.txt
 ### Features:
 1. Pull models of user with Civitai API.
 2. Plot all models on graph with corresponding downloads per model.
-3. Data pulled periodically and save to local database.
+3. Data pulled periodically and saved to local database.
 ![Civitai Dashboard Preview](readme_files/civitai_dasboard_preview_01.png)
 
 ## [File Downloader](file_downloader.py)
@@ -79,3 +93,9 @@ pip install -r requirements.txt
 ### Features:
 1. Images sort into folders by aspect ratio of the image.
 
+[Civitai Download](civitai_download.py)
+### TODO:
+1. Download by model URL or model name.
+### Features:
+1. Download model from Civitai using list and configuration in the file: [download_config.json](download_config.json).
+2. Can download multiple models at same time.

@@ -1,0 +1,34 @@
+{
+  "urls": [
+    "https://civitai.com/api/download/models/46846?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/15640?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/29460?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/48569?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/43888?type=Model&format=PickleTensor",
+    "https://civitai.com/api/download/models/24196?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/34559?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/46829?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/33482?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/48996?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/43825?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/43970?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/15460?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/49690?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/40968?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/42584?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/27821?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/33974?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/42561?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/11925?type=Pruned%20Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/34070?type=Pruned%20Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/12996?type=Model&format=SafeTensor",
+    "https://civitai.com/api/download/models/48174?type=Model&format=SafeTensor"
+  ],
+  "output_directory": "./",
+  "timeout": 20,
+  "retries": 5,
+  "min_file_size_gb": 1.5,
+  "max_workers": 4,
+  "log_file": "download_log.txt"
+}
+
