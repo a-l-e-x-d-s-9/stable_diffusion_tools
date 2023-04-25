@@ -1,7 +1,7 @@
 # Setup
 ## Create requirements:
 ``` python
-p ipreqs .
+pipreqs .
 ```
 
 ## Install  requirements:
