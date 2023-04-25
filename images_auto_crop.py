@@ -43,7 +43,7 @@ def crop_image(image_path: str, crop_params: ImageCropParams) -> bool:
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Flip images horizontally.')
+    parser = argparse.ArgumentParser(description='Crop images by size from each side.')
     parser.add_argument('folder_path', type=str, help='Path to folder containing images.')
     parser.add_argument('--crop_left_px', type=int, help='Crop pixels from left.')
     parser.add_argument('--crop_top_px', type=int, help='Crop pixels from top.')

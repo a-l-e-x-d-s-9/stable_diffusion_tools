@@ -14,7 +14,7 @@ def replace_all():
     try:
         text = text_input.get(1.0, tk.END)
         undo_stack.append(text)
-        for pattern_entry, replacement_entry in regex_replacements:
+        for pattern_entry, replacement_entry, _ in regex_replacements:  # Add an underscore to unpack the third value
             pattern = pattern_entry.get()
             replacement = replacement_entry.get()
             text = re.sub(pattern, replacement, text)
@@ -23,6 +23,7 @@ def replace_all():
     except re.error:
         messagebox.showerror("Error", "Invalid regular expression")
         undo()
+
 
 
 def undo():

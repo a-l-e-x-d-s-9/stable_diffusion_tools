@@ -58,7 +58,7 @@ def convert_image(image_path, target_directory, max_resolution, min_resolution):
             
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Resize images in a directory.')
+    parser = argparse.ArgumentParser(description='Resize images in a directory and filter by size.')
     parser.add_argument('source_path', type=str, help='Path to folder with source images.')
     parser.add_argument('target_path', type=str, help='Path to folder for output images.')
     parser.add_argument('--min_resolution', type=int, default=128, help='Minimum resolution of images.')

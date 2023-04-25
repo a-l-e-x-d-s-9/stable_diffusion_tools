@@ -10,6 +10,7 @@ from dash.dependencies import Input, Output
 import argparse
 import time
 import threading
+import json
 
 DB_NAME = "downloads.db"
 
@@ -61,10 +62,22 @@ def store_data_in_db(download_data, username):
 
 
 # Fetch models for a user
-def get_models_for_user(username, page=1, limit=100):
+def get_models_for_user(username, page=1, limit=20):
     base_url = 'https://civitai.com/api/v1/models'
     response = requests.get(f'{base_url}?username={username}&page={page}&limit={limit}')
-    return response.json()
+
+    # Check if the response status is OK (200)
+    if response.status_code == 200:
+        try:
+            return response.json()
+        except json.JSONDecodeError:
+            print("Error: Invalid JSON response")
+            print(response.content)
+            return {}
+    else:
+        print(f"Error: Request failed with status code {response.status_code}")
+        print(response.content)
+        return {}
 
 # Extract download data for models
 def extract_download_data(data):

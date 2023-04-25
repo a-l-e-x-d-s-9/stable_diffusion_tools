@@ -33,7 +33,7 @@ def sort_images_by_ratio(image_path: str) -> bool :
             
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Flip images horizontally.')
+    parser = argparse.ArgumentParser(description='Images sort into folders by aspect ration of image.')
     parser.add_argument('folder_path', type=str, help='Path to folder containing images.')
     args = parser.parse_args()
     

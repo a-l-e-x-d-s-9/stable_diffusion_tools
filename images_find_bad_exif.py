@@ -55,7 +55,7 @@ def check_image_integrity(file_path, is_remove_exif):
 
 if __name__ == "__main__":
     
-    parser = argparse.ArgumentParser(description='Flip images horizontally.')
+    parser = argparse.ArgumentParser(description='Check exif data can be read, and allow to remove exif from images with problematic exif.')
     parser.add_argument('folder_path', type=str, help='Path to folder containing images.')
     parser.add_argument('--remove_exif', action='store_true', default=False,
                         help='Try to remove exif.')

@@ -35,7 +35,7 @@ def image_rename(image_path: str, file_prefix: str):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Flip images horizontally.')
+    parser = argparse.ArgumentParser(description='Rename files in folder, use a pattern.')
     parser.add_argument('folder_path', type=str, help='Path to folder containing images.')
     parser.add_argument('--prefix', type=str, help='prefix for images')
     args = parser.parse_args()
