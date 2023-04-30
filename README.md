@@ -99,3 +99,9 @@ pip install -r requirements.txt
 ### Features:
 1. Download model from Civitai using list and configuration in the file: [download_config.json](download_config.json).
 2. Can download multiple models at same time.
+
+## [Exif Extract](exif_script.py)
+### TODO:
+1. Fix export to file wrong encoding.
+### Features:
+1. Print Exif info to screen.
