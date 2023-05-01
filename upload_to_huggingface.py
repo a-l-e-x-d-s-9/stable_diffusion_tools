@@ -3,9 +3,11 @@ import hashlib
 import os
 from huggingface_hub import HfApi
 from tqdm import tqdm
+import io
 
-class TqdmFileReader:
+class TqdmFileReader(io.BufferedIOBase):
     def __init__(self, file):
+        super().__init__()
         self.file = file
         self.progress_bar = tqdm(total=os.path.getsize(file.name), unit="B", unit_scale=True)
 
@@ -17,7 +19,6 @@ class TqdmFileReader:
     def close(self):
         self.progress_bar.close()
         self.file.close()
-
 
 def get_args():
     parser = argparse.ArgumentParser(description="Upload files to Hugging Face")
