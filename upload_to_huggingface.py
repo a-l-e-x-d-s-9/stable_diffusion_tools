@@ -16,9 +16,17 @@ class TqdmFileReader(io.BufferedIOBase):
         self.progress_bar.update(len(data))
         return data
 
+    def seek(self, offset, whence=io.SEEK_SET):
+        result = self.file.seek(offset, whence)
+        return result
+
+    def tell(self):
+        return self.file.tell()
+
     def close(self):
         self.progress_bar.close()
         self.file.close()
+
 
 def get_args():
     parser = argparse.ArgumentParser(description="Upload files to Hugging Face")
