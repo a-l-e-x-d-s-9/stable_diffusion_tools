@@ -1,6 +1,6 @@
 import argparse
-import glob
 import hashlib
+import os
 from huggingface_hub import HfApi
 
 def get_args():
@@ -20,6 +20,7 @@ def upload_files(args):
     max_attempts = 3
 
     for filepath in args.files:
+        filename = os.path.basename(filepath)  # Extract file name from path
         readable_hash = ""
 
         with open(filepath, "rb") as f:
@@ -29,22 +30,23 @@ def upload_files(args):
 
         for attempt in range(1, max_attempts + 1):
             try:
-                print(f"Attempt {attempt}: Uploading to HF: huggingface.co/{repo_id}/{args.path}/{filepath}, sha256: {readable_hash}")
+                path_in_repo = os.path.join(args.path, filename)  # Use os.path.join to avoid double slashes
+                print(f"Attempt {attempt}: Uploading to HF: huggingface.co/{repo_id}/{path_in_repo}, sha256: {readable_hash}")
                 response = api.upload_file(
                     path_or_fileobj=filepath,
-                    path_in_repo=f"{args.path}/{filepath}",
+                    path_in_repo=path_in_repo,
                     repo_id=repo_id,
                     repo_type=None,
                     token=token,
                     create_pr=1,
                 )
                 print(response)
-                print(f"Upload successful for {filepath}")
+                print(f"Upload successful for {filename}")
                 break
             except Exception as e:
-                print(f"Error uploading {filepath}: {e}")
+                print(f"Error uploading {filename}: {e}")
                 if attempt == max_attempts:
-                    print(f"Failed to upload {filepath} after {max_attempts} attempts")
+                    print(f"Failed to upload {filename} after {max_attempts} attempts")
 
     print("DONE")
     print("Go to your repo and accept the PRs this created to see your files")
@@ -55,5 +57,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 # ./upload_to_huggingface.py file1.txt file2.txt "your_username/your_repository" "path_in_repository" "token_file.txt"
