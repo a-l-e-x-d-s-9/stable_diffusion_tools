@@ -49,7 +49,7 @@ def upload_files(args):
                 path_in_repo = os.path.join(args.path, filename)  # Use os.path.join to avoid double slashes
                 print(f"Attempt {attempt}: Uploading to HF: huggingface.co/{repo_id}/{path_in_repo}, sha256: {readable_hash}")
 
-                with open(ckpt, "rb") as file:
+                with open(filepath, "rb") as file:
                     tqdm_file = TqdmFileReader(file)
 
                     response = api.upload_file(
