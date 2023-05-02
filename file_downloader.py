@@ -11,18 +11,14 @@ parser.add_argument('--folder', metavar='FOLDER', type=str, help='the path to th
 # Define a function to download a file
 def download_file(url, folder):
     try:
-        # Get the file name from the URL
         file_name = os.path.basename(url)
-        # Create the full path to save the file
         file_path = os.path.join(folder, file_name)
-        # Check if the file already exists
+
         if os.path.exists(file_path):
-            #print(f"{file_name} already exists, skipping download.")
-            None
+            return "skipped"
         else:
-            # Download the file
             urllib.request.urlretrieve(url, file_path)
-            #print(f"{file_name} downloaded successfully.")
+            return "downloaded"
 
     except urllib.error.HTTPError as e:
         print(f"HTTP error ({e.code}): {e.reason} - {url}")
@@ -30,7 +26,6 @@ def download_file(url, folder):
         print(f"URL error: {e.reason} - {url}")
     except Exception as e:
         print(f"Error downloading {url}: {e}")
-
 
 # Parse the command line arguments
 args = parser.parse_args()
@@ -40,25 +35,26 @@ if not os.path.isdir(args.folder):
     exit()
 
 try:
-    # Open the file of URLs
-
-
     with open(args.file, 'r') as url_file:
         urls = url_file.read().splitlines()
         total = len(urls)
         counter = 0
 
-        # Use a thread pool executor to download files in parallel
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            # Download each file in the list of URLs
-            futures = [executor.submit(download_file, url, args.folder) for url in urls]
-            # Wait for all downloads to finish
-            concurrent.futures.wait(futures)
-            counter += 1
+            futures = {executor.submit(download_file, url, args.folder): url for url in urls}
 
-            print(f'\rProcessed {counter}/{total} images.', end='', flush=True)
+            for future in concurrent.futures.as_completed(futures):
+                url = futures[future]
+                try:
+                    status = future.result()
+                    counter += 1
+                    print(f'\rProcessed {counter}/{total} images. {status} - {url}', end='', flush=True)
+                except Exception as e:
+                    print(f"Error downloading {url}: {e}")
+
+            print(f'\nFinished downloading {total} images.')
+
 except FileNotFoundError:
     print(f"Error: File {args.file} not found.")
-
 
 # Usage: python3 file_downloader.py --file urls.txt --folder downloads
