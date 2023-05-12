@@ -6,7 +6,7 @@ from PIL.PngImagePlugin import PngInfo
 def copy_metadata(src_img, tgt_img):
     try:
         src_image = Image.open(src_img)
-        src_info = src_image.info
+        src_info = src_image.text
     except Exception as e:
         print(f"Error reading metadata from {src_img}: {e}")
         return
