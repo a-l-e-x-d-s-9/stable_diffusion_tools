@@ -1,0 +1,4 @@
+{
+    "git_dir": "/path/to/your/git/repository",
+    "patches_dir": "/path/to/your/patches/directory"
+}
