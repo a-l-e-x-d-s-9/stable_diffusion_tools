@@ -73,9 +73,9 @@ def handle_operation(operation, git_dir, patches_dir, arg=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("operation", type=int, help="The operation to perform")
-    parser.add_argument("--arg", help="Additional argument for the operation")
+    parser = argparse.ArgumentParser(description='A script for managing git patches.')
+    parser.add_argument("operation", type=int, choices=list(op.value for op in Operation), help="The operation to perform. 1: Create patch (tag needed), 2: Apply patch (patch name needed), 3: Remove changes, 4: List patches")
+    parser.add_argument("--arg", help="Additional argument for the operation. Needed for create (tag) and apply (patch name) operations.")
     args = parser.parse_args()
 
     with open('git_patch_config.json') as config_file:
