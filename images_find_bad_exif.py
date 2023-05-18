@@ -28,13 +28,16 @@ def check_image_integrity(file_path, is_remove_exif):
         is_valid = True
 
     except IOError as e:
-        print(f"{file_name} cannot be opened. Error: {str(e)}, {traceback.format_exc()}")
+        #print(f"{file_name} cannot be opened. Error: {str(e)}, {traceback.format_exc()}")
         is_failed_to_read_exif = True
     except Exception as e:
-        print(f"Error occurred while processing {file_name}. Error: {str(e)}, {traceback.format_exc()}")
+        #print(f"Error occurred while processing {file_name}. Error: {str(e)}, {traceback.format_exc()}")
         is_failed_to_read_exif = True
 
-    if (True == is_failed_to_read_exif) and is_remove_exif:
+    if (True == is_failed_to_read_exif) and (False == is_remove_exif):
+        print(f'Found problem with exif in file: {file_name}')
+
+    if (True == is_failed_to_read_exif) and (True == is_remove_exif):
         try:
             img = Image.open(open(file_path, 'rb'))
 
@@ -49,7 +52,7 @@ def check_image_integrity(file_path, is_remove_exif):
             is_valid = True
 
         except Exception as e:
-            print(f"Error occurred while truing remove exif for: {file_name}. Error: {str(e)}, {traceback.format_exc()}")
+            print(f"Error occurred while trying to remove exif for: {file_name}. Error: {str(e)}, {traceback.format_exc()}")
 
     return is_valid
 
