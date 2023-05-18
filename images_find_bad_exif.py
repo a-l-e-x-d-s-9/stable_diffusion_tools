@@ -7,7 +7,7 @@ from PIL import Image
 from random import random
 
 
-def check_image_integrity(file_path, is_remove_exif):
+def check_image_integrity(file_path, is_remove_bad_exif):
     #image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff']
 
     #for file_name in os.listdir(folder_path):
@@ -35,10 +35,10 @@ def check_image_integrity(file_path, is_remove_exif):
         #print(f"Error occurred while processing {file_name}. Error: {str(e)}, {traceback.format_exc()}")
         is_failed_to_read_exif = True
 
-    if (True == is_failed_to_read_exif) and (False == is_remove_exif):
+    if (True == is_failed_to_read_exif) and (False == is_remove_bad_exif):
         print(f'Found problem with exif in file: {file_name}')
 
-    if (True == is_failed_to_read_exif) and (True == is_remove_exif):
+    if (True == is_failed_to_read_exif) and (True == is_remove_bad_exif):
         try:
             img = Image.open(open(file_path, 'rb'))
 
@@ -62,14 +62,14 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Check exif data can be read, and allow to remove exif from images with problematic exif.')
     parser.add_argument('folder_path', type=str, help='Path to folder containing images.')
-    parser.add_argument('--remove_exif', action='store_true', default=False,
-                        help='Try to remove exif.')
+    parser.add_argument('--remove_bad_exif', action='store_true', default=False,
+                        help='Remove bad exif.')
 
 
     args = parser.parse_args()
 
     folder_path = args.folder_path
-    is_remove_exif = args.remove_exif
+    is_remove_bad_exif = args.remove_bad_exif
 
 
     count_all = 0
@@ -84,7 +84,7 @@ if __name__ == "__main__":
             count_all += 1
             file_is_image = file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff'))
             if file_is_image:
-                is_valid, is_exif_removed = check_image_integrity( file_path, is_remove_exif )
+                is_valid, is_exif_removed = check_image_integrity( file_path, is_remove_bad_exif )
 
                 if is_exif_removed == is_valid:
                     count_invalid += 1
