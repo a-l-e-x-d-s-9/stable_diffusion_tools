@@ -58,6 +58,7 @@
         button.style.width = '100%'; // Increase button width
         button.style.height = '50px'; // Increase button height
         button.style.fontSize = '20px'; // Increase font size
+        button.style.opacity = '0.7'; // Make button half transparent
         button.className = 'add-to-list-button';
 
         linkElement.parentNode.insertBefore(button, linkElement.nextSibling);
@@ -94,6 +95,7 @@
         removeButton.style.width = '50px'; // Button size
         removeButton.style.height = '50px'; // Button size
         removeButton.style.fontSize = '20px'; // Increase font size
+        removeButton.style.opacity = '0.7'; // Make button half transparent
         removeButton.className = 'remove-from-list-button';
 
         var linkElement = article.getElementsByTagName('a')[0];
