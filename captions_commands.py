@@ -5,6 +5,9 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 import glob
+from PIL import Image
+from io import BytesIO
+
 
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
 LOG_FORMAT = "%(asctime)s — %(levelname)s — %(message)s"
@@ -42,13 +45,22 @@ def validate_input(path: str, tag: str = None) -> None:
 
 def read_file(file_path: str) -> List[str]:
     validate_input(file_path)
-    with open(file_path, 'r') as file:
-        return file.read().split(', ')
+    try:
+        with open(file_path, 'r') as file:
+            return file.read().split(', ')
+    except (IOError, PermissionError) as e:
+        logging.error(f"Unable to read file {file_path}: {str(e)}")
+        raise
 
 def write_file(file_path: str, tags: List[str]) -> None:
     validate_input(file_path)
-    with open(file_path, 'w') as file:
-        file.write(', '.join(tags))
+    try:
+        with open(file_path, 'w') as file:
+            file.write(', '.join(tags))
+    except (IOError, PermissionError) as e:
+        logging.error(f"Unable to write to file {file_path}: {str(e)}")
+        raise
+
 
 def get_subject_folders(root_folder: str) -> List[str]:
     validate_input(root_folder)
@@ -97,8 +109,13 @@ def move_to_validation(root_folder: str, from_folder: str) -> None:
         image_files = [os.path.join(from_folder_path, file) for file in os.listdir(from_folder_path) if file.endswith(tuple(IMAGE_EXTENSIONS))]
         random_image_file = random.choice(image_files)
         caption_file = random_image_file.replace(from_folder, 'validation').replace(os.path.splitext(random_image_file)[-1], '.txt')
-        os.rename(random_image_file, random_image_file.replace(from_folder, 'validation'))
-        os.rename(caption_file, caption_file.replace(from_folder, 'validation'))
+        try:
+            os.rename(random_image_file, random_image_file.replace(from_folder, 'validation'))
+            os.rename(caption_file, caption_file.replace(from_folder, 'validation'))
+        except (IOError, PermissionError) as e:
+            logging.error(f"Unable to move files: {str(e)}")
+            raise
+
 
 def search_for_tags(root_folder, tag, output_file, threads=10):
     results = []
@@ -135,42 +152,91 @@ def statistic_for_subject(subject_folder, output_file):
         for tag, count in tag_counter.most_common():
             file.write(f"{tag}: {count}\n")
 
+def check_image_validity_and_size(file_path: str, min_size: int, max_size: int) -> str:
+    try:
+        with open(file_path, 'rb') as file:
+            img = Image.open(BytesIO(file.read()))
+            img.verify()
+            width, height = img.size
+            if width * height < min_size**2:
+                return f"Image size below minimum: {width}x{height}"
+            if width * height > max_size**2:
+                return f"Image size above maximum: {width}x{height}"
+    except Exception as e:
+        return f"Invalid image file: {str(e)}"
+    return None
+
+def check_caption_validity(file_path: str, min_tags: int) -> str:
+    try:
+        tags = read_file(file_path)
+        if len(tags) < min_tags:
+            return f"Number of tags in caption below minimum: {len(tags)}"
+    except Exception as e:
+        return f"Invalid caption file: {str(e)}"
+    return None
+
+def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, min_tags: int, threads: int) -> List[Tuple[str, str]]:
+    errors = []
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        subject_folders = get_subject_folders(root_folder)
+        for subject_folder in subject_folders:
+            caption_files = get_caption_files(subject_folder)
+            for caption_file in caption_files:
+                image_file = caption_file[:-4] + '.jpg'  # assuming all images are .jpg files
+                image_error = executor.submit(check_image_validity_and_size, image_file, min_size, max_size)
+                caption_error = executor.submit(check_caption_validity, caption_file, min_tags)
+                if image_error.result():
+                    errors.append((image_file, image_error.result()))
+                if caption_error.result():
+                    errors.append((caption_file, caption_error.result()))
+    return errors
+
+def check_images_and_captions(root_folder: str, min_size: int, max_size: int, min_tags: int, output_file: str, threads: int) -> None:
+    errors = check_image_caption_pairs(root_folder, min_size, max_size, min_tags, threads)
+    with open(output_file, 'w') as file:
+        for error in errors:
+            file.write(f"{error[0]}: {error[1]}\n")
 
 
 
-def main(mode, root_folder, tag=None, start=None, stop=None, from_folder=None, output_file=None, threads=10):
-    if mode in ['search_for_tags', 'full_statistic', 'statistic_for_subject'] and output_file is None:
-        raise Exception(f"Output file must be specified for mode '{mode}'.")
 
+def main(args):
+    if args.mode in ['search_for_tags', 'full_statistic', 'statistic_for_subject'] and args.output_file is None:
+        raise Exception(f"Output file must be specified for mode '{args.mode}'.")
 
-    if mode == 'remove_tag_all':
-        with ThreadPoolExecutor(max_workers=threads) as executor:
-            for subject_folder in get_subject_folders(root_folder):
+    if args.mode == 'check_images_and_captions':
+        if args.min_size is None or args.max_size is None or args.min_tags is None:
+            raise Exception("min_size, max_size, and min_tags must be specified for 'check_images_and_captions' mode.")
+        check_images_and_captions(args.root_folder, args.min_size, args.max_size, args.min_tags, args.output_file, args.threads)
+
+    if args.mode == 'remove_tag_all':
+        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+            for subject_folder in get_subject_folders(args.root_folder):
                 for caption_file in get_caption_files(subject_folder):
-                    executor.submit(remove_tag_from_file, caption_file, tag)
-    elif mode == 'add_tag_all':
-        with ThreadPoolExecutor(max_workers=threads) as executor:
-            for subject_folder in get_subject_folders(root_folder):
+                    executor.submit(remove_tag_from_file, caption_file, args.tag)
+    elif args.mode == 'add_tag_all':
+        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+            for subject_folder in get_subject_folders(args.root_folder):
                 for caption_file in get_caption_files(subject_folder):
-                    executor.submit(add_tag_to_file, caption_file, tag, start, stop)
-    elif mode == 'add_tag_single':
-        subject_folder = os.path.join(root_folder, tag)
+                    executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.stop)
+    elif args.mode == 'add_tag_single':
+        subject_folder = os.path.join(args.root_folder, args.tag)
         validate_folder_structure(subject_folder)
-        with ThreadPoolExecutor(max_workers=threads) as executor:
+        with ThreadPoolExecutor(max_workers=args.threads) as executor:
             for caption_file in get_caption_files(subject_folder):
-                executor.submit(add_tag_to_file, caption_file, tag, start, stop)
-    elif mode == 'move_to_validation':
-        move_to_validation(root_folder, from_folder)
-    elif mode == 'search_for_tags':
-        search_for_tags(root_folder, tag, output_file, threads)
-    elif mode == 'full_statistic':
-        full_statistic(root_folder, output_file, threads)
-    elif mode == 'statistic_for_subject':
-        subject_folder = os.path.join(root_folder, tag)
+                executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.stop)
+    elif args.mode == 'move_to_validation':
+        move_to_validation(args.root_folder, args.from_folder)
+    elif args.mode == 'search_for_tags':
+        search_for_tags(args.root_folder, args.tag, args.output_file, args.threads)
+    elif args.mode == 'full_statistic':
+        full_statistic(args.root_folder, args.output_file, args.threads)
+    elif args.mode == 'statistic_for_subject':
+        subject_folder = os.path.join(args.root_folder, args.tag)
         validate_folder_structure(subject_folder)
-        statistic_for_subject(subject_folder, output_file)
+        statistic_for_subject(subject_folder, args.output_file)
     else:
-        print(f"Invalid mode: {mode}")
+        print(f"Invalid mode: {args.mode}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Script for handling captions for images.')
@@ -182,6 +248,13 @@ if __name__ == "__main__":
     parser.add_argument('-f', '--from', dest='from_folder', help='Folder from which to move images to validation.')
     parser.add_argument('-th', '--threads', type=int, default=10, help='Number of threads for parallel processing.')
     parser.add_argument('-o', '--output_file', type=str, help='Output file for search and statistic modes.')
+    parser.add_argument('-ms', '--min_size', type=int,
+                        help='Minimum size of images for check_images_and_captions mode.')
+    parser.add_argument('-ma', '--max_size', type=int,
+                        help='Maximum size of images for check_images_and_captions mode.')
+    parser.add_argument('-mt', '--min_tags', type=int,
+                        help='Minimum number of tags in captions for check_images_and_captions mode.')
+
     args = parser.parse_args()
 
-    main(args.mode, args.root, args.tag, args.start, args.stop, args.from_folder, args.output_file, args.threads)
+    main(args)
