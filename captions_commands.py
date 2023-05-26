@@ -3,24 +3,15 @@ import random
 import argparse
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import List, Tuple
 import glob
 from PIL import Image
 from io import BytesIO
-
+import traceback
 
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
 LOG_FORMAT = "%(asctime)s — %(levelname)s — %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-
-
-def read_file(file_path):
-    with open(file_path, 'r') as file:
-        content = file.read()
-    tags = content.split(",")
-    # remove leading/trailing spaces from each tag
-    tags = [tag.strip() for tag in tags]
-    return tags
 
 def get_subject_folders(root_folder):
     return [f.path for f in os.scandir(root_folder) if f.is_dir()]
@@ -52,14 +43,17 @@ def read_file(file_path: str) -> List[str]:
         logging.error(f"Unable to read file {file_path}: {str(e)}")
         raise
 
-def write_file(file_path: str, tags: List[str]) -> None:
+def write_file(file_path: str, tags: List[str], dry_run: bool = False) -> None:
     validate_input(file_path)
-    try:
-        with open(file_path, 'w') as file:
-            file.write(', '.join(tags))
-    except (IOError, PermissionError) as e:
-        logging.error(f"Unable to write to file {file_path}: {str(e)}")
-        raise
+    if dry_run:
+        logging.info(f"Dry run: Would write {tags} to {file_path}")
+    else:
+        try:
+            with open(file_path, 'w') as file:
+                file.write(', '.join(tags))
+        except (IOError, PermissionError) as e:
+            logging.error(f"Unable to write to file {file_path}: {str(e)}")
+            raise
 
 
 def get_subject_folders(root_folder: str) -> List[str]:
@@ -100,21 +94,30 @@ def add_tag_to_file(file_path: str, tag: str, start: int, stop: int) -> None:
         tags.insert(position, tag)
     write_file(file_path, tags)
 
-def move_to_validation(root_folder: str, from_folder: str) -> None:
+
+def move_to_validation(root_folder: str, from_folder: str, dry_run: bool = False) -> None:
     subject_folders = get_subject_folders(root_folder)
     for subject_folder in subject_folders:
         validate_folder_structure(subject_folder)
         from_folder_path = os.path.join(subject_folder, from_folder)
         validation_folder_path = os.path.join(subject_folder, 'validation')
-        image_files = [os.path.join(from_folder_path, file) for file in os.listdir(from_folder_path) if file.endswith(tuple(IMAGE_EXTENSIONS))]
+        image_files = [os.path.join(from_folder_path, file) for file in os.listdir(from_folder_path) if
+                       file.endswith(tuple(IMAGE_EXTENSIONS))]
         random_image_file = random.choice(image_files)
-        caption_file = random_image_file.replace(from_folder, 'validation').replace(os.path.splitext(random_image_file)[-1], '.txt')
-        try:
-            os.rename(random_image_file, random_image_file.replace(from_folder, 'validation'))
-            os.rename(caption_file, caption_file.replace(from_folder, 'validation'))
-        except (IOError, PermissionError) as e:
-            logging.error(f"Unable to move files: {str(e)}")
-            raise
+        caption_file = random_image_file.replace(from_folder, 'validation').replace(
+            os.path.splitext(random_image_file)[-1], '.txt')
+
+        if dry_run:
+            logging.info(
+                f"Dry run: Would move {random_image_file} to {random_image_file.replace(from_folder, 'validation')}")
+            logging.info(f"Dry run: Would move {caption_file} to {caption_file.replace(from_folder, 'validation')}")
+        else:
+            try:
+                os.rename(random_image_file, random_image_file.replace(from_folder, 'validation'))
+                os.rename(caption_file, caption_file.replace(from_folder, 'validation'))
+            except (IOError, PermissionError) as e:
+                logging.error(f"Unable to move files: {str(e)}")
+                raise
 
 
 def search_for_tags(root_folder, tag, output_file, threads=10):
@@ -226,7 +229,7 @@ def main(args):
             for caption_file in get_caption_files(subject_folder):
                 executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.stop)
     elif args.mode == 'move_to_validation':
-        move_to_validation(args.root_folder, args.from_folder)
+        move_to_validation(args.root_folder, args.from_folder, args.dry_run)
     elif args.mode == 'search_for_tags':
         search_for_tags(args.root_folder, args.tag, args.output_file, args.threads)
     elif args.mode == 'full_statistic':
@@ -254,7 +257,13 @@ if __name__ == "__main__":
                         help='Maximum size of images for check_images_and_captions mode.')
     parser.add_argument('-mt', '--min_tags', type=int,
                         help='Minimum number of tags in captions for check_images_and_captions mode.')
+    parser.add_argument('--dry_run', action='store_true', help='Dry run mode. No changes will be made.')
+
 
     args = parser.parse_args()
 
-    main(args)
+    try:
+        main(args)
+    except Exception as e:
+        print(f"An unexpected error occurred: {str(e)}")
+        print(traceback.format_exc())
