@@ -8,13 +8,13 @@ import glob
 from PIL import Image
 from io import BytesIO
 import traceback
+import mimetypes
 
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
+VALID_MIME_TYPES = [mimetypes.types_map[ext] for ext in IMAGE_EXTENSIONS if ext in mimetypes.types_map]
 LOG_FORMAT = "%(asctime)s — %(levelname)s — %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 
-def get_subject_folders(root_folder):
-    return [f.path for f in os.scandir(root_folder) if f.is_dir()]
 
 def get_caption_files(subject_folder):
     return glob.glob(f"{subject_folder}/*.txt")
@@ -85,6 +85,18 @@ def remove_tag_from_file(file_path: str, tag: str) -> None:
     write_file(file_path, tags)
 
 def add_tag_to_file(file_path: str, tag: str, start: int, stop: int) -> None:
+    if not os.path.exists(file_path):
+        logging.error(f"{file_path} does not exist.")
+        return
+    if not os.path.isfile(file_path):
+        logging.error(f"{file_path} is not a file.")
+        return
+    if start < 0 or stop < 0:
+        logging.error("Start and stop must be non-negative.")
+        return
+    if start > stop:
+        logging.error("Start must be less than or equal to stop.")
+        return
     tags = read_file(file_path)
     tags = clean_tags(tags)
     if tag not in tags:
@@ -92,7 +104,12 @@ def add_tag_to_file(file_path: str, tag: str, start: int, stop: int) -> None:
             stop = len(tags)
         position = random.randint(start, stop)
         tags.insert(position, tag)
-    write_file(file_path, tags)
+    try:
+        write_file(file_path, tags)
+    except (IOError, PermissionError) as e:
+        logging.error(f"Unable to write to file: {str(e)}")
+        raise
+
 
 
 def move_to_validation(root_folder: str, from_folder: str, dry_run: bool = False) -> None:
@@ -101,23 +118,39 @@ def move_to_validation(root_folder: str, from_folder: str, dry_run: bool = False
         validate_folder_structure(subject_folder)
         from_folder_path = os.path.join(subject_folder, from_folder)
         validation_folder_path = os.path.join(subject_folder, 'validation')
+        if not os.path.exists(from_folder_path) or not os.path.isdir(from_folder_path):
+            logging.error(f"{from_folder_path} does not exist or is not a directory.")
+            continue
         image_files = [os.path.join(from_folder_path, file) for file in os.listdir(from_folder_path) if
                        file.endswith(tuple(IMAGE_EXTENSIONS))]
+        if not image_files:
+            logging.error(f"No image files found in {from_folder_path}.")
+            continue
         random_image_file = random.choice(image_files)
+        validation_image_file = random_image_file.replace(from_folder, 'validation')
+        if os.path.exists(validation_image_file):
+            logging.error(f"Image file {random_image_file} already exists in validation folder.")
+            continue
         caption_file = random_image_file.replace(from_folder, 'validation').replace(
             os.path.splitext(random_image_file)[-1], '.txt')
+        validation_caption_file = caption_file.replace(from_folder, 'validation')
+        if os.path.exists(validation_caption_file):
+            logging.error(f"Caption file {caption_file} already exists in validation folder.")
+            continue
 
         if dry_run:
             logging.info(
-                f"Dry run: Would move {random_image_file} to {random_image_file.replace(from_folder, 'validation')}")
-            logging.info(f"Dry run: Would move {caption_file} to {caption_file.replace(from_folder, 'validation')}")
+                f"Dry run: Would move {random_image_file} to {validation_image_file}")
+            logging.info(f"Dry run: Would move {caption_file} to {validation_caption_file}")
         else:
             try:
-                os.rename(random_image_file, random_image_file.replace(from_folder, 'validation'))
-                os.rename(caption_file, caption_file.replace(from_folder, 'validation'))
+                os.rename(random_image_file, validation_image_file)
+                os.rename(caption_file, validation_caption_file)
             except (IOError, PermissionError) as e:
                 logging.error(f"Unable to move files: {str(e)}")
                 raise
+
+
 
 
 def search_for_tags(root_folder, tag, output_file, threads=10):
@@ -158,8 +191,12 @@ def statistic_for_subject(subject_folder, output_file):
 def check_image_validity_and_size(file_path: str, min_size: int, max_size: int) -> str:
     try:
         with open(file_path, 'rb') as file:
-            img = Image.open(BytesIO(file.read()))
+            img = Image.open(file)
             img.verify()
+
+            if Image.MIME.get(img.format) not in VALID_MIME_TYPES:
+                return f"Invalid image format: {Image.MIME.get(img.format)}"
+
             width, height = img.size
             if width * height < min_size**2:
                 return f"Image size below minimum: {width}x{height}"
@@ -185,7 +222,21 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
         for subject_folder in subject_folders:
             caption_files = get_caption_files(subject_folder)
             for caption_file in caption_files:
-                image_file = caption_file[:-4] + '.jpg'  # assuming all images are .jpg files
+                # get the file name without the extension
+                base_name = os.path.splitext(caption_file)[0]
+
+                # find the corresponding image file
+                image_file = None
+                for ext in IMAGE_EXTENSIONS:
+                    potential_image_file = base_name + ext
+                    if os.path.isfile(os.path.join(subject_folder, potential_image_file)):
+                        image_file = potential_image_file
+                        break
+
+                # if no corresponding image file was found, skip this caption file
+                if image_file is None:
+                    continue
+
                 image_error = executor.submit(check_image_validity_and_size, image_file, min_size, max_size)
                 caption_error = executor.submit(check_caption_validity, caption_file, min_tags)
                 if image_error.result():
