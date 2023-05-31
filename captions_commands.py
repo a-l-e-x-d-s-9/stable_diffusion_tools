@@ -16,6 +16,19 @@ LOG_FORMAT = "%(asctime)s — %(levelname)s — %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 
 
+def get_image_files(subject_folder):
+    # Initialize empty list to hold image file paths
+    image_files = []
+
+    # Loop over each image extension
+    for extension in IMAGE_EXTENSIONS:
+        # Use glob to find all files with the current extension in the subject folder
+        image_files += glob.glob(os.path.join(subject_folder, f"**/*{extension}"), recursive=True)
+        # Also check for uppercase versions of the extension
+        image_files += glob.glob(os.path.join(subject_folder, f"**/*{extension.upper()}"), recursive=True)
+
+    return image_files
+
 def get_caption_files(subject_folder):
     return glob.glob(f"{subject_folder}/*.txt")
 
@@ -285,32 +298,31 @@ def main(args):
     if args.mode == 'check_images_and_captions':
         if args.min_size is None or args.max_size is None or args.min_tags is None:
             raise Exception("min_size, max_size, and min_tags must be specified for 'check_images_and_captions' mode.")
-        check_images_and_captions(args.root_folder, args.min_size, args.max_size, args.min_tags, args.output_file, args.threads)
-
-    if args.mode == 'remove_tag_all':
+        check_images_and_captions(args.root, args.min_size, args.max_size, args.min_tags, args.output_file, args.threads)
+    elif args.mode == 'remove_tag_all':
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            for subject_folder in get_subject_folders(args.root_folder):
+            for subject_folder in get_subject_folders(args.root):
                 for caption_file in get_caption_files(subject_folder):
                     executor.submit(remove_tag_from_file, caption_file, args.tag)
     elif args.mode == 'add_tag_all':
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            for subject_folder in get_subject_folders(args.root_folder):
+            for subject_folder in get_subject_folders(args.root):
                 for caption_file in get_caption_files(subject_folder):
                     executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.stop, args.dry_run)
     elif args.mode == 'add_tag_single':
-        subject_folder = os.path.join(args.root_folder, args.tag)
+        subject_folder = os.path.join(args.root, args.tag)
         validate_folder_structure(subject_folder)
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
             for caption_file in get_caption_files(subject_folder):
                 executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.stop, args.dry_run)
     elif args.mode == 'move_to_validation':
-        move_to_validation(args.root_folder, args.from_folder, args.dry_run)
+        move_to_validation(args.root, args.from_folder, args.dry_run)
     elif args.mode == 'search_for_tags':
-        search_for_tags(args.root_folder, args.tag, args.output_file, args.threads)
+        search_for_tags(args.root, args.tag, args.output_file, args.threads)
     elif args.mode == 'full_statistic':
-        full_statistic(args.root_folder, args.output_file, args.threads)
+        full_statistic(args.root, args.output_file, args.threads)
     elif args.mode == 'statistic_for_subject':
-        subject_folder = os.path.join(args.root_folder, args.tag)
+        subject_folder = os.path.join(args.root, args.tag)
         validate_folder_structure(subject_folder)
         statistic_for_subject(subject_folder, args.output_file)
     else:
@@ -318,7 +330,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Script for handling captions for images.')
-    parser.add_argument('-m', '--mode', help='Mode of operation. Options: remove_tag_all, add_tag_all, add_tag_single, move_to_validation.')
+    parser.add_argument('-m', '--mode', help='Mode of operation. Options: check_images_and_captions, remove_tag_all, add_tag_all, add_tag_single, move_to_validation, search_for_tags, full_statistic, statistic_for_subject.')
     parser.add_argument('-r', '--root', help='Root folder containing all subject folders.')
     parser.add_argument('-t', '--tag', help='Tag to add or remove.')
     parser.add_argument('-s', '--start', type=int, help='Start index for adding tag.')
@@ -326,9 +338,9 @@ if __name__ == "__main__":
     parser.add_argument('-f', '--from', dest='from_folder', help='Folder from which to move images to validation.')
     parser.add_argument('-th', '--threads', type=int, default=10, help='Number of threads for parallel processing.')
     parser.add_argument('-o', '--output_file', type=str, help='Output file for search and statistic modes.')
-    parser.add_argument('-ms', '--min_size', type=int,
+    parser.add_argument('-mm', '--min_size', type=int,
                         help='Minimum size of images for check_images_and_captions mode.')
-    parser.add_argument('-ma', '--max_size', type=int,
+    parser.add_argument('-mx', '--max_size', type=int,
                         help='Maximum size of images for check_images_and_captions mode.')
     parser.add_argument('-mt', '--min_tags', type=int,
                         help='Minimum number of tags in captions for check_images_and_captions mode.')
