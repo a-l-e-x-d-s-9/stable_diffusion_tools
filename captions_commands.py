@@ -19,13 +19,6 @@ logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 def get_caption_files(subject_folder):
     return glob.glob(f"{subject_folder}/*.txt")
 
-def validate_folder_structure(subject_folder):
-    required_subfolders = ['core', 'occasional', 'validation']
-    actual_subfolders = [f.name for f in os.scandir(subject_folder) if f.is_dir()]
-    for required_subfolder in required_subfolders:
-        if required_subfolder not in actual_subfolders:
-            raise Exception(f"Required subfolder '{required_subfolder}' is missing in '{subject_folder}'.")
-
 def validate_input(path: str, tag: str = None) -> None:
     if not os.path.exists(path):
         logging.error(f"Path {path} does not exist.")
@@ -84,7 +77,7 @@ def remove_tag_from_file(file_path: str, tag: str) -> None:
     tags = [t for t in tags if t != tag]
     write_file(file_path, tags)
 
-def add_tag_to_file(file_path: str, tag: str, start: int, stop: int) -> None:
+def add_tag_to_file(file_path: str, tag: str, start: int, stop: int, dry_run: bool=False) -> None:
     if not os.path.exists(file_path):
         logging.error(f"{file_path} does not exist.")
         return
@@ -97,6 +90,9 @@ def add_tag_to_file(file_path: str, tag: str, start: int, stop: int) -> None:
     if start > stop:
         logging.error("Start must be less than or equal to stop.")
         return
+    if tag is None or tag.strip() == '':
+        logging.error("Invalid tag. Tag must be a non-empty string.")
+        return
     tags = read_file(file_path)
     tags = clean_tags(tags)
     if tag not in tags:
@@ -104,11 +100,19 @@ def add_tag_to_file(file_path: str, tag: str, start: int, stop: int) -> None:
             stop = len(tags)
         position = random.randint(start, stop)
         tags.insert(position, tag)
-    try:
-        write_file(file_path, tags)
-    except (IOError, PermissionError) as e:
-        logging.error(f"Unable to write to file: {str(e)}")
-        raise
+        logging.info(f"Tag {tag} added at position {position}")
+    else:
+        logging.info(f"Tag {tag} already present")
+    if not dry_run:
+        try:
+            write_file(file_path, tags)
+        except (IOError, PermissionError) as e:
+            logging.error(f"Unable to write to file: {str(e)}")
+            raise
+    else:
+        logging.info("Dry run mode, no changes were made to the file.")
+
+
 
 
 
@@ -120,6 +124,9 @@ def move_to_validation(root_folder: str, from_folder: str, dry_run: bool = False
         validation_folder_path = os.path.join(subject_folder, 'validation')
         if not os.path.exists(from_folder_path) or not os.path.isdir(from_folder_path):
             logging.error(f"{from_folder_path} does not exist or is not a directory.")
+            continue
+        if not os.path.exists(validation_folder_path) or not os.path.isdir(validation_folder_path):
+            logging.error(f"{validation_folder_path} does not exist or is not a directory.")
             continue
         image_files = [os.path.join(from_folder_path, file) for file in os.listdir(from_folder_path) if
                        file.endswith(tuple(IMAGE_EXTENSIONS))]
@@ -149,6 +156,7 @@ def move_to_validation(root_folder: str, from_folder: str, dry_run: bool = False
             except (IOError, PermissionError) as e:
                 logging.error(f"Unable to move files: {str(e)}")
                 raise
+
 
 
 
@@ -221,6 +229,7 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
         subject_folders = get_subject_folders(root_folder)
         for subject_folder in subject_folders:
             caption_files = get_caption_files(subject_folder)
+            image_files = get_image_files(subject_folder)  # assumes this function exists and returns image files
             for caption_file in caption_files:
                 # get the file name without the extension
                 base_name = os.path.splitext(caption_file)[0]
@@ -229,12 +238,13 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
                 image_file = None
                 for ext in IMAGE_EXTENSIONS:
                     potential_image_file = base_name + ext
-                    if os.path.isfile(os.path.join(subject_folder, potential_image_file)):
+                    if potential_image_file in image_files:
                         image_file = potential_image_file
                         break
 
-                # if no corresponding image file was found, skip this caption file
+                # if no corresponding image file was found, add an error and skip this caption file
                 if image_file is None:
+                    errors.append((caption_file, 'No corresponding image file found'))
                     continue
 
                 image_error = executor.submit(check_image_validity_and_size, image_file, min_size, max_size)
@@ -243,14 +253,28 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
                     errors.append((image_file, image_error.result()))
                 if caption_error.result():
                     errors.append((caption_file, caption_error.result()))
+
+            for image_file in image_files:
+                # get the file name without the extension
+                base_name = os.path.splitext(image_file)[0]
+
+                # find the corresponding caption file
+                potential_caption_file = base_name + ".txt"
+                if potential_caption_file not in caption_files:
+                    errors.append((image_file, 'No corresponding caption file found'))
+
     return errors
+
 
 def check_images_and_captions(root_folder: str, min_size: int, max_size: int, min_tags: int, output_file: str, threads: int) -> None:
     errors = check_image_caption_pairs(root_folder, min_size, max_size, min_tags, threads)
-    with open(output_file, 'w') as file:
-        for error in errors:
-            file.write(f"{error[0]}: {error[1]}\n")
-
+    try:
+        with open(output_file, 'w') as file:
+            for error in errors:
+                file.write(f"{error[0]}: {error[1]}\n")
+    except (IOError, PermissionError) as e:
+        logging.error(f"Unable to open output file for writing: {str(e)}")
+        raise
 
 
 
@@ -272,13 +296,13 @@ def main(args):
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
             for subject_folder in get_subject_folders(args.root_folder):
                 for caption_file in get_caption_files(subject_folder):
-                    executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.stop)
+                    executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.stop, args.dry_run)
     elif args.mode == 'add_tag_single':
         subject_folder = os.path.join(args.root_folder, args.tag)
         validate_folder_structure(subject_folder)
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
             for caption_file in get_caption_files(subject_folder):
-                executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.stop)
+                executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.stop, args.dry_run)
     elif args.mode == 'move_to_validation':
         move_to_validation(args.root_folder, args.from_folder, args.dry_run)
     elif args.mode == 'search_for_tags':
