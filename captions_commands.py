@@ -85,10 +85,54 @@ def get_caption_files(subject_folder: str) -> List[str]:
 def clean_tags(tags: List[str]) -> List[str]:
     return list(dict.fromkeys(tags))
 
-def remove_tag_from_file(file_path: str, tag: str) -> None:
-    tags = read_file(file_path)
-    tags = [t for t in tags if t != tag]
-    write_file(file_path, tags)
+import re
+
+def is_valid_tag(tag: str) -> bool:
+    # Check if the tag is empty
+    if not tag:
+        return False
+
+    # Check if the tag starts or ends with a hyphen or underscore
+    if tag[0] in "-_" or tag[-1] in "-_":
+        return False
+
+    # Check if the tag contains consecutive hyphens or underscores
+    if "--" in tag or "__" in tag:
+        return False
+
+    return True
+
+
+def remove_tags_from_file(file_path: str, tags_to_remove: str, output_file: str, dry_run: bool = False) -> None:
+    # Convert the input string to a list of tags
+    tags_to_remove = [tag.strip() for tag in tags_to_remove.split(',') if tag.strip() and tag.strip() != "_"]
+
+    # Normalize the tags (lowercase, replace underscores with spaces)
+    tags_to_remove = [tag.lower().replace('_', ' ') for tag in tags_to_remove]
+
+    # Validate the tags to remove
+    invalid_tags = [tag for tag in tags_to_remove if not is_valid_tag(tag)]
+    if invalid_tags:
+        tags_to_remove = [tag for tag in tags_to_remove if is_valid_tag(tag)]
+        with open(output_file, 'a') as file:   # Change 'w' to 'a' to append instead of overwriting
+            file.write(f"Invalid tags in {file_path}: {', '.join(invalid_tags)}\n")
+
+    # Read the existing tags from the file
+    existing_tags = read_file(file_path)
+
+    # Normalize the existing tags
+    existing_tags = [tag.lower().strip().replace('_', ' ') for tag in existing_tags]
+
+    # Remove the specified tags from the list of existing tags
+    updated_tags = [tag for tag in existing_tags if tag not in tags_to_remove]
+
+    if not dry_run:
+        # Write the updated list of tags back to the file
+        write_file(file_path, updated_tags)
+    else:
+        with open(output_file, 'a') as file:   # Change 'w' to 'a' to append instead of overwriting
+            file.write(f"Tags to be removed from {file_path}: {', '.join(tags_to_remove)}\n")
+
 
 def add_tag_to_file(file_path: str, tag: str, start: int, stop: int, dry_run: bool=False) -> None:
     if not os.path.exists(file_path):
@@ -300,10 +344,13 @@ def main(args):
             raise Exception("min_size, max_size, and min_tags must be specified for 'check_images_and_captions' mode.")
         check_images_and_captions(args.root, args.min_size, args.max_size, args.min_tags, args.output_file, args.threads)
     elif args.mode == 'remove_tag_all':
-        with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            for subject_folder in get_subject_folders(args.root):
-                for caption_file in get_caption_files(subject_folder):
-                    executor.submit(remove_tag_from_file, caption_file, args.tag)
+        if not args.tag.strip():  # check if the tag is empty after removing leading/trailing whitespace
+            logging.error('No tag provided, skipping')
+        else:
+            with ThreadPoolExecutor(max_workers=args.threads) as executor:
+                for subject_folder in get_subject_folders(args.root):
+                    for caption_file in get_caption_files(subject_folder):
+                        executor.submit(remove_tags_from_file, caption_file, args.tag, args.output_file, args.dry_run)
     elif args.mode == 'add_tag_all':
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
             for subject_folder in get_subject_folders(args.root):
