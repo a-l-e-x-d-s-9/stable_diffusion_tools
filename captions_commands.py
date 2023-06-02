@@ -69,7 +69,7 @@ def get_subject_folders(root_folder: str) -> List[str]:
 
 def validate_folder_structure(subject_folder: str) -> None:
     validate_input(subject_folder)
-    if not all(os.path.isdir(os.path.join(subject_folder, subfolder)) for subfolder in ['core', 'occasional', 'validation']):
+    if not all(os.path.isdir(os.path.join(subject_folder, subfolder)) for subfolder in ['core', 'occasional']): # , 'validation'
         logging.error(f"Folder structure for {subject_folder} is not valid. Expected subfolders: 'core', 'occasional', 'validation'.")
         raise ValueError(f"Folder structure for {subject_folder} is not valid. Expected subfolders: 'core', 'occasional', 'validation'.")
 
@@ -355,13 +355,13 @@ def main(args):
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
             for subject_folder in get_subject_folders(args.root):
                 for caption_file in get_caption_files(subject_folder):
-                    executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.stop, args.dry_run)
+                    executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
     elif args.mode == 'add_tag_single':
-        subject_folder = os.path.join(args.root, args.tag)
+        subject_folder = os.path.join(args.root, args.sub_folder)
         validate_folder_structure(subject_folder)
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
             for caption_file in get_caption_files(subject_folder):
-                executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.stop, args.dry_run)
+                executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
     elif args.mode == 'move_to_validation':
         move_to_validation(args.root, args.from_folder, args.dry_run)
     elif args.mode == 'search_for_tags':
@@ -391,6 +391,8 @@ if __name__ == "__main__":
                         help='Maximum size of images for check_images_and_captions mode.')
     parser.add_argument('-mt', '--min_tags', type=int,
                         help='Minimum number of tags in captions for check_images_and_captions mode.')
+    parser.add_argument('-sf', '--sub_folder', type=str,
+                        help='Sub folder that used for add_tag_single.')
     parser.add_argument('--dry_run', action='store_true', help='Dry run mode. No changes will be made.')
 
 
