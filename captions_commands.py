@@ -173,49 +173,72 @@ def add_tag_to_file(file_path: str, tag: str, start: int, stop: int, dry_run: bo
 
 
 
-def move_to_validation(root_folder: str, from_folder: str, dry_run: bool = False) -> None:
+def move_to_validation(root_folder: str, from_folder: str, num_files: int, dry_run: bool = False) -> None:
     subject_folders = get_subject_folders(root_folder)
+    max_failures = 10  # Maximum number of consecutive failed attempts before giving up
+
     for subject_folder in subject_folders:
         validate_folder_structure(subject_folder)
         from_folder_path = os.path.join(subject_folder, from_folder)
         validation_folder_path = os.path.join(subject_folder, 'validation')
+
         if not os.path.exists(from_folder_path) or not os.path.isdir(from_folder_path):
             logging.error(f"{from_folder_path} does not exist or is not a directory.")
             continue
         if not os.path.exists(validation_folder_path) or not os.path.isdir(validation_folder_path):
-            logging.error(f"{validation_folder_path} does not exist or is not a directory.")
-            continue
-        image_files = [os.path.join(from_folder_path, file) for file in os.listdir(from_folder_path) if
-                       file.endswith(tuple(IMAGE_EXTENSIONS))]
-        if not image_files:
-            logging.error(f"No image files found in {from_folder_path}.")
-            continue
-        random_image_file = random.choice(image_files)
-        validation_image_file = random_image_file.replace(from_folder, 'validation')
-        if os.path.exists(validation_image_file):
-            logging.error(f"Image file {random_image_file} already exists in validation folder.")
-            continue
-        caption_file = random_image_file.replace(from_folder, 'validation').replace(
-            os.path.splitext(random_image_file)[-1], '.txt')
-        validation_caption_file = caption_file.replace(from_folder, 'validation')
-        if os.path.exists(validation_caption_file):
-            logging.error(f"Caption file {caption_file} already exists in validation folder.")
-            continue
+            logging.info(f"{validation_folder_path} does not exist or is not a directory. Creating it.")
+            if not dry_run:
+                try:
+                    os.makedirs(validation_folder_path, exist_ok=True)
+                except Exception as e:
+                    logging.error(f"Failed to create validation directory: {str(e)}")
+                    continue
 
-        if dry_run:
-            logging.info(
-                f"Dry run: Would move {random_image_file} to {validation_image_file}")
-            logging.info(f"Dry run: Would move {caption_file} to {validation_caption_file}")
-        else:
-            try:
-                os.rename(random_image_file, validation_image_file)
-                os.rename(caption_file, validation_caption_file)
-            except (IOError, PermissionError) as e:
-                logging.error(f"Unable to move files: {str(e)}")
-                raise
+        num_successes = 0  # Number of successful moves
+        num_failures = 0  # Number of consecutive failures
 
+        while num_successes < num_files and num_failures < max_failures:
+            image_files = [os.path.join(from_folder_path, file) for file in os.listdir(from_folder_path) if
+                           file.endswith(tuple(IMAGE_EXTENSIONS))]
+            if not image_files:
+                logging.error(f"No image files found in {from_folder_path}.")
+                break
+            random_image_file = random.choice(image_files)
 
+            # First generate the name of the validation image file without changing the original path
+            validation_image_file = os.path.join(validation_folder_path, os.path.basename(random_image_file))
 
+            if os.path.exists(validation_image_file):
+                logging.error(f"Image file {random_image_file} already exists in validation folder.")
+                num_failures += 1
+                continue
+
+            # Do the same for the caption file
+            caption_file = os.path.splitext(random_image_file)[0] + '.txt'
+            validation_caption_file = os.path.join(validation_folder_path, os.path.basename(caption_file))
+
+            if os.path.exists(validation_caption_file):
+                logging.error(f"Caption file {caption_file} already exists in validation folder.")
+                num_failures += 1
+                continue
+
+            if dry_run:
+                logging.info(
+                    f"Dry run: Would move {random_image_file} to {validation_image_file}")
+                logging.info(f"Dry run: Would move {caption_file} to {validation_caption_file}")
+            else:
+                try:
+                    os.rename(random_image_file, validation_image_file)
+                    os.rename(caption_file, validation_caption_file)
+                except (IOError, PermissionError) as e:
+                    logging.error(f"Unable to move files: {str(e)}")
+                    raise
+
+            num_successes += 1
+            num_failures = 0  # Reset the number of failures
+
+        if num_failures == max_failures:
+            logging.error(f"Failed to move files after {max_failures} consecutive attempts.")
 
 
 def search_for_tags(root_folder, tag, output_file, threads=10):
@@ -363,7 +386,7 @@ def main(args):
             for caption_file in get_caption_files(subject_folder):
                 executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
     elif args.mode == 'move_to_validation':
-        move_to_validation(args.root, args.from_folder, args.dry_run)
+        move_to_validation(args.root, args.from_folder, args.move_to_validation_amount, args.dry_run)
     elif args.mode == 'search_for_tags':
         search_for_tags(args.root, args.tag, args.output_file, args.threads)
     elif args.mode == 'full_statistic':
@@ -393,6 +416,8 @@ if __name__ == "__main__":
                         help='Minimum number of tags in captions for check_images_and_captions mode.')
     parser.add_argument('-sf', '--sub_folder', type=str,
                         help='Sub folder that used for add_tag_single.')
+    parser.add_argument('-vm', '--move_to_validation_amount', type=int,
+                        help='The amount of images move to validation.')
     parser.add_argument('--dry_run', action='store_true', help='Dry run mode. No changes will be made.')
 
 
