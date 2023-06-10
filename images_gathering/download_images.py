@@ -97,6 +97,6 @@ def download_image(idx, original_url):
 with open(args.input, 'r') as f:
     urls = f.read().splitlines()
 
-with ThreadPoolExecutor(max_workers=30) as executor:
+with ThreadPoolExecutor(max_workers=50) as executor:
     for idx, request_url in enumerate(urls, start=1):
         executor.submit(download_image, idx, request_url)

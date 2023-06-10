@@ -14,6 +14,7 @@
     'use strict';
 
     var clickedImages = GM_getValue("clickedImages", []);
+    var autoAddImages = GM_getValue("autoAddImages", false); // Initialize auto-add feature as disabled
 
     // Create a fixed counter element
     var counter = document.createElement('div');
@@ -38,6 +39,14 @@
         updateCounter();
     }
 
+    function addImageToList(imageUrl) {
+        if (!clickedImages.includes(imageUrl)) {
+            clickedImages.push(imageUrl);
+            GM_setValue("clickedImages", clickedImages);
+            updateCounter();
+        }
+    }
+
     function addClickListenerToImage(article) {
         var linkElement = article.getElementsByTagName('a')[0];
         var imageUrl = linkElement.href;
@@ -46,6 +55,12 @@
         if (article.querySelector('.add-to-list-button')) {
             return;
         }
+
+
+        if (autoAddImages) {
+            addImageToList(imageUrl); // Automatically add image to the list if auto-add feature is enabled
+        }
+
 
         var button = document.createElement('button');
         button.innerHTML = clickedImages.includes(imageUrl) ? 'Added' : 'Add to list';
@@ -161,4 +176,13 @@
             }
         }
     });
+
+
+    function toggleAutoAddImages() {
+        autoAddImages = !autoAddImages; // Toggle the auto-add feature
+        GM_setValue("autoAddImages", autoAddImages); // Persist the state of the auto-add feature
+    }
+
+    GM_registerMenuCommand('Toggle Auto-Add Images', toggleAutoAddImages);
+
 })();
