@@ -5,6 +5,9 @@ import re
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
+import time
+import random
+
 
 # Create an argument parser
 parser = argparse.ArgumentParser(description='Download images from Getty Images')
@@ -54,44 +57,64 @@ def extract_img_url(html_content: str, base_domain: str) -> str:
     # Return empty string if no match was found
     return ""
 
+
 def download_image(idx, original_url):
     data = {'url': original_url}
 
-    # Send the POST request
-    response = requests.post(url, headers=headers, data=data)
+    attempts_amount = 4
+    success = False  # flag to indicate whether the image download was successful
 
-    # If the POST request is successful, the status code will be 200
-    if response.status_code == 200:
-        print(f'Request was successful for URL {idx}.')
-        
-        html_content = response.content.decode('utf-8') # Convert bytes to string
-        image_file_url = extract_img_url(html_content, "https://steptodown.com/getty-images-downloader/")
+    for _ in range(attempts_amount):
+        # Send the POST request
+        response = requests.post(url, headers=headers, data=data)
 
-        # Get the filename from the image_file_url
-        file_name = os.path.join(args.output, os.path.basename(urllib.parse.urlparse(image_file_url).path))
+        # If the POST request is successful, the status code will be 200
+        if response.status_code == 200:
+            print(f'Request was successful for URL {idx}.')
 
-        # Download and save the image
-        for _ in range(2):  # try downloading twice
-            image_response = requests.get(image_file_url, stream=True)
-            if image_response.status_code == 200:
-                with open(file_name, 'wb') as file:
-                    for chunk in image_response.iter_content(chunk_size=128):
-                        file.write(chunk)
-                if os.path.getsize(file_name) > 0:  # if file is not zero size
-                    print(f'Image downloaded and saved as {file_name}')
-                    break
-                else:  # if file is zero size
-                    os.remove(file_name)  # remove the zero-sized file
-            else:
-                print('Image download failed with status code', image_response.status_code)
-        else:  # if the file is still zero-sized after two tries
-            print(f'\033[91mImage {file_name} is zero size after two attempts, moving to the next URL.\033[0m')
-            # Add the original URL to the failed URLs file
-            with file_lock:
-                with open(args.input + '_failed', 'a') as f:
-                    f.write(f'{original_url}\n')
-    else:
-        print(f'Request failed with status code {response.status_code} for URL {idx}.')
+            html_content = response.content.decode('utf-8')  # Convert bytes to string
+            image_file_url = extract_img_url(html_content, "https://steptodown.com/getty-images-downloader/")
+
+            # Get the filename from the image_file_url
+            file_name = os.path.join(args.output, os.path.basename(urllib.parse.urlparse(image_file_url).path))
+
+            # Download and save the image
+            for _ in range(attempts_amount):
+                image_response = requests.get(image_file_url, stream=True)
+                if image_response.status_code == 200:
+                    with open(file_name, 'wb') as file:
+                        for chunk in image_response.iter_content(chunk_size=128):
+                            file.write(chunk)
+                    if os.path.getsize(file_name) > 0:  # if file is not zero size
+                        print(f'Image downloaded and saved as {file_name}')
+                        success = True  # set the flag to indicate that the image download was successful
+                        break
+                    else:  # if file is zero size
+                        os.remove(file_name)  # remove the zero-sized file
+                else:
+                    print('Image download failed with status code', image_response.status_code)
+
+                # Wait before the next attempt
+                time.sleep(random.uniform(1, 4))  # wait for 1 to 4 seconds before next attempt
+
+            # if the image is successfully downloaded, break the outer loop as well
+            if success:
+                break
+            else:  # if the image is still not downloaded or zero size after attempts_amount tries
+                print( f'Image download failed or image is zero size after {attempts_amount} attempts for URL {idx}, retrying POST request.')
+        else:
+            print(f'Request failed with status code {response.status_code} for URL {idx}.')
+
+        # Wait before the next attempt
+        time.sleep(random.uniform(3, 10))  # wait for 3 to 10 seconds before next attempt
+
+    if not success:  # if the process still fails after attempts_amount tries
+        print(f'\033[91mProcess failed after {attempts_amount} attempts for URL {idx}, moving to the next URL.\033[0m')
+        # Add the original URL to the failed URLs file
+        with file_lock:
+            with open(args.input + '_failed', 'a') as f:
+                f.write(f'{original_url}\n')
+
 
 
 with open(args.input, 'r') as f:
