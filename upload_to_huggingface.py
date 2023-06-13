@@ -30,10 +30,10 @@ class TqdmFileReader(io.BufferedIOBase):
 
 def get_args():
     parser = argparse.ArgumentParser(description="Upload files to Hugging Face")
-    parser.add_argument("files", nargs="+", help="File(s) to upload")
-    parser.add_argument("repository", help="Repository on huggingface.com")
-    parser.add_argument("path", help="Path in the repository")
-    parser.add_argument("token", help="File containing your Hugging Face token")
+    parser.add_argument("--files", nargs="+", required=True, help="File(s) to upload")
+    parser.add_argument("--repository", required=True, help="Repository on huggingface.com")
+    parser.add_argument("--path", required=True, help="Path in the repository")
+    parser.add_argument("--token", required=True, help="File containing your Hugging Face token")
     return parser.parse_args()
 
 def upload_files(args):
@@ -88,5 +88,5 @@ if __name__ == "__main__":
     main()
 
 
-
-# ./upload_to_huggingface.py file1.txt file2.txt "your_username/your_repository" "path_in_repository" "token_file.txt"
+# Example Usage:
+# python upload_to_huggingface.py --files file1.txt file2.txt --repository "your_username/your_repository" --path "path_in_repository" --token "token_file.txt"
