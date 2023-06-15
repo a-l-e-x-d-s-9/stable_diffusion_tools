@@ -65,7 +65,7 @@ def handle_operation(operation, git_dir, patches_dir, arg=None):
         assert arg is not None, "Patch name is required for applying a patch"
         apply_patch(git_dir, patches_dir, arg)
     elif operation == Operation.REMOVE_CHANGES:
-        remove_changes(git_dir, patches_dir)
+        remove_changes(git_dir)
     elif operation == Operation.LIST_PATCHES:
         list_patches(patches_dir)
     else:
