@@ -170,6 +170,45 @@ def add_tag_to_file(file_path: str, tag: str, start: int, stop: int, dry_run: bo
         logging.info("Dry run mode, no changes were made to the file.")
 
 
+def tag_replace_in_file(caption_file: str, old_tag: str, new_tag: str, dry_run=False)-> None:
+    if not os.path.exists(caption_file):
+        logging.error(f"{caption_file} does not exist.")
+        return
+    if not os.path.isfile(caption_file):
+        logging.error(f"{caption_file} is not a file.")
+        return
+    if old_tag is None or old_tag.strip() == '':
+        logging.error("Invalid old tag. Old tag must be a non-empty string.")
+        return
+    if new_tag is None or new_tag.strip() == '':
+        logging.error("Invalid new tag. New tag must be a non-empty string.")
+        return
+
+    is_changed = False
+    tags_original = read_file(caption_file)
+    tags = clean_tags(tags_original)
+    is_changed = len(tags_original) != len(tags)
+
+    if old_tag in tags:
+        # Replace all occurrences of old_tag with new_tag and ensure the tag only appears once
+        tags = [new_tag if tag == old_tag else tag for tag in tags]
+        tags = list(dict.fromkeys(tags))
+
+        is_changed = True
+
+        logging.info(f"Tag {old_tag} replaced with {new_tag}")
+    else:
+        logging.info(f"Tag {old_tag} not present, no changes made")
+
+    if not dry_run:
+        try:
+            if is_changed:
+                write_file(caption_file, tags)
+        except (IOError, PermissionError) as e:
+            logging.error(f"Unable to write to file: {str(e)}")
+            raise
+    else:
+        logging.info("Dry run mode, no changes were made to the file.")
 
 
 
@@ -374,6 +413,11 @@ def main(args):
                 for subject_folder in get_subject_folders(args.root):
                     for caption_file in get_caption_files(subject_folder):
                         executor.submit(remove_tags_from_file, caption_file, args.tag, args.output_file, args.dry_run)
+    elif args.mode == 'replace_tag':
+        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+            for subject_folder in get_subject_folders(args.root):
+                for caption_file in get_caption_files(subject_folder):
+                    executor.submit(tag_replace_in_file, caption_file, args.tag, args.tag_new, args.dry_run)
     elif args.mode == 'add_tag_all':
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
             for subject_folder in get_subject_folders(args.root):
@@ -381,7 +425,7 @@ def main(args):
                     executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
     elif args.mode == 'add_tag_single':
         subject_folder = os.path.join(args.root, args.sub_folder)
-        validate_folder_structure(subject_folder)
+        #validate_folder_structure(subject_folder)
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
             for caption_file in get_caption_files(subject_folder):
                 executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
@@ -400,9 +444,10 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Script for handling captions for images.')
-    parser.add_argument('-m', '--mode', help='Mode of operation. Options: check_images_and_captions, remove_tag_all, add_tag_all, add_tag_single, move_to_validation, search_for_tags, full_statistic, statistic_for_subject.')
+    parser.add_argument('-m', '--mode', help='Mode of operation. Options: check_images_and_captions, remove_tag_all, replace_tag, add_tag_all, add_tag_single, move_to_validation, search_for_tags, full_statistic, statistic_for_subject.')
     parser.add_argument('-r', '--root', help='Root folder containing all subject folders.')
     parser.add_argument('-t', '--tag', help='Tag to add or remove.')
+    parser.add_argument('-tn', '--tag_new', help='New tag to use.')
     parser.add_argument('-s', '--start', type=int, help='Start index for adding tag.')
     parser.add_argument('-e', '--end', type=int, help='End index for adding tag.')
     parser.add_argument('-f', '--from', dest='from_folder', help='Folder from which to move images to validation.')
