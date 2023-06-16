@@ -1,9 +1,11 @@
 import argparse
 import hashlib
 import os
+import json
 from huggingface_hub import HfApi
 from tqdm import tqdm
 import io
+
 
 class TqdmFileReader(io.BufferedIOBase):
     def __init__(self, file):
@@ -30,13 +32,21 @@ class TqdmFileReader(io.BufferedIOBase):
 
 def get_args():
     parser = argparse.ArgumentParser(description="Upload files to Hugging Face")
-    parser.add_argument("--files", nargs="+", required=True, help="File(s) to upload")
+    parser.add_argument("--configurations", required=True,
+                        help="Configuration file with list of files and base directory")
     parser.add_argument("--repository", required=True, help="Repository on huggingface.com")
-    parser.add_argument("--path", required=True, help="Path in the repository")
     parser.add_argument("--token", required=True, help="File containing your Hugging Face token")
     return parser.parse_args()
 
+
 def upload_files(args):
+    # Read configurations
+    with open(args.configurations, 'r') as config_file:
+        config = json.load(config_file)
+
+    base_directory = config.get('base_directory')
+    file_list = config.get('files', [])
+
     with open(args.token, "r") as token_file:
         token = token_file.read().strip()
 
@@ -44,19 +54,21 @@ def upload_files(args):
     repo_id = args.repository
     max_attempts = 3
 
-    for filepath in args.files:
-        filename = os.path.basename(filepath)  # Extract file name from path
+    for filepath in file_list:
+        filename = os.path.basename(filepath)
         readable_hash = ""
+
+        # Compute the path in the repository by removing the base directory
+        path_in_repo = os.path.relpath(filepath, base_directory)
 
         with open(filepath, "rb") as f:
             bytes = f.read()
             readable_hash = hashlib.sha256(bytes).hexdigest()
-            print(f"# sha256: {readable_hash}")
 
         for attempt in range(1, max_attempts + 1):
             try:
-                path_in_repo = os.path.join(args.path, filename)  # Use os.path.join to avoid double slashes
-                print(f"Attempt {attempt}: Uploading to HF: huggingface.co/{repo_id}/{path_in_repo}, sha256: {readable_hash}")
+                print(
+                    f"Attempt {attempt}: Uploading to HF: huggingface.co/{repo_id}/{path_in_repo}, sha256: {readable_hash}")
 
                 with open(filepath, "rb") as file:
                     tqdm_file = TqdmFileReader(file)
@@ -67,10 +79,18 @@ def upload_files(args):
                         repo_id=repo_id,
                         repo_type=None,
                         token=token,
-                        create_pr=1,
+                        create_pr=True,
                     )
                 print(response)
-                print(f"Upload successful for {filename}")
+
+                # Check if the upload was successful
+                if response and isinstance(response, str) and response.startswith("https://"):
+                    # If upload successful, remove the file locally using the full path
+                    os.remove(filepath)
+                    print(f"File {filepath} uploaded successfully and deleted locally.")
+                else:
+                    print(f"Failed to upload file {filepath}.")
+
                 break
             except Exception as e:
                 print(f"Error uploading {filename}: {e}")
@@ -80,13 +100,14 @@ def upload_files(args):
     print("DONE")
     print("Go to your repo and accept the PRs this created to see your files")
 
+
 def main():
     args = get_args()
     upload_files(args)
 
+
 if __name__ == "__main__":
     main()
 
-
 # Example Usage:
-# python upload_to_huggingface.py --files file1.txt file2.txt --repository "your_username/your_repository" --path "path_in_repository" --token "token_file.txt"
+# python upload_to_huggingface.py --configurations "config.json" --repository "your_username/your_repository" --token "token_file.txt"

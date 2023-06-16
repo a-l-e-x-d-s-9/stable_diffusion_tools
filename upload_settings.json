@@ -1,0 +1,7 @@
+{
+    "base_directory": "/path/to/base/directory",
+    "files": [
+        "/path/to/base/directory/subdirectory1/file1.txt",
+        "/path/to/base/directory/subdirectory2/file2.txt"
+    ]
+}
