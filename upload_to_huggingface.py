@@ -36,6 +36,7 @@ def get_args():
                         help="Configuration file with list of files and base directory")
     parser.add_argument("--repository", required=True, help="Repository on huggingface.com")
     parser.add_argument("--token", required=True, help="File containing your Hugging Face token")
+    parser.add_argument("--remove", action="store_true", help="Remove files after upload")
     return parser.parse_args()
 
 
@@ -85,9 +86,12 @@ def upload_files(args):
 
                 # Check if the upload was successful
                 if response and isinstance(response, str) and response.startswith("https://"):
-                    # If upload successful, remove the file locally using the full path
-                    os.remove(filepath)
-                    print(f"File {filepath} uploaded successfully and deleted locally.")
+                    print(f"File {filepath} uploaded successfully.")
+
+                    # If remove flag is set, remove the file locally
+                    if args.remove:
+                        os.remove(filepath)
+                        print(f"File {filepath} deleted locally.")
                 else:
                     print(f"Failed to upload file {filepath}.")
 
@@ -111,3 +115,5 @@ if __name__ == "__main__":
 
 # Example Usage:
 # python upload_to_huggingface.py --configurations "config.json" --repository "your_username/your_repository" --token "token_file.txt"
+# Use --remove to remove files after upload, for example:
+# python upload_to_huggingface.py --configurations "config.json" --repository "your_username/your_repository" --token "token_file.txt" --remove
