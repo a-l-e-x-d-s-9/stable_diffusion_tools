@@ -67,6 +67,12 @@ def get_subject_folders(root_folder: str) -> List[str]:
     folders = [os.path.join(root_folder, folder) for folder in os.listdir(root_folder)]
     return [folder for folder in folders if os.path.isdir(folder)]
 
+def get_all_sub_folders(root_folder: str):
+    validate_input(root_folder)
+    folders = [os.path.join(root_folder, name) for name in os.listdir(root_folder) if os.path.isdir(os.path.join(root_folder, name))]
+    folders.append(root_folder)  # Include the root_folder itself in the list
+    return folders
+
 def validate_folder_structure(subject_folder: str) -> None:
     validate_input(subject_folder)
     if not all(os.path.isdir(os.path.join(subject_folder, subfolder)) for subfolder in ['core', 'occasional']): # , 'validation'
@@ -283,7 +289,7 @@ def move_to_validation(root_folder: str, from_folder: str, num_files: int, dry_r
 def search_for_tags(root_folder, tag, output_file, threads=10):
     results = []
     with ThreadPoolExecutor(max_workers=threads) as executor:
-        for subject_folder in get_subject_folders(root_folder):
+        for subject_folder in get_all_sub_folders(root_folder):
             for caption_file in get_caption_files(subject_folder):
                 if tag in read_file(caption_file):
                     results.append(caption_file)
@@ -297,7 +303,7 @@ from collections import Counter
 def full_statistic(root_folder, output_file, threads=10):
     tag_counter = Counter()
     with ThreadPoolExecutor(max_workers=threads) as executor:
-        for subject_folder in get_subject_folders(root_folder):
+        for subject_folder in get_all_sub_folders(root_folder):
             for caption_file in get_caption_files(subject_folder):
                 tags = read_file(caption_file)
                 tag_counter.update(tags)
@@ -337,7 +343,7 @@ def check_caption_validity(file_path: str, min_tags: int) -> str:
     try:
         tags = read_file(file_path)
         if len(tags) < min_tags:
-            return f"Number of tags in caption below minimum: {len(tags)}"
+            return f"Number of tags in caption below minimum: {len(tags)} < {min_tags}."
     except Exception as e:
         return f"Invalid caption file: {str(e)}"
     return None
@@ -345,7 +351,7 @@ def check_caption_validity(file_path: str, min_tags: int) -> str:
 def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, min_tags: int, threads: int) -> List[Tuple[str, str]]:
     errors = []
     with ThreadPoolExecutor(max_workers=threads) as executor:
-        subject_folders = get_subject_folders(root_folder)
+        subject_folders = get_all_sub_folders(root_folder)
         for subject_folder in subject_folders:
             caption_files = get_caption_files(subject_folder)
             image_files = get_image_files(subject_folder)  # assumes this function exists and returns image files
@@ -410,17 +416,17 @@ def main(args):
             logging.error('No tag provided, skipping')
         else:
             with ThreadPoolExecutor(max_workers=args.threads) as executor:
-                for subject_folder in get_subject_folders(args.root):
+                for subject_folder in get_all_sub_folders(args.root):
                     for caption_file in get_caption_files(subject_folder):
                         executor.submit(remove_tags_from_file, caption_file, args.tag, args.output_file, args.dry_run)
     elif args.mode == 'replace_tag':
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            for subject_folder in get_subject_folders(args.root):
+            for subject_folder in get_all_sub_folders(args.root):
                 for caption_file in get_caption_files(subject_folder):
                     executor.submit(tag_replace_in_file, caption_file, args.tag, args.tag_new, args.dry_run)
     elif args.mode == 'add_tag_all':
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            for subject_folder in get_subject_folders(args.root):
+            for subject_folder in get_all_sub_folders(args.root):
                 for caption_file in get_caption_files(subject_folder):
                     executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
     elif args.mode == 'add_tag_single':
