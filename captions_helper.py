@@ -5,6 +5,28 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLa
                              QScrollArea, QMessageBox)
 from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette
 from PyQt5.QtCore import Qt, QSize, QPoint, QTimer
+from PyQt5.QtWidgets import QMainWindow, QAction, QMenu, QMenuBar, QDialog, QVBoxLayout, QTextEdit, QPushButton
+
+
+class ListInputDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add List")
+        self.layout = QVBoxLayout(self)
+
+        # Textbox for user input
+        self.text_box = QTextEdit(self)
+        self.layout.addWidget(self.text_box)
+
+        # Add button
+        self.add_button = QPushButton("Add", self)
+        self.layout.addWidget(self.add_button)
+        self.add_button.clicked.connect(self.on_add_button_clicked)
+
+    def on_add_button_clicked(self):
+        text = self.text_box.toPlainText()
+        self.parent().process_list_input(text)
+        self.close()
 
 
 class ImageLabel(QLabel):
@@ -34,7 +56,16 @@ class ImageLabel(QLabel):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.parent().parent().parent().parent().on_image_clicked(self)
+
+        if event.button() == Qt.RightButton:
+            # Right button was pressed, copy image to clipboard
+            clipboard = QApplication.clipboard()
+            pixmap = self.pixmap()
+            if pixmap:
+                clipboard.setPixmap(pixmap)
+
         super().mousePressEvent(event)
+
 
     def mouseDoubleClickEvent(self, event):
         if self.path:
@@ -173,6 +204,36 @@ class ImageDropWidget(QWidget):
             event.accept()
         else:
             event.ignore()
+
+
+    def add_images_to_preview_area(self, paths):
+        # Check if paths is a list
+        if not isinstance(paths, list):
+            raise TypeError("paths must be a list")
+
+        # Loop through the image paths and add them to the preview area
+        for path in paths:
+            # You could reuse the logic in dropEvent here for adding images, or create another method
+            if path.endswith('.jpg') or path.endswith('.png'):
+                if path not in [label.path for label in self.images]:
+                    pixmap = QPixmap(path)
+                    pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
+                                           aspectRatioMode=Qt.KeepAspectRatio)
+                    label = ImageLabel(self)
+                    label.path = path
+                    label.setPixmap(pixmap)
+
+                    # Add close button to the label
+                    close_button = QPushButton("X", label)
+                    close_button.setStyleSheet("QPushButton { color: red; }")
+                    close_button.setFlat(True)
+                    close_button.setFixedSize(QSize(16, 16))
+                    close_button.clicked.connect(lambda checked, lbl=label: self.remove_item(lbl))
+
+                    self.images.append(label)
+                    self.update_grid_layout()
+                else:
+                    print(f"{path} already exists in the widget!")
 
     def dropEvent(self, event):
         print(f"dropEvent, urls len: {len(event.mimeData().urls())}")
@@ -393,8 +454,56 @@ class ImageDropWidget(QWidget):
             self.captions_io.setStyleSheet("")
 
 
+class MainWindow(QMainWindow):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.image_drop_widget = ImageDropWidget(self)
+        self.setCentralWidget(self.image_drop_widget)
+
+        # Create menu bar
+        self.menu_bar = QMenuBar(self)
+        self.setMenuBar(self.menu_bar)
+
+        # Create menu
+        self.file_menu = QMenu("File", self)
+        self.menu_bar.addMenu(self.file_menu)
+
+        # Create menu item
+        self.add_list_action = QAction("Add List", self)
+        self.file_menu.addAction(self.add_list_action)
+        self.add_list_action.triggered.connect(self.open_list_input_dialog)
+
+    def open_list_input_dialog(self):
+        self.input_dialog = ListInputDialog(self)
+        self.input_dialog.exec_()
+
+    def process_list_input(self, text):
+        lines = text.split("\n")
+        paths = []
+        for line in lines:
+            path = line.split(':')[0].strip()
+            # Processing the path and checking if it is a txt or image
+            if os.path.isfile(path):
+                if path.lower().endswith('.txt'):
+                    # Check if there is a corresponding image file
+                    dir_path, file_name = os.path.split(path)
+                    base_name, _ = os.path.splitext(file_name)
+                    for img_ext in ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'gif']:
+                        img_path = os.path.join(dir_path, base_name + '.' + img_ext)
+                        if os.path.isfile(img_path):
+                            paths.append(img_path)
+                            break
+                elif path.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.gif')):
+                    paths.append(path)
+
+        # Now, `paths` contains all the image paths that need to be added to the preview area
+        # You will need to handle the addition of images to the preview area.
+        # For example:
+        self.image_drop_widget.add_images_to_preview_area(paths)
+
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    widget = ImageDropWidget()
-    widget.show()
+    main_window = MainWindow()
+    main_window.show()
     sys.exit(app.exec_())
