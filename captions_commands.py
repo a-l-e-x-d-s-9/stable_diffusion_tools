@@ -49,6 +49,22 @@ def read_file(file_path: str) -> List[str]:
         logging.error(f"Unable to read file {file_path}: {str(e)}")
         raise
 
+def detect_and_remove_empty_tags(file_path: str) -> None:
+    validate_input(file_path)
+    try:
+        with open(file_path, 'r') as file:
+            tags = file.read().split(',')
+        # strip whitespace and filter out empty tags
+        new_tags = [tag.strip() for tag in tags if tag.strip()]
+        # only write back to the file if empty tags were removed
+        if len(tags) != len(new_tags):
+            logging.info(f"Remove empty tags from: {file_path}.")
+            with open(file_path, 'w') as file:
+                file.write(', '.join(new_tags))
+    except (IOError, PermissionError) as e:
+        logging.error(f"Unable to read or write to file {file_path}: {str(e)}")
+        raise
+
 def write_file(file_path: str, tags: List[str], dry_run: bool = False) -> None:
     validate_input(file_path)
     if dry_run:
@@ -341,6 +357,7 @@ def check_image_validity_and_size(file_path: str, min_size: int, max_size: int) 
 
 def check_caption_validity(file_path: str, min_tags: int) -> str:
     try:
+        detect_and_remove_empty_tags(file_path)
         tags = read_file(file_path)
         if len(tags) < min_tags:
             return f"Number of tags in caption below minimum: {len(tags)} < {min_tags}."
