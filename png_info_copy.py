@@ -20,6 +20,13 @@ def copy_metadata(src_img, tgt_img):
     tgt_info = PngInfo()
 
     for k, v in src_info.items():
+        if isinstance(v, str):
+            try:
+                v = v.encode("utf-8")
+            except UnicodeEncodeError:
+                # This is a placeholder for handling different encodings
+                # or logging an issue if the encoding fails
+                pass
         tgt_info.add_text(k, v)
 
     try:
