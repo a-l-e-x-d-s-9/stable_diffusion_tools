@@ -73,26 +73,27 @@ if __name__ == "__main__":
 
 
     count_all = 0
-    total = len(os.listdir(folder_path))
+    total = sum(len(files) for _, _, files in os.walk(folder_path))
     count_valid = 0
     count_invalid = 0
     count_exif_removed = 0
 
-    for file_name in os.listdir(folder_path):
-        file_path = os.path.join(folder_path, file_name)
-        if os.path.isfile(file_path):
-            count_all += 1
-            file_is_image = file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff'))
-            if file_is_image:
-                is_valid, is_exif_removed = check_image_integrity( file_path, is_remove_bad_exif )
+    for root, dirs, files in os.walk(folder_path):
+        for file_name in files:
+            file_path = os.path.join(root, file_name)
+            if os.path.isfile(file_path):
+                count_all += 1
+                file_is_image = file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff'))
+                if file_is_image:
+                    is_valid, is_exif_removed = check_image_integrity( file_path, is_remove_bad_exif )
 
-                if is_exif_removed == is_valid:
-                    count_invalid += 1
-                else:
-                    count_valid += 1
+                    if is_exif_removed == is_valid:
+                        count_invalid += 1
+                    else:
+                        count_valid += 1
 
-                if is_exif_removed:
-                    count_exif_removed += 1
-                print(f'\rProcessed {count_all}/{total} images.', end='', flush=True)
+                    if is_exif_removed:
+                        count_exif_removed += 1
+                    print(f'\rProcessed {count_all}/{total} images.', end='', flush=True)
 
     print(f'\rDone, valid: {count_valid} images, invalid: {count_invalid} images, removed exif: {count_exif_removed}.', end='', flush=True)

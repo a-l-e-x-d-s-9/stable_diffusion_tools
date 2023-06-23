@@ -337,11 +337,36 @@ def statistic_for_subject(subject_folder, output_file):
         for tag, count in tag_counter.most_common():
             file.write(f"{tag}: {count}\n")
 
-def check_image_validity_and_size(file_path: str, min_size: int, max_size: int) -> str:
+def check_image_validity_and_size_slow(file_path: str, min_size: int, max_size: int) -> str:
     try:
         with open(file_path, 'rb') as file:
             img = Image.open(file)
             img.verify()
+
+        with open(file_path, 'rb') as file:
+            img = Image.open(file)
+
+            if Image.MIME.get(img.format) not in VALID_MIME_TYPES:
+                return f"Invalid image format: {Image.MIME.get(img.format)}"
+
+            width, height = img.size
+            if width * height < min_size**2:
+                return f"Image size below minimum: {width}x{height}"
+            if width * height > max_size**2:
+                return f"Image size above maximum: {width}x{height}"
+
+            img = img.convert('RGB')
+
+    except Exception as e:
+        return f"Invalid image file: {str(e)}"
+    return None
+
+
+def check_image_validity_and_size_fast(file_path: str, min_size: int, max_size: int) -> str:
+    try:
+        with open(file_path, 'rb') as file:
+            img = Image.open(file)
+            img.load()  # This will decode the image and read it into memory
 
             if Image.MIME.get(img.format) not in VALID_MIME_TYPES:
                 return f"Invalid image format: {Image.MIME.get(img.format)}"
@@ -354,6 +379,27 @@ def check_image_validity_and_size(file_path: str, min_size: int, max_size: int) 
     except Exception as e:
         return f"Invalid image file: {str(e)}"
     return None
+
+def check_image_validity_and_size(file_path: str, min_size: int, max_size: int) -> str:
+    try:
+        with open(file_path, 'rb') as file:
+            img = Image.open(file)
+
+            if Image.MIME.get(img.format) not in VALID_MIME_TYPES:
+                return f"Invalid image format: {Image.MIME.get(img.format)}"
+
+            width, height = img.size
+            if width * height < min_size**2:
+                return f"Image size below minimum: {width}x{height}"
+            if width * height > max_size**2:
+                return f"Image size above maximum: {width}x{height}"
+
+            img.load()
+
+    except Exception as e:
+        return f"Invalid image file: {str(e)}"
+    return None
+
 
 def check_caption_validity(file_path: str, min_tags: int) -> str:
     try:
