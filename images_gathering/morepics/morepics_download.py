@@ -15,7 +15,7 @@ def download_image(image_url, target_folder, txt_content, counter):
     if os.path.exists(target_path):
         with counter.get_lock():
             counter.value += 1
-            print(f"Downloaded {counter.value} images", end="\r")
+            # print(f"Existing {counter.value} images", end="\r")
         return
 
     response = requests.get(image_url)
@@ -65,7 +65,10 @@ def main():
             txt_content = f"{modelName}, {tags}{tag_string_cleaned}"
 
             for image_url in entry["imageLinks"]:
-                executor.submit(download_image, image_url, args.folder, txt_content, counter)
+                if image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                    executor.submit(download_image, image_url, args.folder, txt_content, counter)
+                #else:
+                    #print(f"Skipping non-image URL: {image_url}")
 
 
 if __name__ == "__main__":
