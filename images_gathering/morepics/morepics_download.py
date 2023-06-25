@@ -50,7 +50,7 @@ def main():
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         for entry in data.values():
-            modelName = entry["modelName"].lower()
+            modelName = ", ".join(tag.lower() for tag in entry["modelName"])
             tags = ", ".join(tag.lower() for tag in entry["tags"])
 
             additional_tags = args.additional_tags

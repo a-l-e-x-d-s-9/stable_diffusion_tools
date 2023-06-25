@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         New Userscript
+// @name         pornpics
 // @namespace    http://tampermonkey.net/
 // @version      0.1
 // @description  try to take over the world!
@@ -11,17 +11,9 @@
 // @grant        GM_registerMenuCommand
 // ==/UserScript==
 
-// ==UserScript==
-// @name         Image Info Extractor
-// @namespace    http://tampermonkey.net/
-// @version      0.1
-// @description  Extract image info from HTML
-// @match        *://*/*
-// @grant        none
-// ==/UserScript==
-
 (function() {
     'use strict';
+
     var currentUrl = window.location.href;
     var storedData = JSON.parse(GM_getValue("storedData", "{}"));
     var autoStoreData = GM_getValue("autoStoreData", false);
@@ -55,11 +47,15 @@
         }
     }
 
+    function removeCurrentPageData() {
+        removeDataFromList(currentUrl);
+    }
+
 
     async function copyToClipboard() {
         try {
-            let dataStrings = Object.values(storedData).map(data => JSON.stringify(data, null, 2));
-            await navigator.clipboard.writeText(dataStrings.join('\n'));
+            let dataStrings = JSON.stringify(storedData, null, 2);
+            await navigator.clipboard.writeText(dataStrings);
         } catch (err) {
             console.error('Failed to copy data: ', err);
         }
@@ -73,9 +69,10 @@
 
     GM_registerMenuCommand('Copy data to Clipboard', copyToClipboard);
     GM_registerMenuCommand('Clear data', clearList);
+    GM_registerMenuCommand('Remove current page data', removeCurrentPageData);
 
     let imageLinks = [];
-    let modelName = '';
+    let modelName = [];
     let tags = [];
 
     // Collect all href from li elements with class 'thumbwook'
@@ -88,10 +85,10 @@
     let modelTitleElems = document.querySelectorAll(".gallery-info__item span.gallery-info__title");
     modelTitleElems.forEach(function(modelTitleElem) {
         if (modelTitleElem.innerText.trim() === "Models:") {
-            let modelNameElem = modelTitleElem.parentElement.querySelector(".gallery-info__content a span");
-            if (modelNameElem) {
-                modelName = modelNameElem.innerText;
-            }
+            let modelNameElems = modelTitleElem.parentElement.querySelectorAll(".gallery-info__content a span");
+            modelNameElems.forEach(function (modelNameElem) {
+                modelName.push(modelNameElem.innerText);
+            });
         }
     });
 
