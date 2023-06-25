@@ -11,6 +11,11 @@ def download_image(image_url, target_folder, txt_content, counter):
     image_name = os.path.basename(url_path)
     target_path = os.path.join(target_folder, image_name)
 
+    # Check if the file already exists
+    if os.path.exists(target_path):
+        print(f"File {image_name} already exists. Skipping download.")
+        return
+
     response = requests.get(image_url)
     response.raise_for_status()
 
@@ -34,7 +39,8 @@ def main():
     args = parser.parse_args()
 
     with open(args.data, 'r') as f:
-        data = json.load(f)
+        raw_data = json.load(f)
+        data = {key: value for key, value in raw_data.items()}
 
     os.makedirs(args.folder, exist_ok=True)
 
