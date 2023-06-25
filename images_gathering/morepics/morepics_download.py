@@ -13,7 +13,9 @@ def download_image(image_url, target_folder, txt_content, counter):
 
     # Check if the file already exists
     if os.path.exists(target_path):
-        print(f"File {image_name} already exists. Skipping download.")
+        with counter.get_lock():
+            counter.value += 1
+            print(f"Downloaded {counter.value} images", end="\r")
         return
 
     response = requests.get(image_url)
