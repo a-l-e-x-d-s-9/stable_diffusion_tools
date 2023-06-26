@@ -9,6 +9,10 @@ from PIL import Image
 from io import BytesIO
 import traceback
 import mimetypes
+from queue import Queue, Empty
+from concurrent.futures import ThreadPoolExecutor
+import os
+from threading import Lock
 
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
 VALID_MIME_TYPES = [mimetypes.types_map[ext] for ext in IMAGE_EXTENSIONS if ext in mimetypes.types_map]
@@ -411,13 +415,32 @@ def check_caption_validity(file_path: str, min_tags: int) -> str:
         return f"Invalid caption file: {str(e)}"
     return None
 
-def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, min_tags: int, threads: int) -> List[Tuple[str, str]]:
+
+from queue import Queue
+from concurrent.futures import ThreadPoolExecutor
+import os
+
+
+# Assuming get_all_sub_folders, get_caption_files, get_image_files, check_image_validity_and_size and check_caption_validity are defined
+
+def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, min_tags: int, threads: int) -> List[
+    Tuple[str, str]]:
     errors = []
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        subject_folders = get_all_sub_folders(root_folder)
-        for subject_folder in subject_folders:
+    subject_folders = iter(get_all_sub_folders(root_folder))
+    image_caption_queues = [Queue() for _ in range(threads)]
+    scan_lock = Lock()
+
+    def folder_scanner(index):
+        while True:
+            with scan_lock:
+                try:
+                    subject_folder = next(subject_folders)
+                except StopIteration:
+                    break
+
             caption_files = get_caption_files(subject_folder)
-            image_files = get_image_files(subject_folder)  # assumes this function exists and returns image files
+            image_files = get_image_files(subject_folder)
+
             for caption_file in caption_files:
                 # get the file name without the extension
                 base_name = os.path.splitext(caption_file)[0]
@@ -435,21 +458,31 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
                     errors.append((caption_file, 'No corresponding image file found'))
                     continue
 
-                image_error = executor.submit(check_image_validity_and_size, image_file, min_size, max_size)
-                caption_error = executor.submit(check_caption_validity, caption_file, min_tags)
-                if image_error.result():
-                    errors.append((image_file, image_error.result()))
-                if caption_error.result():
-                    errors.append((caption_file, caption_error.result()))
+                # add the pair to the queue
+                image_caption_queues[index].put((image_file, caption_file))
 
-            for image_file in image_files:
-                # get the file name without the extension
-                base_name = os.path.splitext(image_file)[0]
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        # scanning phase
+        for i in range(threads):
+            executor.submit(folder_scanner, i)
 
-                # find the corresponding caption file
-                potential_caption_file = base_name + ".txt"
-                if potential_caption_file not in caption_files:
-                    errors.append((image_file, 'No corresponding caption file found'))
+    def worker(queue):
+        while True:
+            try:
+                image_file, caption_file = queue.get_nowait()
+            except Empty:
+                break
+            image_error = check_image_validity_and_size(image_file, min_size, max_size)
+            caption_error = check_caption_validity(caption_file, min_tags)
+            if image_error:
+                errors.append((image_file, image_error))
+            if caption_error:
+                errors.append((caption_file, caption_error))
+
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        # checking phase
+        for q in image_caption_queues:
+            executor.submit(worker, q)
 
     return errors
 
