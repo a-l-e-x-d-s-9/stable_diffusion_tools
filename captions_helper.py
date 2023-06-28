@@ -2,7 +2,7 @@ import os
 import sys
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame, QTextEdit,
-                             QScrollArea, QMessageBox)
+                             QScrollArea, QMessageBox, QSizePolicy)
 from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette, QTransform, QImage
 from PyQt5.QtCore import Qt, QSize, QPoint, QTimer
 from PyQt5.QtWidgets import QMainWindow, QAction, QMenu, QMenuBar, QDialog, QVBoxLayout, QTextEdit, QPushButton
@@ -147,9 +147,40 @@ class ImageDropWidget(QWidget):
         self.bottom_layout.addWidget(self.add_captions_button)
         self.add_captions_button.clicked.connect(self.add_captions)  # Connect the button to the add_captions method
 
-        self.clear_button = QPushButton("Clear Images", self)
-        self.bottom_layout.addWidget(self.clear_button)
-        self.clear_button.clicked.connect(self.clear_all)
+
+        # Horizontal line
+        self.line = QFrame(self)
+        self.line.setFrameShape(QFrame.HLine)
+        self.line.setFrameShadow(QFrame.Sunken)
+        self.main_layout.addWidget(self.line)
+
+        # Bottom layout for remove
+        self.bottom_layout_remove = QHBoxLayout()
+        self.bottom_layout_remove.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.main_layout.addLayout(self.bottom_layout_remove)
+
+        # Remove caption label
+        self.remove_caption_label = QLabel("Remove caption for all:", self)
+        self.bottom_layout_remove.addWidget(self.remove_caption_label)
+
+        # Remove caption text input
+        self.remove_caption_input = QLineEdit(self)
+        self.remove_caption_input.setPlaceholderText("Remove caption to all shown images")
+        self.bottom_layout_remove.addWidget(self.remove_caption_input)
+
+        # Remove captions button
+        self.remove_captions_button = QPushButton("Remove from all", self)
+        self.bottom_layout_remove.addWidget(self.remove_captions_button)
+        self.remove_captions_button.clicked.connect(self.remove_captions)  # Connect the button to the add_captions method
+
+
+        # Horizontal line
+        self.line = QFrame(self)
+        self.line.setFrameShape(QFrame.HLine)
+        self.line.setFrameShadow(QFrame.Sunken)
+        self.main_layout.addWidget(self.line)
+
+
 
         # Captions layout
         self.captions_layout = QHBoxLayout()
@@ -173,6 +204,20 @@ class ImageDropWidget(QWidget):
         self.save_captions_button = QPushButton("Save caption", self)
         self.captions_layout.addWidget(self.save_captions_button)
         self.save_captions_button.clicked.connect(self.save_captions)
+
+        # Horizontal line
+        self.line = QFrame(self)
+        self.line.setFrameShape(QFrame.HLine)
+        self.line.setFrameShadow(QFrame.Sunken)
+        self.main_layout.addWidget(self.line)
+
+        # Clear Images
+        self.clear_button = QPushButton("Clear Images", self)
+        self.clear_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.clear_button.setStyleSheet("QPushButton { color: red; }")
+        self.clear_button.setStyleSheet("QPushButton { background-color: red; }")
+        self.main_layout.addWidget(self.clear_button)
+        self.clear_button.clicked.connect(self.clear_all)
 
         # Preview label
         self.preview_label = QLabel(self)
@@ -268,7 +313,9 @@ class ImageDropWidget(QWidget):
             event.ignore()
 
     def add_captions(self):
-        caption_text = self.caption_input.text()
+        caption_text = self.caption_input.text().strip()  # Remove any leading/trailing spaces
+        tags_to_add = [tag.strip() for tag in caption_text.split(',')]  # Multiple tags separated by commas
+
         comma_place_desired = self.comma_place_input.value()
 
         for label in self.images:
@@ -280,19 +327,41 @@ class ImageDropWidget(QWidget):
                     pass  # Create an empty txt file if it doesn't exist
 
             with open(txt_path, 'r') as txt_file:
-                captions = txt_file.read().strip().split(',')
+                captions = [caption.strip() for caption in txt_file.read().split(',')]
+
+            # Ensure there are no duplicates by using set operations
+            captions = list(set(captions) - set(tags_to_add))  # Remove tags to add from captions to avoid duplicates
 
             comma_place = comma_place_desired
             if comma_place > len(captions):
                 comma_place = len(captions)
 
-            if not caption_text.startswith(' '):
-                caption_text = ' ' + caption_text
-
-            captions.insert(comma_place, caption_text)
+            for tag in reversed(tags_to_add):  # Loop over tags to add and insert each one
+                captions.insert(comma_place, tag)
 
             with open(txt_path, 'w') as txt_file:
-                txt_file.write(','.join(captions))
+                txt_file.write(', '.join(captions))
+
+    def remove_captions(self):
+        caption_text = self.remove_caption_input.text().strip()  # Remove any leading/trailing spaces
+
+        tags_to_remove = [tag.strip() for tag in caption_text.split(',')]
+
+        for label in self.images:
+            path = label.path
+            txt_path = os.path.splitext(path)[0] + '.txt'
+
+            if not os.path.exists(txt_path):
+                continue
+
+            with open(txt_path, 'r') as txt_file:
+                captions = [caption.strip() for caption in txt_file.read().split(',')]
+
+            # Remove the specified tags from captions
+            captions = [caption for caption in captions if caption.strip() not in tags_to_remove]
+
+            with open(txt_path, 'w') as txt_file:
+                txt_file.write(', '.join(captions))
 
     def resizeEvent(self, event):
         self.update_grid_layout()
