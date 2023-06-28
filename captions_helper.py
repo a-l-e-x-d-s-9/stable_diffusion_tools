@@ -3,10 +3,10 @@ import sys
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame, QTextEdit,
                              QScrollArea, QMessageBox)
-from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette
+from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette, QTransform, QImage
 from PyQt5.QtCore import Qt, QSize, QPoint, QTimer
 from PyQt5.QtWidgets import QMainWindow, QAction, QMenu, QMenuBar, QDialog, QVBoxLayout, QTextEdit, QPushButton
-
+from PIL import Image, UnidentifiedImageError
 
 class ListInputDialog(QDialog):
     def __init__(self, parent=None):
@@ -205,7 +205,6 @@ class ImageDropWidget(QWidget):
         else:
             event.ignore()
 
-
     def add_images_to_preview_area(self, paths):
         # Check if paths is a list
         if not isinstance(paths, list):
@@ -216,7 +215,12 @@ class ImageDropWidget(QWidget):
             # You could reuse the logic in dropEvent here for adding images, or create another method
             if path.endswith('.jpg') or path.endswith('.png'):
                 if path not in [label.path for label in self.images]:
-                    pixmap = QPixmap(path)
+                    pixmap = image_basic.load_image_with_exif(path)
+
+                    # Check and flip the QPixmap image if it's not already flipped
+                    if pixmap.transformed(QTransform().scale(-1, 1), Qt.SmoothTransformation) == pixmap:
+                        pixmap = pixmap.transformed(QTransform().scale(-1, 1), Qt.SmoothTransformation)
+
                     pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
                                            aspectRatioMode=Qt.KeepAspectRatio)
                     label = ImageLabel(self)
@@ -241,7 +245,7 @@ class ImageDropWidget(QWidget):
             path = url.toLocalFile()
             if path.endswith('.jpg') or path.endswith('.png'):
                 if path not in [label.path for label in self.images]:
-                    pixmap = QPixmap(path)
+                    pixmap = image_basic.load_image_with_exif(path)
                     pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
                                            aspectRatioMode=Qt.KeepAspectRatio)
                     label = ImageLabel(self)
@@ -372,7 +376,7 @@ class ImageDropWidget(QWidget):
         return pixmap.scaledToHeight(int(new_height), Qt.SmoothTransformation)  # self.preview_label.height()
 
     def update_preview_with_image_resize(self, label):
-        pixmap = QPixmap(label.path)
+        pixmap = image_basic.load_image_with_exif(label.path)
 
         # pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio,
         #                                            transformMode=Qt.SmoothTransformation)
@@ -453,6 +457,59 @@ class ImageDropWidget(QWidget):
             self.captions_io.setProperty("text_modified", False)
             self.captions_io.setStyleSheet("")
 
+
+class image_basic():
+    def load_image_with_exif(path):
+        try:
+            # Open the image file with PIL and get the EXIF data
+            image = Image.open(path)
+        except (FileNotFoundError, UnidentifiedImageError):
+            print(f"Failed to open the image file at {path}.")
+            return QPixmap()
+
+        exif = image._getexif()
+        if not exif:
+            print(f"No EXIF data found for the image at {path}.")
+            # You could return a default QPixmap here if you want
+            return QPixmap()
+
+        # Get the orientation tag (if it exists)
+        orientation = exif.get(0x0112)
+
+        # Rotate or flip the image based on the orientation
+        try:
+            if orientation == 2:
+                # Flipped horizontally
+                image = image.transpose(Image.FLIP_LEFT_RIGHT)
+            elif orientation == 3:
+                # Rotated 180 degrees
+                image = image.rotate(180)
+            elif orientation == 4:
+                # Flipped vertically
+                image = image.transpose(Image.FLIP_TOP_BOTTOM)
+            elif orientation == 5:
+                # Flipped along the left-top to right-bottom axis
+                image = image.transpose(Image.FLIP_LEFT_RIGHT).rotate(270)
+            elif orientation == 6:
+                # Rotated 90 degrees
+                image = image.rotate(270)
+            elif orientation == 7:
+                # Flipped along the left-bottom to right-top axis
+                image = image.transpose(Image.FLIP_LEFT_RIGHT).rotate(90)
+            elif orientation == 8:
+                # Rotated 270 degrees
+                image = image.rotate(90)
+        except ValueError:
+            print(f"Invalid EXIF orientation value {orientation} for the image at {path}.")
+            # You could return a default QPixmap here if you want
+            return QPixmap()
+
+        # Convert the PIL image to QPixmap
+        data = image.tobytes("raw", "RGBA")
+        qimage = QImage(data, image.size[0], image.size[1], QImage.Format_RGBA8888)
+        pixmap = QPixmap.fromImage(qimage)
+
+        return pixmap
 
 class MainWindow(QMainWindow):
     def __init__(self, parent=None):
