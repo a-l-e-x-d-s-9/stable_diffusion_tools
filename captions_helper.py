@@ -81,6 +81,8 @@ class ImageDropWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
+        self.current_image_index = 0
+
         self.grid_item_width = 128
         self.grid_item_height = 128
         self.grid_spacing = 10
@@ -219,6 +221,13 @@ class ImageDropWidget(QWidget):
         self.main_layout.addWidget(self.clear_button)
         self.clear_button.clicked.connect(self.clear_all)
 
+        # Key help
+        self.key_help_label = QLabel(
+            "<span style='color: gray;'>Key controls: 'A' - left, 'D' - right, 'W' - top, 'S' - bottom, 'Backspace' - remove</span>",
+            self
+        )
+        self.main_layout.addWidget(self.key_help_label)
+
         # Preview label
         self.preview_label = QLabel(self)
         self.preview_label.setAlignment(Qt.AlignCenter)
@@ -233,6 +242,45 @@ class ImageDropWidget(QWidget):
         self.setMinimumSize(self.min_width, self.min_height)
 
         self.adjust_text_height()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_A:  # 'a' key for left
+            self.navigate_to_previous_image()
+        elif event.key() == Qt.Key_D:  # 'd' key for right
+            self.navigate_to_next_image()
+        elif event.key() == Qt.Key_W:  # 'w' key for up
+            self.navigate_to_previous_row_image()
+        elif event.key() == Qt.Key_S:  # 's' key for down
+            self.navigate_to_next_row_image()
+        elif event.key() in {Qt.Key_Backspace, Qt.Key_Delete}:
+            if self.current_label is not None:
+                self.remove_item(self.current_label)
+
+
+    def navigate_to_previous_image(self):
+        if self.current_image_index > 0:  # prevent underflow
+            self.current_image_index -= 1
+        self.select_current_image()
+
+    def navigate_to_next_image(self):
+        if self.current_image_index < len(self.images) - 1:  # prevent overflow
+            self.current_image_index += 1
+        self.select_current_image()
+
+    def navigate_to_previous_row_image(self):
+        items_in_grid_line = max(1, int((self.size().width() - self.preview_label.size().width()) / (self.grid_item_width + self.grid_spacing)))
+        if self.current_image_index >= items_in_grid_line:  # if there's a row above
+            self.current_image_index -= items_in_grid_line
+        self.select_current_image()
+
+    def navigate_to_next_row_image(self):
+        items_in_grid_line = max(1, int((self.size().width() - self.preview_label.size().width()) / (self.grid_item_width + self.grid_spacing)))
+        if self.current_image_index < len(self.images) - items_in_grid_line:  # if there's a row below
+            self.current_image_index += items_in_grid_line
+        self.select_current_image()
+
+    def select_current_image(self):
+        self.on_image_clicked(self.images[self.current_image_index])
 
     def adjust_text_height(self):
         document_height = self.captions_io.document().size().height()
@@ -400,6 +448,10 @@ class ImageDropWidget(QWidget):
         if self.current_label == label:
             was_selected = True
 
+        # Remember the index of the item to be removed
+        removed_index = self.images.index(label)
+        next_index = min(removed_index, len(self.images) - 2)  # Make sure the index is in range
+
         self.images.remove(label)
         self.grid_layout.removeWidget(label)
         label.deleteLater()
@@ -412,6 +464,11 @@ class ImageDropWidget(QWidget):
             self.captions_io.setText("")
             for img in self.images:
                 img.set_unselected_frame_color()
+
+        # If there's any image left, select the one that was next to the removed one
+        if self.images:
+            self.on_image_clicked(self.images[next_index])
+
 
     def ensure_txt_file_exists(self, txt_path):
         if not os.path.exists(txt_path):
@@ -492,9 +549,10 @@ class ImageDropWidget(QWidget):
                 return
 
         self.current_label = label
-        for img in self.images:
+        for i, img in enumerate(self.images):
             if img == label:
                 img.set_selected_frame_color()
+                self.current_image_index = i  # update current image index
             else:
                 img.set_unselected_frame_color()
 

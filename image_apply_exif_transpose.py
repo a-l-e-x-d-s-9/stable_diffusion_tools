@@ -27,15 +27,28 @@ def process_image(chunk):
     global processed_images
     global errors_counter
 
+
+
     for path in chunk:
         try:
             # Open image just for the exif data
             with open(path, 'rb') as file:
                 img = Image.open(file)
+
+                # If the image has no EXIF data, skip it
+                if "exif" not in img.info:
+                    continue
+
                 img_exif = piexif.load(img.info["exif"])
 
         except (UnidentifiedImageError, OSError, ValueError, PermissionError):
             print(f"\nError processing image: {path}")
+            with counter_lock:
+                errors_counter += 1
+            continue
+
+        except Exception as e:
+            print(f"Unexpected error processing image: {path}, error: {str(e)}")
             with counter_lock:
                 errors_counter += 1
             continue
@@ -63,11 +76,11 @@ def process_image(chunk):
             # Save the image with new data
             img.save(path, exif=exif_bytes)
 
-        # Update the counter
-        with counter_lock:
-            processed_images += 1
+            # Update the counter
+            with counter_lock:
+                processed_images += 1
 
-        print(f'\rProcessed {processed_images} out of {total_images} images, errors: {errors_counter}.', end='', flush=True)
+            print(f'\rProcessed {processed_images} out of {total_images} images, errors: {errors_counter}.', end='', flush=True)
 
 
 def main(folder_path):
