@@ -636,6 +636,8 @@ class image_basic():
 
     skip_rotation = False
     def load_image_with_exif(path):
+
+        skip_rotation = False
         try:
             # Open the image file with PIL and get the EXIF data
             image = Image.open(path)
