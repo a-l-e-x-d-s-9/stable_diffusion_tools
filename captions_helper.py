@@ -633,6 +633,8 @@ class ImageDropWidget(QWidget):
 
 
 class image_basic():
+
+    skip_rotation = False
     def load_image_with_exif(path):
         try:
             # Open the image file with PIL and get the EXIF data
@@ -643,40 +645,43 @@ class image_basic():
 
         exif = image._getexif()
         if not exif:
-            print(f"No EXIF data found for the image at {path}.")
+            #print(f"No EXIF data found for the image at {path}.")
             # You could return a default QPixmap here if you want
-            return QPixmap()
+            #return QPixmap()
+            skip_rotation = True
 
-        # Get the orientation tag (if it exists)
-        orientation = exif.get(0x0112)
+        if False == skip_rotation:
+            # Get the orientation tag (if it exists)
+            orientation = exif.get(0x0112)
 
-        # Rotate or flip the image based on the orientation
-        try:
-            if orientation == 2:
-                # Flipped horizontally
-                image = image.transpose(Image.FLIP_LEFT_RIGHT)
-            elif orientation == 3:
-                # Rotated 180 degrees
-                image = image.rotate(180)
-            elif orientation == 4:
-                # Flipped vertically
-                image = image.transpose(Image.FLIP_TOP_BOTTOM)
-            elif orientation == 5:
-                # Flipped along the left-top to right-bottom axis
-                image = image.transpose(Image.FLIP_LEFT_RIGHT).rotate(270)
-            elif orientation == 6:
-                # Rotated 90 degrees
-                image = image.rotate(270)
-            elif orientation == 7:
-                # Flipped along the left-bottom to right-top axis
-                image = image.transpose(Image.FLIP_LEFT_RIGHT).rotate(90)
-            elif orientation == 8:
-                # Rotated 270 degrees
-                image = image.rotate(90)
-        except ValueError:
-            print(f"Invalid EXIF orientation value {orientation} for the image at {path}.")
-            # You could return a default QPixmap here if you want
-            return QPixmap()
+            # Rotate or flip the image based on the orientation
+            try:
+                if orientation == 2:
+                    # Flipped horizontally
+                    image = image.transpose(Image.FLIP_LEFT_RIGHT)
+                elif orientation == 3:
+                    # Rotated 180 degrees
+                    image = image.rotate(180)
+                elif orientation == 4:
+                    # Flipped vertically
+                    image = image.transpose(Image.FLIP_TOP_BOTTOM)
+                elif orientation == 5:
+                    # Flipped along the left-top to right-bottom axis
+                    image = image.transpose(Image.FLIP_LEFT_RIGHT).rotate(270)
+                elif orientation == 6:
+                    # Rotated 90 degrees
+                    image = image.rotate(270)
+                elif orientation == 7:
+                    # Flipped along the left-bottom to right-top axis
+                    image = image.transpose(Image.FLIP_LEFT_RIGHT).rotate(90)
+                elif orientation == 8:
+                    # Rotated 270 degrees
+                    image = image.rotate(90)
+            except ValueError:
+                #print(f"Invalid EXIF orientation value {orientation} for the image at {path}.")
+                # You could return a default QPixmap here if you want
+                #return QPixmap()
+                skip_rotation = True
 
         # Convert the PIL image to QPixmap
         data = image.tobytes("raw", "RGBA")
