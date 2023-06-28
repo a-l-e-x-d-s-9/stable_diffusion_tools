@@ -7,6 +7,7 @@ from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette, QTransform, QImage
 from PyQt5.QtCore import Qt, QSize, QPoint, QTimer
 from PyQt5.QtWidgets import QMainWindow, QAction, QMenu, QMenuBar, QDialog, QVBoxLayout, QTextEdit, QPushButton
 from PIL import Image, UnidentifiedImageError
+import piexif
 
 class ListInputDialog(QDialog):
     def __init__(self, parent=None):
@@ -223,7 +224,7 @@ class ImageDropWidget(QWidget):
 
         # Key help
         self.key_help_label = QLabel(
-            "<span style='color: gray;'>Key controls: 'A' - left, 'D' - right, 'W' - top, 'S' - bottom, 'Backspace' - remove</span>",
+            "<span style='color: gray;'>Key controls: 'A' - left, 'D' - right, 'W' - top, 'S' - bottom, 'Backspace' - remove, 'F' - flip image horizontally</span>",
             self
         )
         self.main_layout.addWidget(self.key_help_label)
@@ -255,6 +256,45 @@ class ImageDropWidget(QWidget):
         elif event.key() in {Qt.Key_Backspace, Qt.Key_Delete}:
             if self.current_label is not None:
                 self.remove_item(self.current_label)
+        elif event.key() == Qt.Key_F:
+            self.flip_current_image()
+
+    import piexif
+
+    def flip_current_image(self):
+        if self.current_label is not None:
+            try:
+                # Open the image using PIL
+                img = Image.open(self.current_label.path)
+
+                # Flip the image horizontally
+                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+
+                # Create new EXIF data with a normal orientation
+                exif_dict = {"0th": {piexif.ImageIFD.Orientation: 1}}
+                exif_bytes = piexif.dump(exif_dict)
+
+                # Save the image back to the same path with new EXIF data
+                img.save(self.current_label.path, exif=exif_bytes)
+
+                # Reload the image into QPixmap
+                pixmap = QPixmap(self.current_label.path)
+
+                # Scale the image to the appropriate size for the grid
+                pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height, aspectRatioMode=Qt.KeepAspectRatio)
+
+                # Update the label's pixmap and refresh the label
+                self.current_label.setPixmap(pixmap)
+                self.current_label.update()
+
+                # Replace the old label in the self.images list with the new one
+                self.images[self.images.index(self.current_label)] = self.current_label
+
+                # Update the preview with the new pixmap
+                self.update_preview_with_image_resize(self.current_label)
+
+            except Exception as e:
+                print(f"Error when flipping image: {e}")
 
 
     def navigate_to_previous_image(self):
@@ -488,7 +528,14 @@ class ImageDropWidget(QWidget):
         reserved_for_preview = self.reserved_for_preview_size()
 
         preview_aspect_ratio = reserved_for_preview.x() / reserved_for_preview.y()
+        height = pixmap.height()
+        width = pixmap.width()
+        if ( height == 0) or ( width == 0):
+            print(f"Warning: Image {self.current_label.path} has a wrong size: ({height}x{width}). Cannot calculate aspect ratio.")
+            return pixmap
+
         image_aspect_ratio = pixmap.width() / pixmap.height()
+
 
         if image_aspect_ratio > preview_aspect_ratio:
             # Image is wider compared to the preview area, so scale based on width
