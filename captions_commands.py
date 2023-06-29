@@ -6,12 +6,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 import glob
 from PIL import Image
-from io import BytesIO
 import traceback
 import mimetypes
 from queue import Queue, Empty
-from concurrent.futures import ThreadPoolExecutor
-import os
 from threading import Lock
 
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
@@ -20,21 +17,38 @@ LOG_FORMAT = "%(asctime)s — %(levelname)s — %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 
 
-def get_image_files(subject_folder):
+def get_image_files_in_current_folder(subject_folder):
     # Initialize empty list to hold image file paths
-    image_files = []
+    image_files_list = []
 
     # Loop over each image extension
     for extension in IMAGE_EXTENSIONS:
         # Use glob to find all files with the current extension in the subject folder
-        image_files += glob.glob(os.path.join(subject_folder, f"**/*{extension}"), recursive=True)
-        # Also check for uppercase versions of the extension
-        image_files += glob.glob(os.path.join(subject_folder, f"**/*{extension.upper()}"), recursive=True)
 
-    return image_files
+        found_captions_1 = glob.glob(os.path.join(subject_folder, f"*{extension}"), recursive=False)
+        if found_captions_1:
+            image_files_list += found_captions_1
+
+
+        found_captions_2 = glob.glob(os.path.join(subject_folder, f"*{extension.upper()}"), recursive=False)
+        # Also check for uppercase versions of the extension
+        if found_captions_2:
+            image_files_list += found_captions_2
+
+    return image_files_list
+
 
 def get_caption_files(subject_folder):
-    return glob.glob(f"{subject_folder}/*.txt")
+    captions_files_list = []
+
+    found_captions = glob.glob(f"{subject_folder}/*.txt", recursive=False)
+    #print(f"DEBUG: Searching in {subject_folder}, found captions len: {len(found_captions)}")  # Debugging line
+    if found_captions:
+        captions_files_list += found_captions
+
+    return captions_files_list
+
+
 
 def validate_input(path: str, tag: str = None) -> None:
     if not os.path.exists(path):
@@ -87,10 +101,22 @@ def get_subject_folders(root_folder: str) -> List[str]:
     folders = [os.path.join(root_folder, folder) for folder in os.listdir(root_folder)]
     return [folder for folder in folders if os.path.isdir(folder)]
 
+# def get_all_sub_folders(root_folder: str):
+#     validate_input(root_folder)
+#     folders = [os.path.join(root_folder, name) for name in os.listdir(root_folder) if os.path.isdir(os.path.join(root_folder, name))]
+#     folders.append(root_folder)  # Include the root_folder itself in the list
+#     return folders
+
 def get_all_sub_folders(root_folder: str):
     validate_input(root_folder)
-    folders = [os.path.join(root_folder, name) for name in os.listdir(root_folder) if os.path.isdir(os.path.join(root_folder, name))]
+    folders = []
+
     folders.append(root_folder)  # Include the root_folder itself in the list
+
+    for dirpath, dirnames, files in os.walk(root_folder):
+        for name in dirnames:
+            folders.append(os.path.join(dirpath, name))
+
     return folders
 
 def validate_folder_structure(subject_folder: str) -> None:
@@ -99,7 +125,7 @@ def validate_folder_structure(subject_folder: str) -> None:
         logging.error(f"Folder structure for {subject_folder} is not valid. Expected subfolders: 'core', 'occasional', 'validation'.")
         raise ValueError(f"Folder structure for {subject_folder} is not valid. Expected subfolders: 'core', 'occasional', 'validation'.")
 
-def get_caption_files(subject_folder: str) -> List[str]:
+def get_caption_files_recursively(subject_folder: str) -> List[str]:
     validate_input(subject_folder)
     caption_files = []
     for root, dirs, files in os.walk(subject_folder):
@@ -405,9 +431,10 @@ def check_image_validity_and_size(file_path: str, min_size: int, max_size: int) 
     return None
 
 
-def check_caption_validity(file_path: str, min_tags: int) -> str:
+def check_caption_validity(file_path: str, min_tags: int, dry_run: bool) -> str:
     try:
-        detect_and_remove_empty_tags(file_path)
+        if False == dry_run:
+            detect_and_remove_empty_tags(file_path)
         tags = read_file(file_path)
         if len(tags) < min_tags:
             return f"Number of tags in caption below minimum: {len(tags)} < {min_tags}."
@@ -416,14 +443,9 @@ def check_caption_validity(file_path: str, min_tags: int) -> str:
     return None
 
 
-from queue import Queue
-from concurrent.futures import ThreadPoolExecutor
-import os
 
 
-# Assuming get_all_sub_folders, get_caption_files, get_image_files, check_image_validity_and_size and check_caption_validity are defined
-
-def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, min_tags: int, threads: int) -> List[
+def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, min_tags: int, threads: int, dry_run: bool) -> List[
     Tuple[str, str]]:
     errors = []
     subject_folders = iter(get_all_sub_folders(root_folder))
@@ -439,7 +461,7 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
                     break
 
             caption_files = get_caption_files(subject_folder)
-            image_files = get_image_files(subject_folder)
+            image_files = get_image_files_in_current_folder(subject_folder)
 
             for caption_file in caption_files:
                 # get the file name without the extension
@@ -473,7 +495,7 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
             except Empty:
                 break
             image_error = check_image_validity_and_size(image_file, min_size, max_size)
-            caption_error = check_caption_validity(caption_file, min_tags)
+            caption_error = check_caption_validity(caption_file, min_tags, dry_run)
             if image_error:
                 errors.append((image_file, image_error))
             if caption_error:
@@ -487,8 +509,8 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
     return errors
 
 
-def check_images_and_captions(root_folder: str, min_size: int, max_size: int, min_tags: int, output_file: str, threads: int) -> None:
-    errors = check_image_caption_pairs(root_folder, min_size, max_size, min_tags, threads)
+def check_images_and_captions(root_folder: str, min_size: int, max_size: int, min_tags: int, output_file: str, threads: int, dry_run: bool) -> None:
+    errors = check_image_caption_pairs(root_folder, min_size, max_size, min_tags, threads, dry_run)
     try:
         with open(output_file, 'w') as file:
             for error in errors:
@@ -497,16 +519,99 @@ def check_images_and_captions(root_folder: str, min_size: int, max_size: int, mi
         logging.error(f"Unable to open output file for writing: {str(e)}")
         raise
 
+def remove_captions_without_image(root_folder: str, threads_number:int, output_file: str, is_dry_run:bool = True):
+    errors = remove_captions_without_image_work(root_folder, threads_number, is_dry_run)
+    try:
+        with open(output_file, 'w') as file:
+            for error in errors:
+                file.write(f"{error[0]}: {error[1]}\n")
+    except (IOError, PermissionError) as e:
+        logging.error(f"Unable to open output file for writing: {str(e)}")
+        raise
+
+def remove_captions_without_image_work(root_folder: str, threads_number:int, is_dry_run:bool = True) -> List[
+    Tuple[str, str]]:
+    errors = []
+    subject_folders = iter(get_all_sub_folders(root_folder))
+    caption_queues = [Queue() for _ in range(threads_number)]
+    scan_lock = Lock()
+
+    def folder_scanner(index):
+        while True:
+            with scan_lock:
+                try:
+                    subject_folder = next(subject_folders)
+
+                except StopIteration:
+                    break
+
+            #print(f"THREAD {index} ON: {subject_folder}")
+
+            caption_files = get_caption_files(subject_folder)
+            image_files = get_image_files_in_current_folder(subject_folder)
+
+            # if len(caption_files) != len(image_files):
+            #     print(f"PROBLEM: {len(caption_files)} != {len(image_files)}, subject_folder: {subject_folder}")
+
+
+            for caption_file in caption_files:
+                # get the file name without the extension
+                base_name = os.path.splitext(caption_file)[0]
+
+
+                # find the corresponding image file
+                image_file = None
+                for ext in IMAGE_EXTENSIONS:
+                    potential_image_file = base_name + ext
+                    if potential_image_file in image_files:
+                        image_file = potential_image_file
+                        break
+
+                # if no corresponding image file was found, add the caption file to the queue
+                if image_file is None:
+                    caption_queues[index].put(caption_file)
+
+    with ThreadPoolExecutor(max_workers=threads_number) as executor:
+        # scanning phase
+        for i in range(threads_number):
+            executor.submit(folder_scanner, i)
+
+    def worker(queue):
+        while True:
+            try:
+                caption_file = queue.get_nowait()
+            except Empty:
+                break
+
+            # If in dry run, just record the caption file
+            if is_dry_run:
+                errors.append((caption_file, "Would be removed"))
+            else:
+                try:
+                    errors.append((caption_file, "Removed"))
+                    os.remove(caption_file)
+                except Exception as e:
+                    errors.append((caption_file, f"Error removing file: {str(e)}"))
+
+    with ThreadPoolExecutor(max_workers=threads_number) as executor:
+        # removing phase
+        for q in caption_queues:
+            executor.submit(worker, q)
+
+    return errors
 
 
 def main(args):
-    if args.mode in ['search_for_tags', 'full_statistic', 'statistic_for_subject'] and args.output_file is None:
+    if args.mode in [ 'search_for_tags', 'full_statistic', 'statistic_for_subject',
+                     'check_images_and_captions' ] and args.output_file is None:
         raise Exception(f"Output file must be specified for mode '{args.mode}'.")
 
     if args.mode == 'check_images_and_captions':
         if args.min_size is None or args.max_size is None or args.min_tags is None:
             raise Exception("min_size, max_size, and min_tags must be specified for 'check_images_and_captions' mode.")
-        check_images_and_captions(args.root, args.min_size, args.max_size, args.min_tags, args.output_file, args.threads)
+        check_images_and_captions(args.root, args.min_size, args.max_size, args.min_tags, args.output_file, args.threads, args.dry_run)
+    elif args.mode == 'remove_captions_without_image':
+        remove_captions_without_image(args.root, args.threads, args.output_file, args.dry_run)
     elif args.mode == 'remove_tag_all':
         if not args.tag.strip():  # check if the tag is empty after removing leading/trailing whitespace
             logging.error('No tag provided, skipping')
@@ -546,7 +651,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Script for handling captions for images.')
-    parser.add_argument('-m', '--mode', help='Mode of operation. Options: check_images_and_captions, remove_tag_all, replace_tag, add_tag_all, add_tag_single, move_to_validation, search_for_tags, full_statistic, statistic_for_subject.')
+    parser.add_argument('-m', '--mode', help='Mode of operation. Options: check_images_and_captions, remove_captions_without_image, remove_tag_all, replace_tag, add_tag_all, add_tag_single, move_to_validation, search_for_tags, full_statistic, statistic_for_subject.')
     parser.add_argument('-r', '--root', help='Root folder containing all subject folders.')
     parser.add_argument('-t', '--tag', help='Tag to add or remove.')
     parser.add_argument('-tn', '--tag_new', help='New tag to use.')
