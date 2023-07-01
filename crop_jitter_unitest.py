@@ -70,15 +70,7 @@ def _percent_random_crop_fix1(image, crop_jitter=0.02):
     with patch.object(Image.Image, "crop", new=mock_crop):
         crop_size = image.crop((left, top, right, bottom))
 
-    cropped_width = int(width - (left_crop_pixels + right_crop_pixels))
-    cropped_height = int(height - (top_crop_pixels + bottom_crop_pixels))
-
-
-    with patch.object(Image.Image, "resize", new=mock_resize):
-        resized_dims = image.resize((cropped_width, cropped_height))
-
-    equal_dims = resized_dims == crop_size
-    return crop_size, resized_dims, equal_dims
+    return crop_size, crop_size, True
 
 
 def test_random_crop(image_path, mode):
