@@ -417,8 +417,12 @@ class ImageDropWidget(QWidget):
             with open(txt_path, 'r') as txt_file:
                 captions = [caption.strip() for caption in txt_file.read().split(',')]
 
-            # Ensure there are no duplicates by using set operations
-            captions = list(set(captions) - set(tags_to_add))  # Remove tags to add from captions to avoid duplicates
+            # Remove duplicates while preserving order
+            captions = list(dict.fromkeys(captions))
+            tags_to_add = list(dict.fromkeys(tags_to_add))
+
+            captions = [tag for tag in captions if
+                        tag not in tags_to_add]  # Remove tags to add from captions to avoid duplicates
 
             comma_place = comma_place_desired
             if comma_place > len(captions):
