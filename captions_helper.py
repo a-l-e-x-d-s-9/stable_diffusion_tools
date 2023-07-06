@@ -688,8 +688,14 @@ class ImageDropWidget(QWidget):
         self.captions_io.setTextCursor(cursor)
 
         # Get the search text and check if it's empty
+        # search_text = self.search_input.text()
+        # if not search_text:
+        #     return
         search_text = self.search_input.text()
-        if not search_text:
+        regex = QRegularExpression(search_text)
+        if (not search_text) or (not regex.isValid()):
+            #print(f"Invalid regular expression: {search_text}")
+            self.captions_io.blockSignals(False)
             return
 
         # Build a QRegularExpression from the search text
@@ -726,10 +732,10 @@ class ImageDropWidget(QWidget):
 
 
     def clear_search(self):
+        self.search_input.setText("")
         self.clear_caption()
 
     def clear_caption(self):
-        self.search_input.setText("")
         self.highlight_search_results()
 
 class image_basic():
