@@ -503,7 +503,7 @@ class ImageDropWidget(QWidget):
             print(f"{path} already exists in the widget!")
 
     def caption_to_tag_list(self, captions: str) -> list[str]:
-        tags_list = [caption.strip() for caption in captions.split(',')]
+        tags_list = [caption.strip() for caption in captions.split(',') if caption.strip()]
 
         # Remove duplicates while preserving order
         tag_list = list(dict.fromkeys(tags_list))
