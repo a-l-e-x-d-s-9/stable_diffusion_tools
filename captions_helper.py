@@ -376,29 +376,41 @@ class ImageDropWidget(QWidget):
         print(f"dropEvent, urls len: {len(event.mimeData().urls())}")
         for url in event.mimeData().urls():
             path = url.toLocalFile()
-            if path.endswith('.jpg') or path.endswith('.png'):
-                if path not in [label.path for label in self.images]:
-                    pixmap = image_basic.load_image_with_exif(path)
-                    pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
-                                           aspectRatioMode=Qt.KeepAspectRatio)
-                    label = ImageLabel(self)
-                    label.path = path
-                    label.setPixmap(pixmap)
 
-                    # Add close button to the label
-                    close_button = QPushButton("X", label)
-                    close_button.setStyleSheet("QPushButton { color: red; }")
-                    close_button.setFlat(True)
-                    close_button.setFixedSize(QSize(16, 16))
-                    close_button.clicked.connect(lambda checked, lbl=label: self.remove_item(lbl))
+            # If the path is a directory, iterate through all files in the directory
+            if os.path.isdir(path):
+                for root, dirs, files in os.walk(path):
+                    for file in files:
+                        if file.endswith('.jpg') or file.endswith('.png'):
+                            full_path = os.path.join(root, file)
+                            self.process_image(full_path)
+            # If the path is a file, process the file directly
+            elif os.path.isfile(path) and (path.endswith('.jpg') or path.endswith('.png')):
+                self.process_image(path)
+            else:
+                event.ignore()
 
-                    self.images.append(label)
-                    self.update_grid_layout()
+    def process_image(self, path):
+        if path not in [label.path for label in self.images]:
+            pixmap = image_basic.load_image_with_exif(path)
+            pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
+                                   aspectRatioMode=Qt.KeepAspectRatio)
+            label = ImageLabel(self)
+            label.path = path
+            label.setPixmap(pixmap)
 
-                else:
-                    print(f"{path} already exists in the widget!")
+            # Add close button to the label
+            close_button = QPushButton("X", label)
+            close_button.setStyleSheet("QPushButton { color: red; }")
+            close_button.setFlat(True)
+            close_button.setFixedSize(QSize(16, 16))
+            close_button.clicked.connect(lambda checked, lbl=label: self.remove_item(lbl))
+
+            self.images.append(label)
+            self.update_grid_layout()
+
         else:
-            event.ignore()
+            print(f"{path} already exists in the widget!")
 
     def add_captions(self):
         caption_text = self.caption_input.text().strip()  # Remove any leading/trailing spaces
