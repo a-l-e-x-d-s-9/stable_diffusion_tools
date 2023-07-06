@@ -272,7 +272,7 @@ class ImageDropWidget(QWidget):
         self.main_layout.addLayout(self.search_all_layout)
 
         # Add search all label
-        self.search_all_label = QLabel("Search in all caption:", self)
+        self.search_all_label = QLabel("Search in all captions:", self)
         self.search_all_layout.addWidget(self.search_all_label)
 
         # Add search all input
