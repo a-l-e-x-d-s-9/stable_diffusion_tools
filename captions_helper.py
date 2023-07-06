@@ -36,23 +36,52 @@ class ImageLabel(QLabel):
         self.path = None
         self.setFrameShape(QFrame.Panel)
         self.setLineWidth(3)
-        self.set_default_frame_color()
+        self.__set_default_frame_color()
+        self.__is_selected = False
+        self.__is_highlighted = False
 
-    def set_default_frame_color(self):
+    def __set_default_frame_color(self):
         # Set the default frame color to the background color
         palette = self.palette()
         palette.setColor(QPalette.WindowText, palette.color(QPalette.Background))
         self.setPalette(palette)
 
-    def set_selected_frame_color(self):
+    def __set_selected_frame_color(self):
         # Set the frame color to red
         palette = self.palette()
         palette.setColor(QPalette.WindowText, QColor(Qt.red))
         self.setPalette(palette)
 
-    def set_unselected_frame_color(self):
-        # Set the frame color to the background color
-        self.set_default_frame_color()
+    def __set_highlighted_frame_color(self):
+        # Set the frame color to yellow
+        palette = self.palette()
+        palette.setColor(QPalette.WindowText, QColor(Qt.yellow))
+        self.setPalette(palette)
+
+    def set_selected(self, is_selected):
+        if self.__is_selected != is_selected:
+            self.__is_selected = is_selected
+
+            if self.__is_selected:
+                self.__set_selected_frame_color()
+            else:
+                if self.__is_highlighted:
+                    self.__set_highlighted_frame_color()
+                else:
+                    self.__set_default_frame_color()
+
+
+    def set_highlighted(self, is_highlighted):
+        if self.__is_highlighted != is_highlighted:
+            self.__is_highlighted = is_highlighted
+
+            if self.__is_highlighted:
+                if not self.__is_selected:
+                    self.__set_highlighted_frame_color()
+            else:
+                if not self.__is_selected:
+                    self.__set_default_frame_color()
+
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -194,7 +223,7 @@ class ImageDropWidget(QWidget):
 
         # Add captions text input/output
 
-        self.caption_label = QLabel("Captions:", self)
+        self.caption_label = QLabel("Caption:", self)
         self.captions_layout.addWidget(self.caption_label)
 
         self.captions_io = QTextEdit(self)
@@ -218,7 +247,7 @@ class ImageDropWidget(QWidget):
         self.main_layout.addLayout(self.search_layout)
 
         # Add search label
-        self.search_label = QLabel("Search in captions:", self)
+        self.search_label = QLabel("Search in caption:", self)
         self.search_layout.addWidget(self.search_label)
 
         # Add search input
@@ -233,6 +262,31 @@ class ImageDropWidget(QWidget):
         self.search_layout.addWidget(self.clear_search_button)
 
         self.clear_search_button.clicked.connect(self.clear_search)
+
+        self.image_captions = {}
+
+        # Search in all caption, indicate with yellow grid
+        # Search all layout
+        self.search_all_layout = QHBoxLayout()
+        self.search_all_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.main_layout.addLayout(self.search_all_layout)
+
+        # Add search all label
+        self.search_all_label = QLabel("Search in all caption:", self)
+        self.search_all_layout.addWidget(self.search_all_label)
+
+        # Add search all input
+        self.search_all_input = QLineEdit(self)
+        self.search_all_input.setPlaceholderText("Enter search all text")
+        self.search_all_layout.addWidget(self.search_all_input)
+
+        self.search_all_now_button = QPushButton("Search all now", self)
+        self.search_all_layout.addWidget(self.search_all_now_button)
+        self.search_all_now_button.clicked.connect(self.search_all_now)
+
+        self.clear_search_all_button = QPushButton("Clear all search", self)
+        self.search_all_layout.addWidget(self.clear_search_all_button)
+        self.clear_search_all_button.clicked.connect(self.search_all_clear_search)
 
 
         # Horizontal line
@@ -372,32 +426,33 @@ class ImageDropWidget(QWidget):
 
         # Loop through the image paths and add them to the preview area
         for path in paths:
+            self.process_image(path)
             # You could reuse the logic in dropEvent here for adding images, or create another method
-            if path.endswith('.jpg') or path.endswith('.png'):
-                if path not in [label.path for label in self.images]:
-                    pixmap = image_basic.load_image_with_exif(path)
-
-                    # Check and flip the QPixmap image if it's not already flipped
-                    if pixmap.transformed(QTransform().scale(-1, 1), Qt.SmoothTransformation) == pixmap:
-                        pixmap = pixmap.transformed(QTransform().scale(-1, 1), Qt.SmoothTransformation)
-
-                    pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
-                                           aspectRatioMode=Qt.KeepAspectRatio)
-                    label = ImageLabel(self)
-                    label.path = path
-                    label.setPixmap(pixmap)
-
-                    # Add close button to the label
-                    close_button = QPushButton("X", label)
-                    close_button.setStyleSheet("QPushButton { color: red; }")
-                    close_button.setFlat(True)
-                    close_button.setFixedSize(QSize(16, 16))
-                    close_button.clicked.connect(lambda checked, lbl=label: self.remove_item(lbl))
-
-                    self.images.append(label)
-                    self.update_grid_layout()
-                else:
-                    print(f"{path} already exists in the widget!")
+            # if path.endswith('.jpg') or path.endswith('.png'):
+            #     if path not in [label.path for label in self.images]:
+            #         pixmap = image_basic.load_image_with_exif(path)
+            #
+            #         # Check and flip the QPixmap image if it's not already flipped
+            #         if pixmap.transformed(QTransform().scale(-1, 1), Qt.SmoothTransformation) == pixmap:
+            #             pixmap = pixmap.transformed(QTransform().scale(-1, 1), Qt.SmoothTransformation)
+            #
+            #         pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
+            #                                aspectRatioMode=Qt.KeepAspectRatio)
+            #         label = ImageLabel(self)
+            #         label.path = path
+            #         label.setPixmap(pixmap)
+            #
+            #         # Add close button to the label
+            #         close_button = QPushButton("X", label)
+            #         close_button.setStyleSheet("QPushButton { color: red; }")
+            #         close_button.setFlat(True)
+            #         close_button.setFixedSize(QSize(16, 16))
+            #         close_button.clicked.connect(lambda checked, lbl=label: self.remove_item(lbl))
+            #
+            #         self.images.append(label)
+            #         self.update_grid_layout()
+            #     else:
+            #         print(f"{path} already exists in the widget!")
 
     def dropEvent(self, event):
         print(f"dropEvent, urls len: {len(event.mimeData().urls())}")
@@ -419,25 +474,44 @@ class ImageDropWidget(QWidget):
 
     def process_image(self, path):
         if path not in [label.path for label in self.images]:
-            pixmap = image_basic.load_image_with_exif(path)
-            pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
-                                   aspectRatioMode=Qt.KeepAspectRatio)
-            label = ImageLabel(self)
-            label.path = path
-            label.setPixmap(pixmap)
+            if path.endswith('.jpg') or path.endswith('.png'):
+                pixmap = image_basic.load_image_with_exif(path)
+                pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
+                                       aspectRatioMode=Qt.KeepAspectRatio)
+                label = ImageLabel(self)
+                label.path = path
+                label.setPixmap(pixmap)
 
-            # Add close button to the label
-            close_button = QPushButton("X", label)
-            close_button.setStyleSheet("QPushButton { color: red; }")
-            close_button.setFlat(True)
-            close_button.setFixedSize(QSize(16, 16))
-            close_button.clicked.connect(lambda checked, lbl=label: self.remove_item(lbl))
+                # Add close button to the label
+                close_button = QPushButton("X", label)
+                close_button.setStyleSheet("QPushButton { color: red; }")
+                close_button.setFlat(True)
+                close_button.setFixedSize(QSize(16, 16))
+                close_button.clicked.connect(lambda checked, lbl=label: self.remove_item(lbl))
 
-            self.images.append(label)
-            self.update_grid_layout()
+                # Read captions from text file at this stage
+                txt_path = os.path.splitext(path)[0] + '.txt'
+                self.ensure_txt_file_exists(txt_path)
+                with open(txt_path, 'r') as txt_file:
+                    content = txt_file.read()
+                    # Store the caption in the map
+                    self.image_captions[path] = content
 
+                self.images.append(label)
+                self.update_grid_layout()
         else:
             print(f"{path} already exists in the widget!")
+
+    def caption_to_tag_list(self, captions: str) -> list[str]:
+        tags_list = [caption.strip() for caption in captions.split(',')]
+
+        # Remove duplicates while preserving order
+        tag_list = list(dict.fromkeys(tags_list))
+
+        return tag_list
+
+    def tag_list_to_string(self, tags_list: list[str]):
+        return ', '.join(tags_list)
 
     def add_captions(self):
         caption_text = self.caption_input.text().strip()  # Remove any leading/trailing spaces
@@ -453,25 +527,27 @@ class ImageDropWidget(QWidget):
                 with open(txt_path, 'w') as txt_file:
                     pass  # Create an empty txt file if it doesn't exist
 
-            with open(txt_path, 'r') as txt_file:
-                captions = [caption.strip() for caption in txt_file.read().split(',')]
 
-            # Remove duplicates while preserving order
-            captions = list(dict.fromkeys(captions))
-            tags_to_add = list(dict.fromkeys(tags_to_add))
+            tags_list = self.caption_to_tag_list(self.image_captions[path])
 
-            captions = [tag for tag in captions if
+            tags_to_add = self.caption_to_tag_list(tags_to_add)
+
+            tags_list = [tag for tag in tags_list if
                         tag not in tags_to_add]  # Remove tags to add from captions to avoid duplicates
 
             comma_place = comma_place_desired
-            if comma_place > len(captions):
-                comma_place = len(captions)
+            if comma_place > len(tags_list):
+                comma_place = len(tags_list)
 
             for tag in reversed(tags_to_add):  # Loop over tags to add and insert each one
-                captions.insert(comma_place, tag)
+                tags_list.insert(comma_place, tag)
+
+            final_captions = self.tag_list_to_string(tags_list)
+            # Update the caption in the map
+            self.image_captions[path] = final_captions
 
             with open(txt_path, 'w') as txt_file:
-                txt_file.write(', '.join(captions))
+                txt_file.write(final_captions)
 
     def remove_captions(self):
         caption_text = self.remove_caption_input.text().strip()  # Remove any leading/trailing spaces
@@ -485,14 +561,15 @@ class ImageDropWidget(QWidget):
             if not os.path.exists(txt_path):
                 continue
 
-            with open(txt_path, 'r') as txt_file:
-                captions = [caption.strip() for caption in txt_file.read().split(',')]
+
+            tag_list = self.caption_to_tag_list(self.image_captions[path])
 
             # Remove the specified tags from captions
-            captions = [caption for caption in captions if caption.strip() not in tags_to_remove]
+            tag_list = [caption for caption in tag_list if caption.strip() not in tags_to_remove]
+            captions = self.tag_list_to_string(tag_list)
 
             with open(txt_path, 'w') as txt_file:
-                txt_file.write(', '.join(captions))
+                txt_file.write(captions)
 
     def resizeEvent(self, event):
         self.update_grid_layout()
@@ -525,6 +602,7 @@ class ImageDropWidget(QWidget):
         self.update_preview_clear()
 
         self.clear_caption()
+        self.image_captions.clear()
 
     def remove_item(self, label):
         was_selected = False
@@ -546,7 +624,7 @@ class ImageDropWidget(QWidget):
             self.current_label = None
             self.clear_caption()
             for img in self.images:
-                img.set_unselected_frame_color()
+                img.set_selected(False)
 
         # If there's any image left, select the one that was next to the removed one
         if self.images:
@@ -640,21 +718,20 @@ class ImageDropWidget(QWidget):
 
         self.current_label = label
         for i, img in enumerate(self.images):
-            if img == label:
-                img.set_selected_frame_color()
+            is_current_selected = img == label
+            img.set_selected(is_current_selected)
+
+            if is_current_selected:
                 self.current_image_index = i  # update current image index
-            else:
-                img.set_unselected_frame_color()
+
 
         txt_path = os.path.splitext(label.path)[0] + '.txt'
         self.ensure_txt_file_exists(txt_path)
 
-        with open(txt_path, 'r') as txt_file:
-            content = txt_file.read()
-            self.captions_io.blockSignals(True)  # Block signals to avoid triggering textChanged
-            self.captions_io.setText(content)
-            self.highlight_search_results()
-            self.captions_io.blockSignals(False)  # Unblock signals
+        self.captions_io.blockSignals(True)  # Block signals to avoid triggering textChanged
+        self.captions_io.setText(self.image_captions[label.path])
+        self.highlight_search_results()
+        self.captions_io.blockSignals(False)
 
         self.captions_io.setProperty("text_modified", False)
         self.captions_io.setStyleSheet("")
@@ -669,8 +746,14 @@ class ImageDropWidget(QWidget):
         if self.current_label is not None:
             txt_path = os.path.splitext(self.current_label.path)[0] + '.txt'
             content = self.captions_io.toPlainText()
+
+            new_captions = self.tag_list_to_string(self.caption_to_tag_list(content))
+
+            # Update the caption in the map
+            self.image_captions[self.current_label.path] = new_captions
+
             with open(txt_path, 'w') as txt_file:
-                txt_file.write(content)
+                txt_file.write(new_captions)
 
             self.captions_io.setProperty("text_modified", False)
             self.captions_io.setStyleSheet("")
@@ -726,12 +809,58 @@ class ImageDropWidget(QWidget):
         self.captions_io.blockSignals(False)  # unblock signals after modifying the text
 
 
+
+
     def clear_search(self):
         self.search_input.setText("")
         self.clear_caption()
 
     def clear_caption(self):
         self.highlight_search_results()
+
+    def search_all_now(self):
+        # Search for captions in all opened captions, show found matches with yellow frame around image
+
+        self.search_all_unselect()
+
+        search_for_text = self.search_all_input.text()
+        regex = QRegularExpression(search_for_text)
+        if (not search_for_text) or (not regex.isValid()):
+            return
+
+        found_images_path = []
+
+        for image_path, caption in self.image_captions.items():
+            match = regex.match(caption)
+            if match.hasMatch():
+                found_images_path.append(image_path)
+                #print(f"matching: {caption}")
+
+
+        for found_image_path in found_images_path:
+            for image in self.images:
+                if image.path == found_image_path:
+                    image.set_highlighted(True)
+
+
+    def search_all_unselect(self):
+        for image in self.images:
+            image.set_highlighted(False)
+
+    def search_all_clear_search(self):
+        self.search_all_unselect()
+        self.search_all_input.setText("")
+
+    def search_for_all_captions(self):
+        found_images = []
+        search_re = QRegularExpression(self.search_for_all_captions())
+
+        for image, caption in self.image_captions.items():
+            match = search_re.match(caption)
+            if match.hasMatch():
+                found_images.append(image)
+
+        return found_images
 
 class image_basic():
 
