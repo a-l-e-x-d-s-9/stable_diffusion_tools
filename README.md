@@ -34,7 +34,7 @@ pip install -r requirements.txt
 2. Show caption file content for each image.
 3. Edit caption text.
 4. Add new text after specific comma to all files.
-![Caption Helper Preview](readme_files/caption_helper_preview_01.png)
+![Caption Helper Preview](readme_files/caption_helper_preview_02.png)
 
 ## [Pattern Replacer](pattern_replacer.py)
 ### Features:
