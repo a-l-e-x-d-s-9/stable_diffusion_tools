@@ -729,10 +729,11 @@ class ImageDropWidget(QWidget):
         self.captions_io.blockSignals(True)  # Block signals to avoid triggering textChanged
         self.captions_io.setText(self.image_captions[label.path])
         self.highlight_search_results()
-        self.captions_io.blockSignals(False)
-
         self.captions_io.setProperty("text_modified", False)
         self.captions_io.setStyleSheet("")
+        self.captions_io.blockSignals(False)
+
+
 
         self.update_preview_with_image_resize(label)
 
@@ -753,8 +754,11 @@ class ImageDropWidget(QWidget):
             with open(txt_path, 'w') as txt_file:
                 txt_file.write(new_captions)
 
+            self.captions_io.blockSignals(True)
+            self.captions_io.setText(new_captions)
             self.captions_io.setProperty("text_modified", False)
             self.captions_io.setStyleSheet("")
+            self.captions_io.blockSignals(False)
 
 
     def caption_text_handle_cursor(self, cursor_position):
