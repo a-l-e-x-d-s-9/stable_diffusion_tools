@@ -3,9 +3,9 @@ import sys
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame, QTextEdit,
                              QScrollArea, QMessageBox, QSizePolicy)
-from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette, QTransform, QImage
-from PyQt5.QtCore import Qt, QSize, QPoint, QTimer
-from PyQt5.QtWidgets import QMainWindow, QAction, QMenu, QMenuBar, QDialog, QVBoxLayout, QTextEdit, QPushButton
+from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette, QTransform, QImage, QTextCharFormat, QTextCursor
+from PyQt5.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression
+from PyQt5.QtWidgets import QMainWindow, QAction, QMenu, QMenuBar, QDialog
 from PIL import Image, UnidentifiedImageError
 import piexif
 
@@ -76,6 +76,8 @@ class ImageLabel(QLabel):
                 os.system(f"start '{self.path}'")
             elif sys.platform.startswith('darwin'):
                 os.system(f"open '{self.path}'")
+
+
 
 
 class ImageDropWidget(QWidget):
@@ -192,7 +194,7 @@ class ImageDropWidget(QWidget):
 
         # Add captions text input/output
 
-        self.caption_label = QLabel("For image:", self)
+        self.caption_label = QLabel("Captions:", self)
         self.captions_layout.addWidget(self.caption_label)
 
         self.captions_io = QTextEdit(self)
@@ -206,7 +208,32 @@ class ImageDropWidget(QWidget):
 
         self.save_captions_button = QPushButton("Save caption", self)
         self.captions_layout.addWidget(self.save_captions_button)
+
         self.save_captions_button.clicked.connect(self.save_captions)
+
+
+        # Search layout
+        self.search_layout = QHBoxLayout()
+        self.search_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.main_layout.addLayout(self.search_layout)
+
+        # Add search label
+        self.search_label = QLabel("Search in captions:", self)
+        self.search_layout.addWidget(self.search_label)
+
+        # Add search input
+        self.search_input = QLineEdit(self)
+        self.search_input.setPlaceholderText("Enter search text")
+        self.search_layout.addWidget(self.search_input)
+
+        self.captions_io.textChanged.connect(self.highlight_search_results)
+        self.search_input.textChanged.connect(self.highlight_search_results)
+
+        self.clear_search_button = QPushButton("Clear search", self)
+        self.search_layout.addWidget(self.clear_search_button)
+
+        self.clear_search_button.clicked.connect(self.clear_search)
+
 
         # Horizontal line
         self.line = QFrame(self)
@@ -497,7 +524,7 @@ class ImageDropWidget(QWidget):
         self.images.clear()
         self.update_preview_clear()
 
-        self.captions_io.setText("")
+        self.clear_caption()
 
     def remove_item(self, label):
         was_selected = False
@@ -517,7 +544,7 @@ class ImageDropWidget(QWidget):
         if was_selected:
             self.update_preview_clear()
             self.current_label = None
-            self.captions_io.setText("")
+            self.clear_caption()
             for img in self.images:
                 img.set_unselected_frame_color()
 
@@ -626,6 +653,7 @@ class ImageDropWidget(QWidget):
             content = txt_file.read()
             self.captions_io.blockSignals(True)  # Block signals to avoid triggering textChanged
             self.captions_io.setText(content)
+            self.highlight_search_results()
             self.captions_io.blockSignals(False)  # Unblock signals
 
         self.captions_io.setProperty("text_modified", False)
@@ -647,6 +675,62 @@ class ImageDropWidget(QWidget):
             self.captions_io.setProperty("text_modified", False)
             self.captions_io.setStyleSheet("")
 
+    def highlight_search_results(self):
+        self.captions_io.blockSignals(True)  # block signals
+
+        cursor_position = self.captions_io.textCursor().position()  # get the current cursor position
+
+        # Clear existing formatting
+        cursor = self.captions_io.textCursor()
+        cursor.select(QTextCursor.Document)
+        cursor.setCharFormat(QTextCharFormat())
+        cursor.clearSelection()
+        self.captions_io.setTextCursor(cursor)
+
+        # Get the search text and check if it's empty
+        search_text = self.search_input.text()
+        if not search_text:
+            return
+
+        # Build a QRegularExpression from the search text
+        search_re = QRegularExpression(search_text)
+
+        # Set up the format for matches
+        highlight_format = QTextCharFormat()
+        highlight_format.setBackground(QColor(144, 238, 144))
+
+        # Use a QTextDocument to perform the search
+        doc = self.captions_io.document()
+
+        # Iterate over the matches in the text
+        pos = 0
+        match = search_re.match(doc.toPlainText(), pos)
+        while match.hasMatch():
+            start = match.capturedStart()
+            end = match.capturedEnd()
+
+            # Highlight the match
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            cursor.setCharFormat(highlight_format)
+
+            # Look for the next match
+            pos = end
+            match = search_re.match(doc.toPlainText(), pos)
+
+        cursor = self.captions_io.textCursor()  # get the QTextCursor associated with your QTextEdit
+        cursor.setPosition(cursor_position)  # set the cursor position
+        self.captions_io.setTextCursor(cursor)  # set the QTextCursor back to the QTextEdit
+
+        self.captions_io.blockSignals(False)  # unblock signals after modifying the text
+
+
+    def clear_search(self):
+        self.clear_caption()
+
+    def clear_caption(self):
+        self.search_input.setText("")
+        self.highlight_search_results()
 
 class image_basic():
 
