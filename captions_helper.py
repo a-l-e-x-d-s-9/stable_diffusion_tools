@@ -756,10 +756,17 @@ class ImageDropWidget(QWidget):
             self.captions_io.setProperty("text_modified", False)
             self.captions_io.setStyleSheet("")
 
+
+    def caption_text_handle_cursor(self, cursor_position):
+        cursor = self.captions_io.textCursor()  # get the QTextCursor associated with your QTextEdit
+        cursor.setPosition(cursor_position)  # set the cursor position
+        self.captions_io.setTextCursor(cursor)  # set the QTextCursor back to the QTextEdit
+
     def highlight_search_results(self):
         self.captions_io.blockSignals(True)  # block signals
 
         cursor_position = self.captions_io.textCursor().position()  # get the current cursor position
+
 
         # Clear existing formatting
         cursor = self.captions_io.textCursor()
@@ -771,6 +778,7 @@ class ImageDropWidget(QWidget):
         search_text = self.search_input.text()
         regex = QRegularExpression(search_text)
         if (not search_text) or (not regex.isValid()):
+            self.caption_text_handle_cursor(cursor_position)
             self.captions_io.blockSignals(False)
             return
 
@@ -800,9 +808,7 @@ class ImageDropWidget(QWidget):
             pos = end
             match = search_re.match(doc.toPlainText(), pos)
 
-        cursor = self.captions_io.textCursor()  # get the QTextCursor associated with your QTextEdit
-        cursor.setPosition(cursor_position)  # set the cursor position
-        self.captions_io.setTextCursor(cursor)  # set the QTextCursor back to the QTextEdit
+        self.caption_text_handle_cursor(cursor_position)
 
         self.captions_io.blockSignals(False)  # unblock signals after modifying the text
 
