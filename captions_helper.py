@@ -514,8 +514,7 @@ class ImageDropWidget(QWidget):
         return ', '.join(tags_list)
 
     def add_captions(self):
-        caption_text = self.caption_input.text().strip()  # Remove any leading/trailing spaces
-        tags_to_add = [tag.strip() for tag in caption_text.split(',')]  # Multiple tags separated by commas
+        tags_to_add_list = self.caption_to_tag_list(self.caption_input.text())
 
         comma_place_desired = self.comma_place_input.value()
 
@@ -530,10 +529,8 @@ class ImageDropWidget(QWidget):
 
             tags_list = self.caption_to_tag_list(self.image_captions[path])
 
-            tags_to_add = self.caption_to_tag_list(tags_to_add)
-
-            tags_list = [tag for tag in tags_list if
-                        tag not in tags_to_add]  # Remove tags to add from captions to avoid duplicates
+            tags_to_add = [tag for tag in tags_to_add_list if
+                        tag not in tags_list]  # Remove tags to add from captions to avoid duplicates
 
             comma_place = comma_place_desired
             if comma_place > len(tags_list):
@@ -550,9 +547,8 @@ class ImageDropWidget(QWidget):
                 txt_file.write(final_captions)
 
     def remove_captions(self):
-        caption_text = self.remove_caption_input.text().strip()  # Remove any leading/trailing spaces
 
-        tags_to_remove = [tag.strip() for tag in caption_text.split(',')]
+        tags_to_remove = self.caption_to_tag_list(self.remove_caption_input.text())
 
         for label in self.images:
             path = label.path
@@ -567,6 +563,8 @@ class ImageDropWidget(QWidget):
             # Remove the specified tags from captions
             tag_list = [caption for caption in tag_list if caption.strip() not in tags_to_remove]
             captions = self.tag_list_to_string(tag_list)
+
+            self.image_captions[path] = captions
 
             with open(txt_path, 'w') as txt_file:
                 txt_file.write(captions)
