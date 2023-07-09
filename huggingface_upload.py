@@ -11,6 +11,7 @@ import threading
 from tqdm.contrib.concurrent import thread_map
 import queue
 import psutil
+from collections import deque
 from threading import Lock
 
 progress_updates = queue.Queue()
