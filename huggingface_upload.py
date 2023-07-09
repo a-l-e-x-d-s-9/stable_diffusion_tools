@@ -16,7 +16,9 @@ from threading import Lock
 
 progress_updates = queue.Queue()
 
+
 stdout_lock = Lock()
+progress_estimation_lock = Lock()
 
 class SpeedMonitor(threading.Thread):
     def __init__(self, interval=1):
@@ -24,7 +26,7 @@ class SpeedMonitor(threading.Thread):
         self.interval = interval
         self.history = deque(maxlen=15)
         self.running = True
-        self.speed_pbar = tqdm(total=31, bar_format='{l_bar}{bar}| Upload speed: {n:.2f} MB/s', ncols=None)  # Speed progress bar
+        self.speed_pbar = tqdm(total=31, bar_format='{l_bar}{bar}| Upload speed: {n:.2f} MB/s', ncols=160, colour='green')  # Speed progress bar
 
     def run(self):
         old_value = psutil.net_io_counters().bytes_sent
@@ -48,18 +50,30 @@ class UploadMonitor(threading.Thread):
         super().__init__(daemon=True)
         self.total_size = 0  # Total file size to be uploaded
         self.uploaded_size = 0  # File size uploaded so far
-        self.upload_pbar = tqdm(total=self.total_size, unit='MB', unit_scale=True, desc="Upload Progress Estimation", ncols=None)  # Upload progress bar
-        self.speed = 0  # Upload speed
+        self.upload_pbar = tqdm(total=self.total_size / (1024 * 1024), unit='MB',
+                                bar_format='{l_bar}{bar}| {n:,.1f}/{total:,.1f} MB, ETA: {remaining}',
+                                ncols=160,
+                                colour='yellow')  # Upload progress bar
+
+        self.speed_bytes = 0  # Upload speed
         self.running = False
-        self.upload_efficiency = 0.987
+        self.upload_efficiency = 0.90
 
     def run(self):
         self.running = True
+        old_value = psutil.net_io_counters().bytes_sent
         while self.running:
             time.sleep(1)
-            self.uploaded_size += self.speed * self.upload_efficiency * 1024 * 1024  # Estimate uploaded size based on current speed
-            self.upload_pbar.n = self.uploaded_size / 1024 / 1024  # Update the upload progress bar
-            self.upload_pbar.refresh()
+            new_value = psutil.net_io_counters().bytes_sent
+            self.speed_bytes = (new_value - old_value) * self.upload_efficiency  # Calculate the speed in Bytes/s
+            old_value = new_value
+            self.uploaded_size += self.speed_bytes  # Update uploaded size based on current speed
+
+            with progress_estimation_lock:
+                self.upload_pbar.n = self.uploaded_size / (1024 * 1024)  # Convert uploaded size to MB when updating progress bar
+                self.upload_pbar.total = self.total_size / (1024 * 1024)  # Convert total size to MB when updating progress bar
+
+                self.upload_pbar.refresh()
 
     def stop(self):
         self.running = False
@@ -68,15 +82,27 @@ class UploadMonitor(threading.Thread):
     def add_file(self, file_size):
         # Call this method whenever a new file starts to upload
         self.total_size += file_size
-        self.upload_pbar.total = self.total_size / 1024 / 1024  # Update total size in the progress bar
+
+        with progress_estimation_lock:
+            self.upload_pbar.total = self.total_size / 1024 / 1024
+
+            self.upload_pbar.refresh()
 
     def finish_file(self, file_size):
         # Call this method whenever a file finishes uploading
-        self.total_size -= file_size
+        self.total_size = max(0, self.total_size - file_size)
+        self.uploaded_size = max(0, self.uploaded_size - file_size)
+
+        with progress_estimation_lock:
+            self.upload_pbar.n = self.uploaded_size / (1024 * 1024)
+            self.upload_pbar.total = self.total_size / 1024 / 1024
+
+            self.upload_pbar.refresh()
 
     def set_speed(self, speed):
         # Update the upload speed
-        self.speed = speed
+        self.speed_bytes = speed
+
 
 upload_monitor = UploadMonitor()
 
@@ -162,7 +188,7 @@ def upload_files(args, base_directory, valid_files):
     api = HfApi()
     repo_id = args.repository
     progress_bar_lock = Lock()
-    stdout_lock = Lock()
+
 
     upload_func = lambda filepath: upload_file(filepath, base_directory, repo_id, token, api, progress_bar_lock, remove=args.remove)
 
@@ -194,7 +220,7 @@ def main():
 
     speed_monitor = SpeedMonitor()
     speed_monitor.start()
-    upload_monitor.run()
+    upload_monitor.start()
 
     try:
         with open(args.configurations, 'r') as config_file:
@@ -219,7 +245,7 @@ def main():
         else:
             logger.warning(f"File {filepath} does not exist.")
 
-    progress_bar = tqdm(total=total_size, unit="MB", unit_scale=True)
+    progress_bar = tqdm(total=total_size, unit="MB", unit_scale=True, ncols=160, colour='red')
 
     thread_manage_progress_bar = threading.Thread(target=manage_progress_bar, args=(progress_bar,), daemon=True)
     thread_manage_progress_bar.start()
