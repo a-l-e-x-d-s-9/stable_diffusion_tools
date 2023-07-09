@@ -73,7 +73,8 @@ class UploadMonitor(threading.Thread):
                 self.upload_pbar.n = self.uploaded_size / (1024 * 1024)  # Convert uploaded size to MB when updating progress bar
                 self.upload_pbar.total = self.total_size / (1024 * 1024)  # Convert total size to MB when updating progress bar
 
-                self.upload_pbar.refresh()
+                if self.upload_pbar.n > 0:
+                    self.upload_pbar.refresh()
 
     def stop(self):
         self.running = False
