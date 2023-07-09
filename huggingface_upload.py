@@ -8,7 +8,11 @@ from tqdm import tqdm
 import concurrent.futures
 import time
 import threading
+from tqdm.contrib.concurrent import thread_map
+import queue
+from threading import Lock
 
+progress_updates = queue.Queue()
 
 
 def get_args():
@@ -18,6 +22,7 @@ def get_args():
     parser.add_argument("--repository", required=True, help="Repository on huggingface.com")
     parser.add_argument("--token", required=True, help="File containing your Hugging Face token")
     parser.add_argument("--remove", action="store_true", help="Remove files after upload")
+    parser.add_argument("--threads", type=int, default=3, help='Number of threads for parallel processing.')
     return parser.parse_args()
 
 logging.basicConfig(level=logging.INFO)
@@ -31,19 +36,14 @@ def compute_sha256(filepath, chunk_size=8192):
             hash_sha256.update(chunk)
     return hash_sha256.hexdigest()
 
-def upload_file(filepath, base_directory, repo_id, token, api, progress_bar, progress_bar_lock, max_attempts=3, remove=False):
+def upload_file(filepath, base_directory, repo_id, token, api, progress_bar_lock, max_attempts=3, remove=False):
     filename = os.path.basename(filepath)
-    readable_hash = ""
 
     # Compute the path in the repository by removing the base directory
     path_in_repo = os.path.relpath(filepath, base_directory)
 
-    readable_hash = compute_sha256(filepath)
-
     for attempt in range(1, max_attempts + 1):
         try:
-            logger.info(
-                f"Attempt {attempt}: Uploading to HF: huggingface.co/{repo_id}/{path_in_repo}, sha256: {readable_hash}")
 
             with open(filepath, "rb") as file:
                 response = api.upload_file(
@@ -57,7 +57,7 @@ def upload_file(filepath, base_directory, repo_id, token, api, progress_bar, pro
 
             # Update progress bar
             with progress_bar_lock:
-                progress_bar.update(os.path.getsize(filepath))
+                progress_updates.put(os.path.getsize(filepath))
 
             # Check if the upload was successful
             if response and isinstance(response, str) and response.startswith("https://"):
@@ -72,53 +72,83 @@ def upload_file(filepath, base_directory, repo_id, token, api, progress_bar, pro
 
             break
         except Exception as e:
-            logger.info(f"Error uploading {filename}: {e}")
+            logger.exception(f"Error uploading {filename}: {e}")
             if attempt == max_attempts:
-                logger.info(f"Failed to upload {filename} after {max_attempts} attempts")
+                logger.exception(f"Failed to upload {filename} after {max_attempts} attempts")
+                break
 
 
-def upload_files(args):
-    # Read configurations
-    with open(args.configurations, 'r') as config_file:
-        config = json.load(config_file)
+def upload_files(args, base_directory, valid_files):
 
-    base_directory = config.get('base_directory')
-    file_list = config.get('files', [])
-
-    with open(args.token, "r") as token_file:
-        token = token_file.read().strip()
+    try:
+        with open(args.token, "r") as token_file:
+            token = token_file.read().strip()
+    except Exception as e:
+        logger.exception(f"Token file {token}: {e}")
+        return
 
     api = HfApi()
     repo_id = args.repository
+    progress_bar_lock = Lock()
 
+    upload_func = lambda filepath: upload_file(filepath, base_directory, repo_id, token, api, progress_bar_lock, remove=args.remove)
 
-    # Calculate total size of all files
-    total_size = sum(os.path.getsize(filepath) for filepath in file_list)
+    # Use thread_map function to parallelize the uploads
+    thread_map(upload_func, valid_files, max_workers=args.threads)
 
-    # Create a progress bar
-    progress_bar = tqdm(total=total_size, unit="GB", unit_scale=True)
-
-    # Create a lock for progress bar
-    progress_bar_lock = threading.Lock()
-
-    # Use ThreadPoolExecutor to parallelize the uploads
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [
-            # pass the progress_bar to the upload_file function
-            executor.submit(upload_file, filepath, base_directory, repo_id, token, api, progress_bar,
-                            progress_bar_lock, remove=args.remove)
-            for filepath in file_list
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            future.result()
+    # Signal that uploads are done
+    progress_updates.put(None)
 
     logger.info("DONE")
     logger.info("Go to your repo and accept the PRs this created to see your files")
 
 
+def manage_progress_bar(progress_bar):
+    while True:
+        update = progress_updates.get()
+        if update is None:
+            break
+        progress_bar.update(update)
+
+
 def main():
     args = get_args()
-    upload_files(args)
+    if args.threads <= 0:
+        logger.error("Number of threads must be greater than zero.")
+        return
+
+    try:
+        with open(args.configurations, 'r') as config_file:
+            config = json.load(config_file)
+    except Exception as e:
+        logger.exception(f"Configurations file {config_file}: {e}")
+        return
+
+    base_directory = config.get('base_directory')
+    file_list = config.get('files', [])
+
+    if not base_directory or not file_list:
+        logger.error("Invalid configurations file.")
+        return
+
+    total_size = 0
+    valid_files = []
+    for filepath in file_list:
+        if os.path.isfile(filepath):
+            total_size += os.path.getsize(filepath)
+            valid_files.append(filepath)
+        else:
+            logger.warning(f"File {filepath} does not exist.")
+
+    progress_bar = tqdm(total=total_size, unit="MB", unit_scale=True)
+
+    thread_manage_progress_bar = threading.Thread(target=manage_progress_bar, args=(progress_bar,), daemon=True)
+    thread_manage_progress_bar.start()
+
+    upload_files(args, base_directory, valid_files)
+
+    # Wait for manage_progress_bar thread to finish
+    thread_manage_progress_bar.join()
 
 
 if __name__ == "__main__":
