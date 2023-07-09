@@ -43,6 +43,43 @@ class SpeedMonitor(threading.Thread):
         self.speed_pbar.close()
 
 
+class UploadMonitor(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.total_size = 0  # Total file size to be uploaded
+        self.uploaded_size = 0  # File size uploaded so far
+        self.upload_pbar = tqdm(total=self.total_size, unit='MB', unit_scale=True, desc="Upload Progress Estimation", ncols=None)  # Upload progress bar
+        self.speed = 0  # Upload speed
+        self.running = False
+        self.upload_efficiency = 0.987
+
+    def run(self):
+        self.running = True
+        while self.running:
+            time.sleep(1)
+            self.uploaded_size += self.speed * self.upload_efficiency * 1024 * 1024  # Estimate uploaded size based on current speed
+            self.upload_pbar.n = self.uploaded_size / 1024 / 1024  # Update the upload progress bar
+            self.upload_pbar.refresh()
+
+    def stop(self):
+        self.running = False
+        self.upload_pbar.close()
+
+    def add_file(self, file_size):
+        # Call this method whenever a new file starts to upload
+        self.total_size += file_size
+        self.upload_pbar.total = self.total_size / 1024 / 1024  # Update total size in the progress bar
+
+    def finish_file(self, file_size):
+        # Call this method whenever a file finishes uploading
+        self.total_size -= file_size
+
+    def set_speed(self, speed):
+        # Update the upload speed
+        self.speed = speed
+
+upload_monitor = UploadMonitor()
+
 def get_args():
     parser = argparse.ArgumentParser(description="Upload files to Hugging Face")
     parser.add_argument("--configurations", required=True,
@@ -66,9 +103,13 @@ def compute_sha256(filepath, chunk_size=8192):
 
 def upload_file(filepath, base_directory, repo_id, token, api, progress_bar_lock, max_attempts=3, remove=False):
     filename = os.path.basename(filepath)
+    file_size = os.path.getsize(filepath)
 
     # Compute the path in the repository by removing the base directory
     path_in_repo = os.path.relpath(filepath, base_directory)
+
+    # Add file size to upload monitor
+    upload_monitor.add_file(file_size)
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -85,7 +126,8 @@ def upload_file(filepath, base_directory, repo_id, token, api, progress_bar_lock
 
             # Update progress bar
             with progress_bar_lock:
-                progress_updates.put(os.path.getsize(filepath))
+                progress_updates.put(file_size)
+                upload_monitor.finish_file(file_size)  # Mark file as finished in upload monitor
 
             # Check if the upload was successful
             if response and isinstance(response, str) and response.startswith("https://"):
@@ -104,6 +146,8 @@ def upload_file(filepath, base_directory, repo_id, token, api, progress_bar_lock
             if attempt == max_attempts:
                 logger.exception(f"Failed to upload {filename} after {max_attempts} attempts")
                 break
+
+    upload_monitor.update_uploaded(file_size)  # Update uploaded size in upload monitor
 
 
 def upload_files(args, base_directory, valid_files):
@@ -147,8 +191,10 @@ def main():
         logger.error("Number of threads must be greater than zero.")
         return
 
+
     speed_monitor = SpeedMonitor()
     speed_monitor.start()
+    upload_monitor.run()
 
     try:
         with open(args.configurations, 'r') as config_file:
@@ -184,6 +230,7 @@ def main():
     thread_manage_progress_bar.join()
 
     speed_monitor.stop()
+    upload_monitor.stop()
 
 
 if __name__ == "__main__":
