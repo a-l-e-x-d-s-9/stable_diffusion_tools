@@ -16,12 +16,15 @@ from threading import Lock
 
 progress_updates = queue.Queue()
 
+stdout_lock = Lock()
+
 class SpeedMonitor(threading.Thread):
     def __init__(self, interval=1):
         super().__init__(daemon=True)
         self.interval = interval
         self.history = deque(maxlen=15)
         self.running = True
+        self.speed_pbar = tqdm(total=31, bar_format='{l_bar}{bar}| Upload speed: {n:.2f} MB/s', ncols=None)  # Speed progress bar
 
     def run(self):
         old_value = psutil.net_io_counters().bytes_sent
@@ -32,10 +35,12 @@ class SpeedMonitor(threading.Thread):
             old_value = new_value
             if len(self.history) == self.history.maxlen:
                 speed = sum(self.history) / len(self.history) / self.interval / 1024 / 1024
-                tqdm.write(f'Average upload speed over last 15s: {speed:.2f} MB/s', end='\r')
+                self.speed_pbar.n = speed
+                self.speed_pbar.refresh()
 
     def stop(self):
         self.running = False
+        self.speed_pbar.close()
 
 
 def get_args():
@@ -113,6 +118,7 @@ def upload_files(args, base_directory, valid_files):
     api = HfApi()
     repo_id = args.repository
     progress_bar_lock = Lock()
+    stdout_lock = Lock()
 
     upload_func = lambda filepath: upload_file(filepath, base_directory, repo_id, token, api, progress_bar_lock, remove=args.remove)
 
@@ -131,7 +137,8 @@ def manage_progress_bar(progress_bar):
         update = progress_updates.get()
         if update is None:
             break
-        progress_bar.update(update)
+        with stdout_lock:  # acquire the lock before updating
+            progress_bar.update(update)
 
 
 def main():
