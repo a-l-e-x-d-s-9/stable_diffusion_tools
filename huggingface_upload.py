@@ -10,9 +10,31 @@ import time
 import threading
 from tqdm.contrib.concurrent import thread_map
 import queue
+import psutil
 from threading import Lock
 
 progress_updates = queue.Queue()
+
+class SpeedMonitor(threading.Thread):
+    def __init__(self, interval=1):
+        super().__init__(daemon=True)
+        self.interval = interval
+        self.history = deque(maxlen=15)
+        self.running = True
+
+    def run(self):
+        old_value = psutil.net_io_counters().bytes_sent
+        while self.running:
+            time.sleep(self.interval)
+            new_value = psutil.net_io_counters().bytes_sent
+            self.history.append(new_value - old_value)
+            old_value = new_value
+            if len(self.history) == self.history.maxlen:
+                speed = sum(self.history) / len(self.history) / self.interval / 1024 / 1024
+                tqdm.write(f'Average upload speed over last 15s: {speed:.2f} MB/s', end='\r')
+
+    def stop(self):
+        self.running = False
 
 
 def get_args():
@@ -117,6 +139,9 @@ def main():
         logger.error("Number of threads must be greater than zero.")
         return
 
+    speed_monitor = SpeedMonitor()
+    speed_monitor.start()
+
     try:
         with open(args.configurations, 'r') as config_file:
             config = json.load(config_file)
@@ -149,6 +174,8 @@ def main():
 
     # Wait for manage_progress_bar thread to finish
     thread_manage_progress_bar.join()
+
+    speed_monitor.stop()
 
 
 if __name__ == "__main__":
