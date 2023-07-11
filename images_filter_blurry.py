@@ -7,9 +7,9 @@ from shutil import move
 def variance_of_laplacian(image):
     return cv2.Laplacian(image, cv2.CV_64F).var()
 
-def move_blurry_images(src_folder, dest_folder, threshold):
-    if not os.path.exists(dest_folder):
-        os.makedirs(dest_folder)
+def move_blurry_images(src_folder, blurry_folder, threshold):
+    if not os.path.exists(blurry_folder):
+        os.makedirs(blurry_folder)
         
     count_blurry = 0
 
@@ -21,13 +21,13 @@ def move_blurry_images(src_folder, dest_folder, threshold):
             fm = variance_of_laplacian(gray)
             if fm < threshold:
                 count_blurry += 1
-                move(image_path, os.path.join(dest_folder, filename))
+                move(image_path, os.path.join(blurry_folder, filename))
                 print(f"Moved[{count_blurry}]: {filename}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Move blurry images.')
     parser.add_argument('--src_folder', type=str, required=True, help='Source folder containing images.')
-    parser.add_argument('--dest_folder', type=str, required=True, help='Destination folder to move blurry images.')
+    parser.add_argument('--blurry_folder', type=str, required=True, help='Destination folder to move blurry images.')
     parser.add_argument('--threshold', type=float, default=100.0, help='Blurry threshold.')
     args = parser.parse_args()
-    move_blurry_images(args.src_folder, args.dest_folder, args.threshold)
+    move_blurry_images(args.src_folder, args.blurry_folder, args.threshold)
