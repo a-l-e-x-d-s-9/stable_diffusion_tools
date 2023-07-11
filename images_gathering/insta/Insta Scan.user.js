@@ -8,6 +8,7 @@
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=instagram.com
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_registerMenuCommand
 // ==/UserScript==
 
 
@@ -63,20 +64,44 @@
         if (startSlideshow) {
             clickNextImage();
         }
-    }, 100);
+    }, 80);
 
     const downloadImage = async (url, imageName) => {
         const response = await fetch(url);
         const blob = await response.blob();
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
+
         a.style.display = 'none';
         a.href = blobUrl;
-        a.download = imageName || 'download.jpg';
+
+        let urlParts = url.split("/");
+        let fileName = urlParts[urlParts.length - 1].split("?")[0];
+
+        a.download = imageName || fileName;
+
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
     }
+
+    function getFileExtension(url) {
+        // Split the URL by '.' and take the last element, which should be the file extension
+        const splitUrl = url.split('.');
+        let extension = splitUrl[splitUrl.length - 1];
+        // If the extension includes a '?', remove the '?' and everything after it
+        extension = extension.split('?')[0];
+        // If the extension includes '&', remove the '&' and everything after it
+        extension = extension.split('&')[0];
+        return extension;
+    }
+
+    function clearList() {
+        downloadedImages = [];
+        GM_setValue('downloadedImages', JSON.stringify(downloadedImages));
+    }
+
+    GM_registerMenuCommand('Clear Image List', clearList);
 
 
 })();
