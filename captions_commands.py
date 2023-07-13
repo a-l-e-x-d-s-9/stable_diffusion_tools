@@ -62,18 +62,23 @@ def read_file(file_path: str) -> List[str]:
     validate_input(file_path)
     try:
         with open(file_path, 'r') as file:
-            return file.read().split(', ')
+            return tags_str_to_list(file.read())
     except (IOError, PermissionError) as e:
         logging.error(f"Unable to read file {file_path}: {str(e)}")
         raise
+
+def tags_str_to_list(all_tags_str: str) -> List[str]:
+    tags = all_tags_str.split(',')
+    return [tag.strip() for tag in tags if tag.strip()]
 
 def detect_and_remove_empty_tags(file_path: str) -> None:
     validate_input(file_path)
     try:
         with open(file_path, 'r') as file:
-            tags = file.read().split(',')
-        # strip whitespace and filter out empty tags
-        new_tags = [tag.strip() for tag in tags if tag.strip()]
+            tags_str = file.read()
+            tags = tags_str.split(',')
+
+        new_tags = tags_str_to_list(tags_str)
         # only write back to the file if empty tags were removed
         if len(tags) != len(new_tags):
             logging.info(f"Remove empty tags from: {file_path}.")
@@ -262,6 +267,45 @@ def tag_replace_in_file(caption_file: str, old_tag: str, new_tag: str, dry_run=F
     else:
         logging.info("Dry run mode, no changes were made to the file.")
 
+
+def remove_tags_beside_specified(caption_file: str, tags_to_preserve: List[str], output_file: str, dry_run=False) -> None:
+    #logging.info(f"start.")
+
+    if not os.path.exists(caption_file):
+        logging.error(f"{caption_file} does not exist.")
+        return
+    if not os.path.isfile(caption_file):
+        logging.error(f"{caption_file} is not a file.")
+        return
+    if not isinstance(tags_to_preserve, list) or len(tags_to_preserve) == 0:
+        logging.error("Invalid tags to preserve. Must be a non-empty list of strings.")
+        return
+
+    is_changed = False
+    tags_original = read_file(caption_file)
+    tags = clean_tags(tags_original)
+    is_changed = len(tags_original) != len(tags)
+
+    preserved_tags = [tag for tag in tags if tag in tags_to_preserve]
+
+    #logging.info(f"preserved_tags amount: {len(preserved_tags)}.")
+
+    if len(tags_original) != len(preserved_tags):
+        tags = preserved_tags
+        is_changed = True
+        #logging.info(f"Preserved tags: {', '.join(tags_to_preserve)}")
+    else:
+        logging.info("No changes made.")
+
+    if not dry_run:
+        try:
+            if is_changed:
+                write_file(caption_file, tags)
+        except (IOError, PermissionError) as e:
+            logging.error(f"Unable to write to file: {str(e)}")
+            raise
+    else:
+        logging.info("Dry run mode, no changes were made to the file.")
 
 
 def move_to_validation(root_folder: str, from_folder: str, num_files: int, dry_run: bool = False) -> None:
@@ -601,6 +645,8 @@ def remove_captions_without_image_work(root_folder: str, threads_number:int, is_
     return errors
 
 
+
+
 def main(args):
     if args.mode in [ 'search_for_tags', 'full_statistic', 'statistic_for_subject',
                      'check_images_and_captions' ] and args.output_file is None:
@@ -612,6 +658,22 @@ def main(args):
         check_images_and_captions(args.root, args.min_size, args.max_size, args.min_tags, args.output_file, args.threads, args.dry_run)
     elif args.mode == 'remove_captions_without_image':
         remove_captions_without_image(args.root, args.threads, args.output_file, args.dry_run)
+    elif args.mode == 'remove_tags_beside_specified':
+        if not args.tag.strip():
+            logging.error('No tag provided, skipping')
+        else:
+            tags = clean_tags(tags_str_to_list(args.tag))
+            logging.info(f'starting, preserving tags amount: {len(tags)}')
+            if 0 < len(tags):
+                with ThreadPoolExecutor(max_workers=args.threads) as executor:
+                    for subject_folder in get_all_sub_folders(args.root):
+                        for caption_file in get_caption_files(subject_folder):
+                            #logging.info(f'file: {caption_file}')
+                            executor.submit(remove_tags_beside_specified, caption_file, tags, args.output_file, args.dry_run)
+
+                    executor.shutdown()
+            else:
+                logging.error('No valid tags provided, aborting.')
     elif args.mode == 'remove_tag_all':
         if not args.tag.strip():  # check if the tag is empty after removing leading/trailing whitespace
             logging.error('No tag provided, skipping')
@@ -651,7 +713,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Script for handling captions for images.')
-    parser.add_argument('-m', '--mode', help='Mode of operation. Options: check_images_and_captions, remove_captions_without_image, remove_tag_all, replace_tag, add_tag_all, add_tag_single, move_to_validation, search_for_tags, full_statistic, statistic_for_subject.')
+    parser.add_argument('-m', '--mode', help='Mode of operation. Options: check_images_and_captions, remove_captions_without_image, remove_tags_beside_specified, remove_tag_all, replace_tag, add_tag_all, add_tag_single, move_to_validation, search_for_tags, full_statistic, statistic_for_subject.')
     parser.add_argument('-r', '--root', help='Root folder containing all subject folders.')
     parser.add_argument('-t', '--tag', help='Tag to add or remove.')
     parser.add_argument('-tn', '--tag_new', help='New tag to use.')
