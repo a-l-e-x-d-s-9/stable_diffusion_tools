@@ -17,6 +17,11 @@ def move_blurry_images(src_folder, blurry_folder, threshold):
         if filename.endswith(".jpg") or filename.endswith(".png"):
             image_path = os.path.join(src_folder, filename)
             image = cv2.imread(image_path)
+
+            if image is None or image.size == 0:
+                print(f'Invalid image or could not read the image: {image_path}')
+                continue
+
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             fm = variance_of_laplacian(gray)
             if fm < threshold:
