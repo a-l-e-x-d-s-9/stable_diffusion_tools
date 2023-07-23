@@ -67,12 +67,15 @@ class UploadMonitor(threading.Thread):
             time.sleep(1)
             new_value = psutil.net_io_counters().bytes_sent
             self.speed_bytes = (new_value - old_value) * self.upload_efficiency  # Calculate the speed in Bytes/s
-            old_value = new_value
             self.uploaded_size += self.speed_bytes  # Update uploaded size based on current speed
-
             with progress_estimation_lock:
-                self.upload_pbar.n = self.uploaded_size / (1024 * 1024)  # Convert uploaded size to MB when updating progress bar
-                self.upload_pbar.total = self.total_size / (1024 * 1024)  # Convert total size to MB when updating progress bar
+                self.uploaded_size = min(self.uploaded_size,
+                                         self.total_size)  # Clamp uploaded size to not exceed total size
+
+                self.upload_pbar.n = self.uploaded_size / (
+                            1024 * 1024)  # Convert uploaded size to MB when updating progress bar
+                self.upload_pbar.total = self.total_size / (
+                            1024 * 1024)  # Convert total size to MB when updating progress bar
 
                 if self.upload_pbar.n is not None and self.upload_pbar.total is not None:
                     if self.upload_pbar.n > 0 and self.upload_pbar.total > 0:
@@ -89,6 +92,7 @@ class UploadMonitor(threading.Thread):
     def add_file(self, file_size):
         # Call this method whenever a new file starts to upload
         self.total_size += file_size
+        self.total_size = max(self.total_size, 0)  # Make sure total size is not negative
 
         with progress_estimation_lock:
             self.upload_pbar.total = self.total_size / 1024 / 1024
