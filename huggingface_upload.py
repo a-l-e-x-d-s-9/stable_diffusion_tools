@@ -68,6 +68,8 @@ class UploadMonitor(threading.Thread):
             new_value = psutil.net_io_counters().bytes_sent
             self.speed_bytes = (new_value - old_value) * self.upload_efficiency  # Calculate the speed in Bytes/s
             self.uploaded_size += self.speed_bytes  # Update uploaded size based on current speed
+            old_value = new_value
+
             with progress_estimation_lock:
                 self.uploaded_size = min(self.uploaded_size,
                                          self.total_size)  # Clamp uploaded size to not exceed total size
