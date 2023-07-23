@@ -76,7 +76,11 @@ class UploadMonitor(threading.Thread):
 
                 if self.upload_pbar.n is not None and self.upload_pbar.total is not None:
                     if self.upload_pbar.n > 0 and self.upload_pbar.total > 0:
-                        self.upload_pbar.refresh()
+                        try:
+                            self.upload_pbar.refresh()
+                        except TypeError as e:
+                            print(f"Error during refresh: {e}")
+                            print(f"Current state of the progress bar: {vars(self.upload_pbar)}")
 
     def stop(self):
         self.running = False
