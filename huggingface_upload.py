@@ -38,7 +38,8 @@ class SpeedMonitor(threading.Thread):
             if len(self.history) == self.history.maxlen:
                 speed = sum(self.history) / len(self.history) / self.interval / 1024 / 1024
                 self.speed_pbar.n = speed
-                self.speed_pbar.refresh()
+                if self.speed_pbar.total is not None:
+                    self.speed_pbar.refresh()
 
     def stop(self):
         self.running = False
@@ -73,8 +74,9 @@ class UploadMonitor(threading.Thread):
                 self.upload_pbar.n = self.uploaded_size / (1024 * 1024)  # Convert uploaded size to MB when updating progress bar
                 self.upload_pbar.total = self.total_size / (1024 * 1024)  # Convert total size to MB when updating progress bar
 
-                if self.upload_pbar.n > 0:
-                    self.upload_pbar.refresh()
+                if self.upload_pbar.n is not None and self.upload_pbar.total is not None:
+                    if self.upload_pbar.n > 0 and self.upload_pbar.total > 0:
+                        self.upload_pbar.refresh()
 
     def stop(self):
         self.running = False
@@ -174,7 +176,7 @@ def upload_file(filepath, base_directory, repo_id, token, api, progress_bar_lock
                 logger.exception(f"Failed to upload {filename} after {max_attempts} attempts")
                 break
 
-    upload_monitor.update_uploaded(file_size)  # Update uploaded size in upload monitor
+    upload_monitor.finish_file(file_size)  # Update uploaded size in upload monitor
 
 
 def upload_files(args, base_directory, valid_files):
