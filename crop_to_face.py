@@ -41,42 +41,101 @@ def resize_image_with_aspect_ratio(image, min_dimension):
     return resized_image
 
 
-def detect_and_zoom_to_face(image, min_size=844):
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+def detect_and_zoom_to_face(image, min_size=80):
+    face_cascade_front = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    face_cascade_side = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_profileface.xml')
+    # eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(400, 400))
-    is_debug = False
+    processed_faces = []
 
-    for (x, y, w, h) in faces:
-        expand_ratio = 2
-        half_expand_w = int(w * (expand_ratio - 1) / 2)
-        half_expand_h = int(h * (expand_ratio - 1) / 2)
+    def filter_faces(faces):
+        # Sort the faces by area (from largest to smallest)
+        faces.sort(key=lambda bbox: bbox[2] * bbox[3], reverse=True)
 
-        expanded_x = max(0, x - half_expand_w)
-        expanded_y = max(0, y - half_expand_h)
-        expanded_w = min(image.shape[1] - expanded_x, w + 2 * half_expand_w)
-        expanded_h = min(image.shape[0] - expanded_y, h + 2 * half_expand_h)
+        filtered_faces = []
 
-        if is_debug:
-            # Draw a rectangle and center dot on the original image
-            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.circle(image, (x + w // 2, y + h // 2), radius=3, color=(0, 255, 0), thickness=-1)
+        for new_face in faces:
+            x1, y1, w1, h1 = new_face
 
-        cropped_face = image[expanded_y:expanded_y + expanded_h, expanded_x:expanded_x + expanded_w]
-        min_dimension = min(cropped_face.shape[:2])
-        scale_ratio = min_size / min_dimension
+            # Check if new_face overlaps with any face in filtered_faces
+            for existing_face in filtered_faces:
+                x2, y2, w2, h2 = existing_face
 
-        resized_face = cv2.resize(cropped_face, None, fx=scale_ratio, fy=scale_ratio, interpolation=cv2.INTER_AREA)
+                # Calculate the overlap coordinates
+                x_overlap = max(x1, x2)
+                y_overlap = max(y1, y2)
+                w_overlap = min(x1 + w1, x2 + w2) - x_overlap
+                h_overlap = min(y1 + h1, y2 + h2) - y_overlap
 
-        return resized_face  # return the original image as well for debugging
+                # If the overlap is not empty, there is an overlap
+                if w_overlap > 0 and h_overlap > 0:
+                    break
+            else:
+                # If we didn't break from the loop, there is no overlap
+                filtered_faces.append(new_face)
+
+        return filtered_faces
+
+    def extract_faces(faces):
+        is_debug = True
+        extracted_faces = []
+
+        for (x, y, w, h) in faces:
+            expand_ratio = 1.8
+
+            expanded_x = int(max(0, x - w * (expand_ratio - 1) // 2))
+            expanded_y = int(max(0, y - h * (expand_ratio - 1) // 2))
+            expanded_w = int(min(image.shape[1] - expanded_x, w * expand_ratio))
+            expanded_h = int(min(image.shape[0] - expanded_y, h * expand_ratio))
+
+            if is_debug:
+                # Draw a rectangle and center dot on the original image
+                cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                #cv2.circle(image, (x + w // 2, y + h // 2), radius=3, color=(0, 255, 0), thickness=-1)
+
+            cropped_face = image[expanded_y:expanded_y + expanded_h, expanded_x:expanded_x + expanded_w]
+
+            # eyes = eye_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=7,
+            #                                                     minSize=(int(min_size * 0.05), int(min_size * 0.05)))
+
+
+            # print(f"face added: x:{x},y:{y},w:{w},h:{h}")
+
+            # if 1 <= len(eyes):
+            #    pass
+            # else:
+            # for (x, y, w, h) in eyes:
+            #     cv2.rectangle(cropped_face, (x - expanded_x, y - expanded_y), (x + w - expanded_x, y + h - expanded_y), color=(0, 0, 255), thickness=2)
+
+            extracted_faces.append(cropped_face)
+
+        return extracted_faces  # return the original image as well for debugging
+
+    faces_all = []
+    faces_all.extend( face_cascade_front.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=7,
+                                                      minSize=(min_size, min_size)) )
+
+    faces_all.extend( face_cascade_side.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=7,
+                                                    minSize=(int(min_size * 0.6), min_size)))
+
+    filter_faces_list = filter_faces(faces_all)
+
+
+    processed_faces = extract_faces(filter_faces_list)
+
+    return processed_faces
+
 
 def process_images(source_folder, target_folder=None):
     source_folder_path = Path(source_folder)
     target_folder_path = Path(target_folder) if target_folder else source_folder_path
 
     # Prepare list of image paths, ignoring hidden files and directories
-    image_paths = [p for p in source_folder_path.glob('**/*.jpg') if '/.' not in p.as_posix()]
+    image_paths = [p for p in source_folder_path.glob('**/*')
+                   if ('/.' not in p.as_posix()
+                       and p.suffix.lower() in ['.jpg', '.jpeg', '.png'])]
 
     total_images = len(image_paths)
     processed_images = 0
@@ -86,19 +145,22 @@ def process_images(source_folder, target_folder=None):
         image = cv2.imread(str(image_path))
 
         # Process the image
-        processed_image = detect_and_zoom_to_face(image)
+        processed_faces = detect_and_zoom_to_face(image)
+        #print(f"len(processed_faces):{len(processed_faces)}")
+        for i, processed_face in enumerate(processed_faces):
+            #print(f"face processed_faces: i:{i}")
+            if processed_face is not None:
+                # Create the output path
+                relative_path = image_path.relative_to(source_folder_path)
+                output_path = target_folder_path / relative_path.with_stem(relative_path.stem + f"_face_{i}")  # add "_face_{i}" suffix and face index
 
-        if processed_image is not None:
-            # Create the output path
-            relative_path = image_path.relative_to(source_folder_path)
-            output_path = target_folder_path / relative_path.with_stem("face_" + relative_path.stem)  # add "face_" prefix
 
-            # Make sure the output directory exists
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+                # Make sure the output directory exists
+                output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Save the processed image
-            cv2.imwrite(str(output_path), processed_image)
-            processed_images += 1
+                # Save the processed image
+                cv2.imwrite(str(output_path), processed_face)
+                processed_images += 1
 
         # Show progress
         #print(f"Processed {processed_images}/{total_images} images", end='\r')
