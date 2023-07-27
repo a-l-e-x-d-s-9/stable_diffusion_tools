@@ -5,6 +5,7 @@ from pathlib import Path
 from tqdm import tqdm  # You need to install tqdm. If not installed, run: pip install tqdm
 import concurrent.futures
 
+
 def expand_bounding_box(x, y, w, h, img_width, img_height, margin_ratio):
     """
     Expand the bounding box by a margin ratio while ensuring it stays within image boundaries.
