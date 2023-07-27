@@ -3,6 +3,7 @@ import os
 import argparse
 from pathlib import Path
 from tqdm import tqdm  # You need to install tqdm. If not installed, run: pip install tqdm
+import concurrent.futures
 
 def expand_bounding_box(x, y, w, h, img_width, img_height, margin_ratio):
     """
@@ -41,7 +42,7 @@ def resize_image_with_aspect_ratio(image, min_dimension):
     return resized_image
 
 
-def detect_and_zoom_to_face(image, min_size=80):
+def detect_and_zoom_to_face(image, min_size=512):
     face_cascade_front = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     face_cascade_side = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_profileface.xml')
     # eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
@@ -79,7 +80,7 @@ def detect_and_zoom_to_face(image, min_size=80):
         return filtered_faces
 
     def extract_faces(faces):
-        is_debug = True
+        is_debug = False
         extracted_faces = []
 
         for (x, y, w, h) in faces:
@@ -128,6 +129,27 @@ def detect_and_zoom_to_face(image, min_size=80):
     return processed_faces
 
 
+import concurrent.futures
+
+def process_single_image(image_path, source_folder_path, target_folder_path):
+    # Open the image file
+    image = cv2.imread(str(image_path))
+
+    # Process the image
+    processed_faces = detect_and_zoom_to_face(image)
+
+    for i, processed_face in enumerate(processed_faces):
+        if processed_face is not None:
+            # Create the output path
+            relative_path = image_path.relative_to(source_folder_path)
+            output_path = target_folder_path / relative_path.with_stem(relative_path.stem + f"_face_{i}")  # add "_face_{i}" suffix and face index
+
+            # Make sure the output directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Save the processed image
+            cv2.imwrite(str(output_path), processed_face)
+
 def process_images(source_folder, target_folder=None):
     source_folder_path = Path(source_folder)
     target_folder_path = Path(target_folder) if target_folder else source_folder_path
@@ -138,32 +160,11 @@ def process_images(source_folder, target_folder=None):
                        and p.suffix.lower() in ['.jpg', '.jpeg', '.png'])]
 
     total_images = len(image_paths)
-    processed_images = 0
 
-    for image_path in tqdm(image_paths, total=total_images):  # using tqdm for progress bar
-        # Open the image file
-        image = cv2.imread(str(image_path))
-
-        # Process the image
-        processed_faces = detect_and_zoom_to_face(image)
-        #print(f"len(processed_faces):{len(processed_faces)}")
-        for i, processed_face in enumerate(processed_faces):
-            #print(f"face processed_faces: i:{i}")
-            if processed_face is not None:
-                # Create the output path
-                relative_path = image_path.relative_to(source_folder_path)
-                output_path = target_folder_path / relative_path.with_stem(relative_path.stem + f"_face_{i}")  # add "_face_{i}" suffix and face index
-
-
-                # Make sure the output directory exists
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-
-                # Save the processed image
-                cv2.imwrite(str(output_path), processed_face)
-                processed_images += 1
-
-        # Show progress
-        #print(f"Processed {processed_images}/{total_images} images", end='\r')
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        # The map function takes a function and an iterable and applies the function to every element in the iterable
+        # Wrap tqdm around it to add a progress bar
+        list(tqdm(executor.map(lambda image_path: process_single_image(image_path, source_folder_path, target_folder_path), image_paths), total=total_images))
 
 
 
