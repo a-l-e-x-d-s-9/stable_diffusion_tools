@@ -161,7 +161,7 @@ def process_images(source_folder, target_folder=None):
 
     total_images = len(image_paths)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         # The map function takes a function and an iterable and applies the function to every element in the iterable
         # Wrap tqdm around it to add a progress bar
         list(tqdm(executor.map(lambda image_path: process_single_image(image_path, source_folder_path, target_folder_path), image_paths), total=total_images))
