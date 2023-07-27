@@ -29,6 +29,13 @@ def apply_center_mask(image):
 
 
 def variance_of_laplacian(image):
+    MAX_IMAGE_DIMENSION = 768  # Maximum dimension (width or height) of an image before it is resized
+
+    # If the image is too large, resize it
+    if image.shape[0] > MAX_IMAGE_DIMENSION or image.shape[1] > MAX_IMAGE_DIMENSION:
+        scale = MAX_IMAGE_DIMENSION / max(image.shape[0], image.shape[1])
+        image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+
     return cv2.Laplacian(image, cv2.CV_64F).var()
 
 
