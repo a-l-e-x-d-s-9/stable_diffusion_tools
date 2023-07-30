@@ -9,7 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 from skimage.metrics import structural_similarity  # pip install scikit-image
 from skimage.filters import gaussian
 import cpbd  # had to change "from imageio import imread" in compute.py
-
+from pathlib import Path
+import cv2
+import numpy as np
 
 def get_center_and_radius(image):
     center = (image.shape[1] // 2, image.shape[0] // 2)
@@ -23,9 +25,18 @@ def apply_center_mask(image):
     mask = np.zeros(image.shape, dtype=np.uint8)
     center, radius = get_center_and_radius(image)
     cv2.circle(mask, center, radius, (255, 255, 255), thickness=-1)
+    image_masked = cv2.bitwise_and(image, mask)
 
-    # Apply the mask to the image
-    return cv2.bitwise_and(image, mask)
+    # Create a rectangle around the circle
+    x, y, r = center[0], center[1], radius
+    bounding_rect = (x - r, y - r, 2 * r, 2 * r)
+
+    # Crop the image to the rectangle
+    cropped_image = image_masked[bounding_rect[1]:bounding_rect[1] + bounding_rect[3],
+                    bounding_rect[0]:bounding_rect[0] + bounding_rect[2]]
+
+
+    return cropped_image
 
 
 def variance_of_laplacian(image):
@@ -100,6 +111,7 @@ def process_image(filename, src_folder, blurry_folder, check_center, pbar, thres
             file_name += f"si {si:.8f}"
 
         cv2.imwrite(str(os.path.join(blurry_folder, f"{file_name}.jpg")), image)
+        #cv2.imwrite(str(os.path.join(blurry_folder, f"{file_name}.jpg")), image_center_if_needed)
 
         return 1
     else:
@@ -150,6 +162,6 @@ if __name__ == "__main__":
         exit(-1)
 
     move_blurry_images(args.src_folder, args.blurry_folder, args.check_center, args.threshold_vol_low_is_blurry,
-                       args.threshold_ssim_high_is_blurry, args.debug)
+                        args.threshold_ssim_high_is_blurry, args.debug)
 
 # python3 images_filter_blurry.py --src_folder /path/to/images --blurry_folder /path/to/blurry_images --threshold_vol_low_is_blurry 0.14 --threshold_ssim_high_is_blurry 0.997 --check-center
