@@ -44,7 +44,7 @@ file_lock = Lock()
 
 def extract_img_url(html_content: str, base_domain: str) -> str:
     # Regex pattern to find image tag with the given style and src attributes
-    pattern = r'<img style=" width: 100%;\n  height: auto;" src="([^"]*)" alt> <h2 class="title wow fadeInUp" data-wow-delay=".4s" data-wow-duration="1.8s">2080<span style="color:black;"> x 2080</span></h2>'
+    pattern = r'images/steptodown.com([^"]+)'
     
     # Find all matches
     matches = re.findall(pattern, html_content)
@@ -52,7 +52,7 @@ def extract_img_url(html_content: str, base_domain: str) -> str:
     # If a match was found
     if matches:
         # Complete the URL if it is relative and return
-        return urllib.parse.urljoin(base_domain, matches[0])
+        return base_domain + matches[0]
     
     # Return empty string if no match was found
     return ""
@@ -71,9 +71,10 @@ def download_image(idx, original_url):
         # If the POST request is successful, the status code will be 200
         if response.status_code == 200:
             print(f'Request was successful for URL {idx}.')
+            rawdata = response.content
 
-            html_content = response.content.decode('utf-8')  # Convert bytes to string
-            image_file_url = extract_img_url(html_content, "https://steptodown.com/getty-images-downloader/")
+            html_content = rawdata.decode('utf-8')
+            image_file_url = extract_img_url(html_content, "https://steptodown.com/getty-images-downloader/images/steptodown.com")
 
             # Get the filename from the image_file_url
             file_name = os.path.join(args.output, os.path.basename(urllib.parse.urlparse(image_file_url).path))
