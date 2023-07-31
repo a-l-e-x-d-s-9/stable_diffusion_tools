@@ -4,7 +4,7 @@ import sys
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame, QTextEdit,
                              QScrollArea, QMessageBox, QSizePolicy, QAbstractItemView, QListView, QAbstractScrollArea,
-                             QStyledItemDelegate)
+                             QStyledItemDelegate, QCheckBox)
 from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette, QTransform, QImage, QTextCharFormat, QTextCursor, QDrag, \
     QBrush
 from PyQt5.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, QRect
@@ -40,24 +40,16 @@ class CustomListWidget(QListWidget):
         self.setViewMode(QListView.IconMode)
         self.setFlow(QListView.LeftToRight)
         self.setWrapping(True)
-        self.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)  # Adjust widget size to content
         self.setResizeMode(QListView.Adjust)
         self.setFlow(QListView.LeftToRight)
         self.setWrapping(True)
+        #self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
         #self.setLayoutMode(QListView.Flow)
         self.setStyleSheet("""
         QListWidget::item {
             border-radius: 10px; 
             min-width: 50px; 
             min-height: 25px;
-            /*color: black;   Default color */
-            /*background-color: red;   Default background color */
-        }
-        QListWidget::item[enabled=true] {
-            /* background-color: green; */
-        }
-        QListWidget::item[enabled=false] {
-            /* background-color: red; */
         }
         QListWidget::item:selected {
             color: yellow;
@@ -68,15 +60,21 @@ class CustomListWidget(QListWidget):
                         "Right click to add new.\n"
                         "Long left click to edit.\n")
         self.tag_states = {}
-        #self.itemChanged.connect(self.handleItemChanged)
-        #self.parent().commitData.connect(self.handleItemChange)
-        #self.parent().handleItemChanged(self.handleItemChange)
+
         self.itemChanged.connect(self.handleItemChanged)
         self.spacing = 7
         self.setSpacing(self.spacing)  # Added padding between labels
         self.setItemDelegate(ItemDelegate(self))
         self.setLayoutMode(QListView.SinglePass)  # Update layout mode to fix drag issue
 
+    def calculateHeight(self):
+        return # self.setMinimumHeight(self.sizeHintForRow(0) * self.count())
+
+    def changed_add_callback(self, changed_callback_new):
+        print("changed")
+        self.changed_callback = changed_callback_new
+
+    changed_callback = None
     tags_counter = 0
 
     def dropEvent(self, event):
@@ -109,6 +107,8 @@ class CustomListWidget(QListWidget):
             tag_states = {i: state for i, state in enumerate(self.tag_states.values())}
             self.tag_states = tag_states
 
+            self.calculateHeight()
+
         # super().dropEvent(event)
         self.clearSelection()  # Clear selection after drag and drop
 
@@ -139,6 +139,7 @@ class CustomListWidget(QListWidget):
         else:
             return self.count() - 1
 
+
     def handleItemChanged(self, item):
         # Estimate the size of the item based on the length of the text
         width = len(item.text()) * 7
@@ -146,20 +147,16 @@ class CustomListWidget(QListWidget):
         item.setSizeHint(QSize(width, height))
 
         # update tag states if the item text was changed
-        for row, enabled in list(self.tag_states.items()):
-            if row == self.row(item):
-                break
-            if enabled:
-                del self.tag_states[row]
-                self.tag_states[self.row(item)] = enabled
-                break
+        item_row = self.row(item)
+        if item_row in self.tag_states:
+            self.tag_states[item_row] = self.tag_states.pop(item_row)
 
         # Rearrange the items to respect the new size
         self.doItemsLayout()
 
-        row = self.row(item)
-        if row in self.tag_states:
-            self.tag_states[row] = self.tag_states.pop(row, None)
+        if self.changed_callback:
+            self.changed_callback()
+
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -170,7 +167,9 @@ class CustomListWidget(QListWidget):
             super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MiddleButton:
+        changed = False
+
+        if event.button() == Qt.MiddleButton: # Item delete
             item = self.itemAt(event.pos())
             if item:
                 row = self.row(item)
@@ -178,18 +177,28 @@ class CustomListWidget(QListWidget):
                 if row in self.tag_states:
                     del self.tag_states[row]
 
-        elif event.button() == Qt.RightButton:
+            changed = True
+
+        elif event.button() == Qt.RightButton: # Add new at end
             item = QListWidgetItem(f"Edit me #{self.tags_counter:03d}")
             self.tags_counter += 1
             item.setFlags(item.flags() | Qt.ItemIsEditable)
             self.addItem(item)
             self.tag_states[self.row(item)] = False
+            changed = True
 
-        elif event.button() == Qt.LeftButton:
+        elif event.button() == Qt.LeftButton: # Toggle enabled
             item = self.itemAt(event.pos())
             if item:
                 row = self.row(item)
                 self.tag_states[row] = not self.tag_states.get(row, False)
+
+            changed = True
+
+        if changed:
+            if self.changed_callback:
+                self.changed_callback()
+            self.calculateHeight()
 
         super().mousePressEvent(event)
 
@@ -216,7 +225,8 @@ class CustomListWidget(QListWidget):
         labels = []
         for i in range(self.count()):
             item = self.item(i)
-            labels.append((item.text(), self.tag_states[i]))
+            enabled = self.tag_states.get(i, False)  # returns False if key doesn't exist
+            labels.append((item.text(), enabled))
         return labels
 
     def set_labels(self, labels):
@@ -407,14 +417,27 @@ class ImageDropWidget(QWidget):
         self.bottom_layout_labels.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
         self.main_layout.addLayout(self.bottom_layout_labels)
 
-        # Remove caption label
+
         self.labels_labels = QLabel("Labels:", self)
         self.bottom_layout_labels.addWidget(self.labels_labels)
 
         # self.layout = QVBoxLayout(self)
-        self.list_widget = CustomListWidget(self)
-        self.bottom_layout_labels.addWidget(self.list_widget)
+        self.labels_list_widget = CustomListWidget(self)
+        self.bottom_layout_labels.addWidget(self.labels_list_widget)
 
+        self.checkboxes_layout = QVBoxLayout()
+        self.checkboxes_layout.setAlignment(Qt.AlignTop | Qt.AlignRight)
+        self.bottom_layout_labels.addLayout(self.checkboxes_layout)
+
+        self.add_labels_checkbox = QCheckBox("Add labels on load", self)
+        self.checkboxes_layout.addWidget(self.add_labels_checkbox)
+        self.add_labels_checkbox.stateChanged.connect(self.add_labels_checkbox_changed)
+
+        self.sync_labels_checkbox = QCheckBox("Sync labels", self)
+        self.checkboxes_layout.addWidget(self.sync_labels_checkbox)
+        self.sync_labels_checkbox.stateChanged.connect(self.sync_labels_checkbox_changed)
+
+        self.labels_list_widget.changed_add_callback(self.labels_changed_callback)
 
 
         # Horizontal line
@@ -560,25 +583,80 @@ class ImageDropWidget(QWidget):
 
         self.adjust_text_height()
 
+
+    def add_labels_checkbox_changed(self):
+        if self.add_labels_checkbox.isChecked():
+            #print("add_labels_checkbox_changed")
+            self.sync_labels_on_change()
+
+    def sync_labels_checkbox_changed(self):
+        if self.sync_labels_checkbox.isChecked():
+            #print("sync_labels_checkbox_changed")
+            self.sync_labels_on_change()
+
+
+    change_counter = 0
+    def labels_changed_callback(self):
+        print(f"labels_changed_callback, {self.change_counter}")
+        self.change_counter += 1
+
+        if self.sync_labels_checkbox.isChecked():
+            print("sync_labels_checkbox_changed")
+            self.sync_labels_on_change()
+
+    def sync_labels_on_change(self):
+        # When label toggled
+        # When loading image
+        label_and_state = self.labels_list_widget.get_labels()
+
+        enabled_tags = []
+        disabled_tags = []
+
+        for (label, status) in label_and_state:
+            print(f"{label}, {status}")
+            tags = self.caption_to_tag_list(label)
+
+            if status:
+                enabled_tags.extend(tags)
+            else:
+                disabled_tags.extend(tags)
+
+        comma_place_desired = 0
+
+        for label in self.images:
+            path = label.path
+            self.add_captions_to_path(enabled_tags, comma_place_desired, path)
+            self.remove_captions_from_path(disabled_tags, path)
+
     def load_args(self, args):
         self.args = args
-        self.load_labels(self.args.configurations_file)
+        self.load_settings(self.args.configurations_file)
 
     def clossing_app(self):
-        self.save_labels(self.args.configurations_file)
+        self.save_settings(self.args.configurations_file)
 
-    def save_labels(self, filepath):
-        labels = self.list_widget.get_labels()
+    def save_settings(self, filepath):
+
+        data = {
+            "add_labels_on_load": self.add_labels_checkbox.isChecked(),
+            "sync_labels": self.sync_labels_checkbox.isChecked(),
+            "labels": self.labels_list_widget.get_labels()
+        }
         with open(filepath, 'w') as file:
-            json.dump(labels, file)
+            json.dump(data, file)
 
-    def load_labels(self, filepath):
-        if os.path.exists(filepath):
-            with open(filepath, 'r') as file:
-                labels = json.load(file)
-            self.list_widget.set_labels(labels)
-        else:
-            print(f"File {filepath} does not exist. Could not load labels.")
+    def load_settings(self, filepath):
+        try:
+            if os.path.exists(filepath):
+                with open(filepath, 'r') as file:
+                    data = json.load(file)
+                self.labels_list_widget.set_labels(data.get("labels", []))
+                self.add_labels_checkbox.setChecked(data.get("add_labels_on_load", False))
+                self.sync_labels_checkbox.setChecked(data.get("sync_labels", False))
+            else:
+                print(f"File '{filepath}' does not exist. Could not load labels.")
+        except Exception as e:
+            print(f"Loading file '{filepath}' error: {e}.")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_A:  # 'a' key for left
@@ -754,6 +832,10 @@ class ImageDropWidget(QWidget):
 
                 self.images.append(label)
                 self.update_grid_layout()
+
+            if self.add_labels_checkbox.isChecked():
+                # print("add_labels_checkbox_changed")
+                self.sync_labels_on_change()
         else:
             print(f"{path} already exists in the widget!")
 
@@ -770,59 +852,60 @@ class ImageDropWidget(QWidget):
 
     def add_captions(self):
         tags_to_add_list = self.caption_to_tag_list(self.caption_input.text())
-
         comma_place_desired = self.comma_place_input.value()
 
         for label in self.images:
             path = label.path
-            txt_path = os.path.splitext(path)[0] + '.txt'
+            self.add_captions_to_path(tags_to_add_list, comma_place_desired, path)
 
-            if not os.path.exists(txt_path):
-                with open(txt_path, 'w') as txt_file:
-                    pass  # Create an empty txt file if it doesn't exist
-
-
-            tags_list = self.caption_to_tag_list(self.image_captions[path])
-
-            tags_to_add = [tag for tag in tags_to_add_list if
-                        tag not in tags_list]  # Remove tags to add from captions to avoid duplicates
-
-            comma_place = comma_place_desired
-            if comma_place > len(tags_list):
-                comma_place = len(tags_list)
-
-            for tag in reversed(tags_to_add):  # Loop over tags to add and insert each one
-                tags_list.insert(comma_place, tag)
-
-            final_captions = self.tag_list_to_string(tags_list)
-            # Update the caption in the map
-            self.image_captions[path] = final_captions
-
+    def add_captions_to_path(self, tags_to_add_list, comma_place_desired, path):
+        txt_path = os.path.splitext(path)[0] + '.txt'
+        if not os.path.exists(txt_path):
             with open(txt_path, 'w') as txt_file:
-                txt_file.write(final_captions)
+                pass  # Create an empty txt file if it doesn't exist
+
+        tags_list = self.caption_to_tag_list(self.image_captions[path])
+
+        tags_to_add = [tag for tag in tags_to_add_list if
+                       tag not in tags_list]  # Remove tags to add from captions to avoid duplicates
+
+        comma_place = comma_place_desired
+        if comma_place > len(tags_list):
+            comma_place = len(tags_list)
+
+        for tag in reversed(tags_to_add):  # Loop over tags to add and insert each one
+            tags_list.insert(comma_place, tag)
+
+        final_captions = self.tag_list_to_string(tags_list)
+        # Update the caption in the map
+        self.image_captions[path] = final_captions
+
+        with open(txt_path, 'w') as txt_file:
+            txt_file.write(final_captions)
 
     def remove_captions(self):
-
         tags_to_remove = self.caption_to_tag_list(self.remove_caption_input.text())
 
         for label in self.images:
             path = label.path
-            txt_path = os.path.splitext(path)[0] + '.txt'
+            self.remove_captions_from_path(tags_to_remove, path)
 
-            if not os.path.exists(txt_path):
-                continue
+    def remove_captions_from_path(self, tags_to_remove, path):
+        txt_path = os.path.splitext(path)[0] + '.txt'
 
+        if not os.path.exists(txt_path):
+            return
 
-            tag_list = self.caption_to_tag_list(self.image_captions[path])
+        tag_list = self.caption_to_tag_list(self.image_captions[path])
 
-            # Remove the specified tags from captions
-            tag_list = [caption for caption in tag_list if caption.strip() not in tags_to_remove]
-            captions = self.tag_list_to_string(tag_list)
+        # Remove the specified tags from captions
+        tag_list = [caption for caption in tag_list if caption.strip() not in tags_to_remove]
+        captions = self.tag_list_to_string(tag_list)
 
-            self.image_captions[path] = captions
+        self.image_captions[path] = captions
 
-            with open(txt_path, 'w') as txt_file:
-                txt_file.write(captions)
+        with open(txt_path, 'w') as txt_file:
+            txt_file.write(captions)
 
     def resizeEvent(self, event):
         self.update_grid_layout()
