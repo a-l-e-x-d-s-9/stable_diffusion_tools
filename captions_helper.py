@@ -1,13 +1,233 @@
+import argparse
 import os
 import sys
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame, QTextEdit,
-                             QScrollArea, QMessageBox, QSizePolicy)
-from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette, QTransform, QImage, QTextCharFormat, QTextCursor
-from PyQt5.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression
+                             QScrollArea, QMessageBox, QSizePolicy, QAbstractItemView, QListView, QAbstractScrollArea,
+                             QStyledItemDelegate)
+from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette, QTransform, QImage, QTextCharFormat, QTextCursor, QDrag, \
+    QBrush
+from PyQt5.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, QRect
 from PyQt5.QtWidgets import QMainWindow, QAction, QMenu, QMenuBar, QDialog
+from PyQt5.QtWidgets import QListWidget, QListWidgetItem
 from PIL import Image, UnidentifiedImageError
 import piexif
+import json
+
+class ItemDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+
+    def paint(self, painter, option, index):
+        enabled = self.parent.tag_states.get(index.row(), False)  # Return False if key does not exist
+        if enabled:
+            painter.fillRect(option.rect, QColor('lime'))
+        else:
+            painter.fillRect(option.rect, QColor('grey'))
+
+        super().paint(painter, option, index)
+
+class CustomListWidget(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setViewMode(QListView.IconMode)
+        self.setFlow(QListView.LeftToRight)
+        self.setWrapping(True)
+        self.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)  # Adjust widget size to content
+        self.setResizeMode(QListView.Adjust)
+        self.setFlow(QListView.LeftToRight)
+        self.setWrapping(True)
+        #self.setLayoutMode(QListView.Flow)
+        self.setStyleSheet("""
+        QListWidget::item {
+            border-radius: 10px; 
+            min-width: 50px; 
+            min-height: 25px;
+            /*color: black;   Default color */
+            /*background-color: red;   Default background color */
+        }
+        QListWidget::item[enabled=true] {
+            /* background-color: green; */
+        }
+        QListWidget::item[enabled=false] {
+            /* background-color: red; */
+        }
+        QListWidget::item:selected {
+            color: yellow;
+        }
+        """)
+        self.setToolTip("Left click to toggle enable/disable.\n"
+                        "Middle click to delete.\n"
+                        "Right click to add new.\n"
+                        "Long left click to edit.\n")
+        self.tag_states = {}
+        #self.itemChanged.connect(self.handleItemChanged)
+        #self.parent().commitData.connect(self.handleItemChange)
+        #self.parent().handleItemChanged(self.handleItemChange)
+        self.itemChanged.connect(self.handleItemChanged)
+        self.spacing = 7
+        self.setSpacing(self.spacing)  # Added padding between labels
+        self.setItemDelegate(ItemDelegate(self))
+        self.setLayoutMode(QListView.SinglePass)  # Update layout mode to fix drag issue
+
+    tags_counter = 0
+
+    def dropEvent(self, event):
+        if event.source() == self:
+            # Get the original source index and item
+            source_item = self.currentItem()
+            source_index = self.row(source_item)
+            source_status = self.tag_states[source_index]
+
+            # Calculate the target index
+            pos = event.pos()
+            target_index = self.drop_on(pos)
+            print(f"Target Index: {target_index}")  # Debugging print statement
+
+            # Handle the items
+            self.blockSignals(True)
+            if target_index > source_index and target_index != self.count() - 1:  # dragged down, adjust target_index after remove
+                target_index -= 1
+
+            # Remove the original item from the list
+            removed_item = self.takeItem(source_index)
+            self.insertItem(target_index, removed_item)
+            self.blockSignals(False)
+
+            # Update the status for the moved item
+            self.tag_states.pop(source_index, None)
+            self.tag_states[target_index] = source_status
+
+            # Update the rest of the tag states
+            tag_states = {i: state for i, state in enumerate(self.tag_states.values())}
+            self.tag_states = tag_states
+
+        # super().dropEvent(event)
+        self.clearSelection()  # Clear selection after drag and drop
+
+    def drop_on(self, pos):
+        """
+        Determine the index of the item that is under the cursor.
+        """
+        for i in range(self.count() - 1):  # we exclude the last item because it has no next item
+            current_item = self.item(i)
+            next_item = self.item(i + 1)
+
+            current_item_left = self.visualItemRect(current_item).left()
+            next_item_left = self.visualItemRect(next_item).left()
+
+            center_pos = (current_item_left + next_item_left) // 2
+
+            if pos.x() < center_pos:
+                return i
+
+        # Special case for the last item
+        last_item = self.item(self.count() - 1)
+        last_item_left = self.visualItemRect(last_item).left()
+        last_item_right = self.visualItemRect(last_item).right()
+        last_item_center = (last_item_left + last_item_right) // 2
+
+        if pos.x() < last_item_center:
+            return self.count() - 2
+        else:
+            return self.count() - 1
+
+    def handleItemChanged(self, item):
+        # Estimate the size of the item based on the length of the text
+        width = len(item.text()) * 7
+        height = item.sizeHint().height()
+        item.setSizeHint(QSize(width, height))
+
+        # update tag states if the item text was changed
+        for row, enabled in list(self.tag_states.items()):
+            if row == self.row(item):
+                break
+            if enabled:
+                del self.tag_states[row]
+                self.tag_states[self.row(item)] = enabled
+                break
+
+        # Rearrange the items to respect the new size
+        self.doItemsLayout()
+
+        row = self.row(item)
+        if row in self.tag_states:
+            self.tag_states[row] = self.tag_states.pop(row, None)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            item = self.itemAt(event.pos())
+            if item:
+                self.editItem(item)
+        else:
+            super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MiddleButton:
+            item = self.itemAt(event.pos())
+            if item:
+                row = self.row(item)
+                self.takeItem(row)
+                if row in self.tag_states:
+                    del self.tag_states[row]
+
+        elif event.button() == Qt.RightButton:
+            item = QListWidgetItem(f"Edit me #{self.tags_counter:03d}")
+            self.tags_counter += 1
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            self.addItem(item)
+            self.tag_states[self.row(item)] = False
+
+        elif event.button() == Qt.LeftButton:
+            item = self.itemAt(event.pos())
+            if item:
+                row = self.row(item)
+                self.tag_states[row] = not self.tag_states.get(row, False)
+
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in [Qt.Key_Backspace, Qt.Key_Delete]:
+            for item in self.selectedItems():
+                row = self.row(item)
+                self.takeItem(row)
+                if row in self.tag_states:
+                    del self.tag_states[row]
+
+    def startEditMode(self, pos):
+        item = self.itemAt(pos)
+        if item and not item.isSelected():
+            self.editItem(item)
+
+    def startDrag(self, supportedActions):
+        drag = QDrag(self)
+        mimeData = self.mimeData(self.selectedItems())
+        drag.setMimeData(mimeData)
+        result = drag.exec_(supportedActions, Qt.MoveAction)
+
+    def get_labels(self):
+        labels = []
+        for i in range(self.count()):
+            item = self.item(i)
+            labels.append((item.text(), self.tag_states[i]))
+        return labels
+
+    def set_labels(self, labels):
+        self.clear()
+        self.tag_states.clear()
+        for i, (label, enabled) in enumerate(labels):
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            item.setData(Qt.UserRole, QPalette())
+            self.addItem(item)
+            self.tag_states[i] = enabled
 
 class ListInputDialog(QDialog):
     def __init__(self, parent=None):
@@ -110,8 +330,9 @@ class ImageLabel(QLabel):
 
 
 class ImageDropWidget(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, args, parent=None):
         super().__init__(parent)
+
 
         self.current_image_index = 0
 
@@ -180,6 +401,20 @@ class ImageDropWidget(QWidget):
         self.add_captions_button = QPushButton("Add to all", self)
         self.bottom_layout.addWidget(self.add_captions_button)
         self.add_captions_button.clicked.connect(self.add_captions)  # Connect the button to the add_captions method
+
+        # Bottom layout for Labels
+        self.bottom_layout_labels = QHBoxLayout()
+        self.bottom_layout_labels.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.main_layout.addLayout(self.bottom_layout_labels)
+
+        # Remove caption label
+        self.labels_labels = QLabel("Labels:", self)
+        self.bottom_layout_labels.addWidget(self.labels_labels)
+
+        # self.layout = QVBoxLayout(self)
+        self.list_widget = CustomListWidget(self)
+        self.bottom_layout_labels.addWidget(self.list_widget)
+
 
 
         # Horizontal line
@@ -324,6 +559,26 @@ class ImageDropWidget(QWidget):
         self.setMinimumSize(self.min_width, self.min_height)
 
         self.adjust_text_height()
+
+    def load_args(self, args):
+        self.args = args
+        self.load_labels(self.args.configurations_file)
+
+    def clossing_app(self):
+        self.save_labels(self.args.configurations_file)
+
+    def save_labels(self, filepath):
+        labels = self.list_widget.get_labels()
+        with open(filepath, 'w') as file:
+            json.dump(labels, file)
+
+    def load_labels(self, filepath):
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as file:
+                labels = json.load(file)
+            self.list_widget.set_labels(labels)
+        else:
+            print(f"File {filepath} does not exist. Could not load labels.")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_A:  # 'a' key for left
@@ -977,9 +1232,22 @@ class MainWindow(QMainWindow):
         # For example:
         self.image_drop_widget.add_images_to_preview_area(paths)
 
+    def load_args(self, args):
+        self.image_drop_widget.load_args(args)
+
+    def closeEvent(self, event):
+        self.image_drop_widget.clossing_app()
+        event.accept()  # let the window close
 
 if __name__ == '__main__':
+    # Create the command-line argument parser
+    parser = argparse.ArgumentParser(description='Custom widget with labels.')
+    parser.add_argument('--configurations_file', type=str, default="caption_helper_settings.json", help='Path to the JSON file with label configurations.')
+    # Parse the arguments
+    args = parser.parse_args()
+
     app = QApplication(sys.argv)
     main_window = MainWindow()
+    main_window.load_args(args)
     main_window.show()
     sys.exit(app.exec_())
