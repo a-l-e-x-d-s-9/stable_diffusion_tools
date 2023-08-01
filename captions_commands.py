@@ -255,7 +255,8 @@ def tag_replace_in_file(caption_file: str, old_tag: str, new_tag: str, dry_run=F
 
         logging.info(f"Tag {old_tag} replaced with {new_tag}")
     else:
-        logging.info(f"Tag {old_tag} not present, no changes made")
+        pass
+        # logging.info(f"Tag {old_tag} not present, no changes made")
 
     if not dry_run:
         try:

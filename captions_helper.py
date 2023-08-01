@@ -58,7 +58,7 @@ class CustomListWidget(QListWidget):
         self.setToolTip("Left click to toggle enable/disable.\n"
                         "Middle click to delete.\n"
                         "Right click to add new.\n"
-                        "Long left click to edit.\n")
+                        "Double click to edit.\n")
         self.tag_states = {}
 
         self.itemChanged.connect(self.handleItemChanged)
