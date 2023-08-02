@@ -308,19 +308,24 @@ def remove_tags_beside_specified(caption_file: str, tags_to_preserve: List[str],
     else:
         logging.info("Dry run mode, no changes were made to the file.")
 
-
-def move_to_validation(root_folder: str, from_folder: str, num_files: int, dry_run: bool = False) -> None:
-    subject_folders = get_subject_folders(root_folder)
+def move_to_validation(root_folder: str, from_folders: List[str], validation_folder: str, num_files: int, dry_run: bool = False) -> None:
+    all_subject_folders = get_subject_folders(root_folder)
     max_failures = 10  # Maximum number of consecutive failed attempts before giving up
+    print(1)
+    for subject_folder in all_subject_folders:
+        if os.path.basename(subject_folder) not in from_folders:
+            continue
 
-    for subject_folder in subject_folders:
-        validate_folder_structure(subject_folder)
-        from_folder_path = os.path.join(subject_folder, from_folder)
-        validation_folder_path = os.path.join(subject_folder, 'validation')
-
+        print(1.1)
+        print(f"subject_folder: {subject_folder}")
+        relative_subject_folder = os.path.relpath(subject_folder, root_folder)
+        from_folder_path = os.path.join(root_folder, relative_subject_folder)
+        validation_folder_path = os.path.join(validation_folder, relative_subject_folder)
+        print(f"1.2, validation_folder: {validation_folder}, subject_folder: {subject_folder}")
         if not os.path.exists(from_folder_path) or not os.path.isdir(from_folder_path):
             logging.error(f"{from_folder_path} does not exist or is not a directory.")
             continue
+        print(1.3)
         if not os.path.exists(validation_folder_path) or not os.path.isdir(validation_folder_path):
             logging.info(f"{validation_folder_path} does not exist or is not a directory. Creating it.")
             if not dry_run:
@@ -330,12 +335,16 @@ def move_to_validation(root_folder: str, from_folder: str, num_files: int, dry_r
                     logging.error(f"Failed to create validation directory: {str(e)}")
                     continue
 
+        print(2)
         num_successes = 0  # Number of successful moves
         num_failures = 0  # Number of consecutive failures
 
         while num_successes < num_files and num_failures < max_failures:
+            print(f"3, validation_folder_path: {validation_folder_path}")
             image_files = [os.path.join(from_folder_path, file) for file in os.listdir(from_folder_path) if
                            file.endswith(tuple(IMAGE_EXTENSIONS))]
+
+
             if not image_files:
                 logging.error(f"No image files found in {from_folder_path}.")
                 break
@@ -365,7 +374,8 @@ def move_to_validation(root_folder: str, from_folder: str, num_files: int, dry_r
             else:
                 try:
                     os.rename(random_image_file, validation_image_file)
-                    os.rename(caption_file, validation_caption_file)
+                    if os.path.exists(caption_file):
+                        os.rename(caption_file, validation_caption_file)
                 except (IOError, PermissionError) as e:
                     logging.error(f"Unable to move files: {str(e)}")
                     raise
@@ -375,6 +385,7 @@ def move_to_validation(root_folder: str, from_folder: str, num_files: int, dry_r
 
         if num_failures == max_failures:
             logging.error(f"Failed to move files after {max_failures} consecutive attempts.")
+
 
 
 def search_for_tags(root_folder, tag, output_file, threads=10):
@@ -700,7 +711,8 @@ def main(args):
             for caption_file in get_caption_files(subject_folder):
                 executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
     elif args.mode == 'move_to_validation':
-        move_to_validation(args.root, args.from_folder, args.move_to_validation_amount, args.dry_run)
+        move_to_validation(args.root, args.from_folder, args.validation_folder, args.move_to_validation_amount,
+                           args.dry_run)
     elif args.mode == 'search_for_tags':
         search_for_tags(args.root, args.tag, args.output_file, args.threads)
     elif args.mode == 'full_statistic':
@@ -720,7 +732,6 @@ if __name__ == "__main__":
     parser.add_argument('-tn', '--tag_new', help='New tag to use.')
     parser.add_argument('-s', '--start', type=int, help='Start index for adding tag.')
     parser.add_argument('-e', '--end', type=int, help='End index for adding tag.')
-    parser.add_argument('-f', '--from', dest='from_folder', help='Folder from which to move images to validation.')
     parser.add_argument('-th', '--threads', type=int, default=10, help='Number of threads for parallel processing.')
     parser.add_argument('-o', '--output_file', type=str, help='Output file for search and statistic modes.')
     parser.add_argument('-mm', '--min_size', type=int,
@@ -734,6 +745,9 @@ if __name__ == "__main__":
     parser.add_argument('-vm', '--move_to_validation_amount', type=int,
                         help='The amount of images move to validation.')
     parser.add_argument('--dry_run', action='store_true', help='Dry run mode. No changes will be made.')
+    parser.add_argument('-f', '--from', dest='from_folder', nargs='+',
+                        help='Folders from which to move images to validation.')
+    parser.add_argument('-v', '--validation_folder', type=str, help='Folder to which images will be moved.')
 
 
     args = parser.parse_args()
