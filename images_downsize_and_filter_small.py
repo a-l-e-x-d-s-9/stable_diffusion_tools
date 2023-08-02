@@ -1,11 +1,11 @@
-import argparse
 import os
+import argparse
 import sys
 import traceback
 import shutil
-
+from tqdm import tqdm
+from tqdm.contrib.concurrent import process_map  # or thread_map
 from PIL import Image
-
 
 def red_print(print_content: str):
     RED = '\033[0;31m'
@@ -15,14 +15,23 @@ def red_print(print_content: str):
 
 def convert_image(image_path, target_directory, max_resolution, min_resolution, small_images_folder):
     try:
-        img = Image.open(open(image_path, 'rb'))
+        file_name_full = os.path.basename(image_path)
+        file_name_without_extension, file_extension = os.path.splitext(file_name_full)
+        new_image_path = os.path.join(target_directory, file_name_without_extension + '.jpg')
 
+        if os.path.isfile(new_image_path):
+            print(f'File already exists: {new_image_path}. Skipping...')
+            return
+
+        img = Image.open(open(image_path, 'rb'))
         width, height = img.size
+
 
         if ((width * height) < (min_resolution * min_resolution)) and \
                 ((width < min_resolution) and (height < min_resolution)):
             img.close()
             small_image_path = os.path.join(small_images_folder, os.path.basename(image_path))
+            os.makedirs(os.path.dirname(small_image_path), exist_ok=True)  # Ensure directory exists before moving file
             shutil.move(image_path, small_image_path)
             return
 
@@ -34,20 +43,22 @@ def convert_image(image_path, target_directory, max_resolution, min_resolution, 
             new_size = (int(width * ratio), int(height * ratio))
             img = img.resize(new_size, resample=Image.LANCZOS)
 
-        file_name_full = os.path.basename(image_path)
-        file_name_without_extension, file_extension = os.path.splitext(file_name_full)
-        new_image_path = os.path.join(target_directory, file_name_without_extension + '.jpg')
-
-        if os.path.isfile(new_image_path):
-            print(f'File already exist: {new_image_path}.')
-            img.close()
-            return
-
         img.save(new_image_path, format='JPEG', quality=95, optimize=True)
         img.close()
 
     except Exception as e:
         red_print(f'Error processing, possibly not copied: {image_path}: {e}, {traceback.format_exc()}')
+
+
+
+def process_image(file_path, source_path, target_path, max_resolution, min_resolution, small_images_folder):
+    relative_path = os.path.relpath(os.path.dirname(file_path), source_path)
+    target_directory = os.path.join(target_path, relative_path)
+    small_images_directory = os.path.join(small_images_folder, relative_path)
+
+    os.makedirs(target_directory, exist_ok=True)
+
+    convert_image(file_path, target_directory, max_resolution, min_resolution, small_images_directory)
 
 
 if __name__ == '__main__':
@@ -64,6 +75,7 @@ if __name__ == '__main__':
     small_images_folder = args.small_images_folder
     min_resolution = args.min_resolution
     max_resolution = args.max_resolution
+
 
     if not os.path.isdir(source_path):
         print(f'Error: {source_path} is not a directory')
@@ -89,17 +101,16 @@ if __name__ == '__main__':
         print('Error: max resolution must be greater than min resolution')
         sys.exit(1)
 
-    count = 0
-    total = len(os.listdir(source_path))
-    for file_name in os.listdir(source_path):
-        file_path = os.path.join(source_path, file_name)
-        if os.path.isfile(file_path):
-            count += 1
-            file_is_png = file_name.lower().endswith('.png')
-            file_is_jpg = file_name.lower().endswith(('.jpg', '.jpeg'))
-            if file_is_png or file_is_jpg:
-                convert_image(file_path, target_path, max_resolution, min_resolution, small_images_folder)
+    images_to_process = []
+    for dirpath, dirnames, filenames in os.walk(source_path):
+        for file_name in filenames:
+            file_path = os.path.join(dirpath, file_name)
+            if file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                images_to_process.append(file_path)
 
-                print(f'\rProcessed {count}/{total} images', end='', flush=True)
+    process_map(process_image, images_to_process, [source_path] * len(images_to_process),
+                [target_path] * len(images_to_process), [max_resolution] * len(images_to_process),
+                [min_resolution] * len(images_to_process), [small_images_folder] * len(images_to_process),
+                max_workers=20, chunksize=1)
 
     print('\nDone.')  # Print a message to indicate when all images have been processed.
