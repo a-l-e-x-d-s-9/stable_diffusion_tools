@@ -12,6 +12,8 @@ import mimetypes
 from queue import Queue, Empty
 from threading import Lock
 from pathlib import Path
+from tqdm import tqdm
+from multiprocessing import Value
 
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
 VALID_MIME_TYPES = [mimetypes.types_map[ext] for ext in IMAGE_EXTENSIONS if ext in mimetypes.types_map]
@@ -507,9 +509,17 @@ def check_caption_validity(file_path: str, min_tags: int, dry_run: bool) -> str:
 def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, min_tags: int, threads: int, dry_run: bool) -> List[
     Tuple[str, str]]:
     errors = []
-    subject_folders = iter(get_all_sub_folders(root_folder))
+    all_sub_folders = get_all_sub_folders(root_folder)
+    subject_folders = iter(all_sub_folders)
     image_caption_queues = [Queue() for _ in range(threads)]
     scan_lock = Lock()
+
+    # create a shared counter and initialize the progress bar
+    scan_counter = Value('i', 0)
+    scan_progress_bar = tqdm(total=len(all_sub_folders), desc="Scanning", dynamic_ncols=True)
+
+    # counter for the checking phase
+    check_counter = Value('i', 0)
 
     def folder_scanner(index):
         while True:
@@ -518,6 +528,11 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
                     subject_folder = next(subject_folders)
                 except StopIteration:
                     break
+
+            # update the shared counter and refresh the progress bar
+            with scan_counter.get_lock():
+                scan_counter.value += 1
+                scan_progress_bar.update()
 
             caption_files = get_caption_files(subject_folder)
             image_files = get_image_files_in_current_folder(subject_folder)
@@ -542,10 +557,21 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
                 # add the pair to the queue
                 image_caption_queues[index].put((image_file, caption_file))
 
+                # increment the check_counter each time you put an item in the queue
+                with check_counter.get_lock():
+                    check_counter.value += 1
+
     with ThreadPoolExecutor(max_workers=threads) as executor:
         # scanning phase
         for i in range(threads):
             executor.submit(folder_scanner, i)
+
+    # close the scanning progress bar
+    scan_progress_bar.close()
+
+    # initialize the checking progress bar
+    check_progress_bar = tqdm(total=check_counter.value, desc="Checking", dynamic_ncols=True)
+
 
     def worker(queue):
         while True:
@@ -553,6 +579,12 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
                 image_file, caption_file = queue.get_nowait()
             except Empty:
                 break
+
+            # update the shared counter and refresh the progress bar
+            with check_counter.get_lock():
+                check_counter.value -= 1
+                check_progress_bar.update()
+
             image_error = check_image_validity_and_size(image_file, min_size, max_size)
             caption_error = check_caption_validity(caption_file, min_tags, dry_run)
             if image_error:
@@ -564,6 +596,9 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
         # checking phase
         for q in image_caption_queues:
             executor.submit(worker, q)
+
+    # close the checking progress bar
+    check_progress_bar.close()
 
     return errors
 
