@@ -1,3 +1,4 @@
+import concurrent
 import os
 import random
 import argparse
@@ -10,6 +11,7 @@ import traceback
 import mimetypes
 from queue import Queue, Empty
 from threading import Lock
+from pathlib import Path
 
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
 VALID_MIME_TYPES = [mimetypes.types_map[ext] for ext in IMAGE_EXTENSIONS if ext in mimetypes.types_map]
@@ -212,6 +214,7 @@ def add_tag_to_file(file_path: str, tag: str, start: int, stop: int, dry_run: bo
     if tag not in tags:
         if stop > len(tags):
             stop = len(tags)
+        start = min(start, stop)
         position = random.randint(start, stop)
         tags.insert(position, tag)
         logging.info(f"Tag {tag} added at position {position}")
@@ -656,8 +659,69 @@ def remove_captions_without_image_work(root_folder: str, threads_number:int, is_
 
     return errors
 
+def is_image(file_path):
+    _, ext = os.path.splitext(file_path)
+    mime_type, _ = mimetypes.guess_type(file_path)
+    return ext.lower() in IMAGE_EXTENSIONS and mime_type in VALID_MIME_TYPES
+
+def scan_for_images(directory):
+    image_files = []
+    for root, _, files in os.walk(directory):
+        for file in files:
+            file_path = os.path.join(root, file)
+            if is_image(file_path):
+                image_files.append(file_path)
+    return image_files
+
+def scan_directories(directories, max_workers=5):
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_dir = {executor.submit(scan_for_images, dir): dir for dir in directories}
+        all_image_files = []
+        for future in concurrent.futures.as_completed(future_to_dir):
 
 
+            dir = future_to_dir[future]
+            print(f"scan_directories, dir: {dir}")
+            try:
+                image_files = future.result()
+                all_image_files.extend(image_files)
+            except Exception as exc:
+                print(f'{dir} generated an exception: {exc}')
+    return all_image_files
+
+def add_tags_from_folder(args):
+    all_images = scan_directories([args.root], args.threads)
+
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        for image in all_images:
+
+            parent_name = Path(image).parent.name
+            tags = parent_name
+
+            caption_file = os.path.splitext(image)[0] + ".txt"
+
+            if not os.path.exists(caption_file):
+                open(caption_file, 'a').close()
+
+            executor.submit(add_tag_to_file, caption_file, tags, 0, 0, args.dry_run)
+
+
+def add_tags_from_argument(args):
+    all_images = scan_directories([args.root], args.threads)
+
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        for image in all_images:
+
+            caption_file = os.path.splitext(image)[0] + ".txt"
+            # print(f"caption_file: {caption_file}")
+            # print(f"args.tag: {args.tag}")
+            # print(f"args.start: {args.start}")
+            # print(f"args.end: {args.end}")
+
+            if not os.path.exists(caption_file):
+                open(caption_file, 'a').close()
+
+            executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
 
 def main(args):
     if args.mode in [ 'search_for_tags', 'full_statistic', 'statistic_for_subject',
@@ -700,16 +764,20 @@ def main(args):
                 for caption_file in get_caption_files(subject_folder):
                     executor.submit(tag_replace_in_file, caption_file, args.tag, args.tag_new, args.dry_run)
     elif args.mode == 'add_tag_all':
-        with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            for subject_folder in get_all_sub_folders(args.root):
-                for caption_file in get_caption_files(subject_folder):
-                    executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
+        # with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        #     for subject_folder in get_all_sub_folders(args.root):
+        #         for caption_file in get_caption_files(subject_folder):
+        #             executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
+
+        add_tags_from_argument(args)
+
     elif args.mode == 'add_tag_single':
         subject_folder = os.path.join(args.root, args.sub_folder)
         #validate_folder_structure(subject_folder)
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
             for caption_file in get_caption_files(subject_folder):
                 executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
+
     elif args.mode == 'move_to_validation':
         move_to_validation(args.root, args.from_folder, args.validation_folder, args.move_to_validation_amount,
                            args.dry_run)
@@ -721,12 +789,16 @@ def main(args):
         subject_folder = os.path.join(args.root, args.tag)
         validate_folder_structure(subject_folder)
         statistic_for_subject(subject_folder, args.output_file)
+    elif args.mode == 'add_tags_from_folder':
+
+        add_tags_from_folder(args)
+
     else:
         print(f"Invalid mode: {args.mode}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Script for handling captions for images.')
-    parser.add_argument('-m', '--mode', help='Mode of operation. Options: check_images_and_captions, remove_captions_without_image, remove_tags_beside_specified, remove_tag_all, replace_tag, add_tag_all, add_tag_single, move_to_validation, search_for_tags, full_statistic, statistic_for_subject.')
+    parser.add_argument('-m', '--mode', help='Mode of operation. Options: check_images_and_captions, remove_captions_without_image, remove_tags_beside_specified, remove_tag_all, replace_tag, add_tag_all, add_tag_single, move_to_validation, search_for_tags, full_statistic, statistic_for_subject, statistic_for_subject, add_tags_from_folder.')
     parser.add_argument('-r', '--root', help='Root folder containing all subject folders.')
     parser.add_argument('-t', '--tag', help='Tag to add or remove.')
     parser.add_argument('-tn', '--tag_new', help='New tag to use.')

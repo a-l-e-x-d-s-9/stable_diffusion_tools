@@ -38,36 +38,6 @@ def process_images(dir_path, output_path, min_exp, max_exp, min_cont, max_cont, 
     except Exception as e:
         print(f"Error processing image {image_path}: {e}")
 
-
-# def adjust_image(image_path, dir_path, min_exp, max_exp, min_cont, max_cont, output_path, suffix):
-#     # Load image
-#     img = cv2.imread(image_path, cv2.IMREAD_COLOR)
-#
-#     # Convert image to YUV color space
-#     img_yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
-#
-#     # Adjust exposure and contrast
-#     # Adjust contrast and brightness
-#     alpha = random.uniform(min_cont, max_cont)  # Simple contrast control, same at 1
-#     beta = random.uniform(min_exp, max_exp)  # Simple brightness control, same at 0
-#     img_yuv[:, :, 0] = cv2.convertScaleAbs(img_yuv[:, :, 0], alpha=alpha, beta=beta)
-#
-#     # Equalize the histogram of the Y channel
-#     # img_yuv[:, :, 0] = cv2.equalizeHist(img_yuv[:, :, 0])
-#
-#     # Convert back to BGR color space
-#     img_output = cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
-#
-#     # Create output directory if it doesn't exist
-#     output_dir = os.path.join(output_path, os.path.dirname(os.path.relpath(image_path, dir_path)))
-#     if not os.path.exists(output_dir):
-#         os.makedirs(output_dir)
-#
-#     # Save image
-#     output_file = os.path.join(output_dir, os.path.splitext(os.path.basename(image_path))[0] + suffix + '.jpg')
-#     cv2.imwrite(output_file, img_output, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
-
-
 def adjust_image(image_path, dir_path, min_exp, max_exp, min_cont, max_cont, output_path, suffix):
     try:
         # Load image
