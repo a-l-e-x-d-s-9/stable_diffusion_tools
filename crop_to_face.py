@@ -132,12 +132,12 @@ def detect_and_zoom_to_face(image, min_size=512):
 
 import concurrent.futures
 
-def process_single_image(image_path, source_folder_path, target_folder_path):
+def process_single_image(image_path, source_folder_path, target_folder_path, min_size):
     # Open the image file
     image = cv2.imread(str(image_path))
 
     # Process the image
-    processed_faces = detect_and_zoom_to_face(image)
+    processed_faces = detect_and_zoom_to_face(image, min_size)
 
     for i, processed_face in enumerate(processed_faces):
         if processed_face is not None:
@@ -151,7 +151,7 @@ def process_single_image(image_path, source_folder_path, target_folder_path):
             # Save the processed image
             cv2.imwrite(str(output_path), processed_face)
 
-def process_images(source_folder, target_folder=None):
+def process_images(source_folder, target_folder=None, min_size=512):
     source_folder_path = Path(source_folder)
     target_folder_path = Path(target_folder) if target_folder else source_folder_path
 
@@ -165,17 +165,16 @@ def process_images(source_folder, target_folder=None):
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         # The map function takes a function and an iterable and applies the function to every element in the iterable
         # Wrap tqdm around it to add a progress bar
-        list(tqdm(executor.map(lambda image_path: process_single_image(image_path, source_folder_path, target_folder_path), image_paths), total=total_images))
-
-
+        list(tqdm(executor.map(lambda image_path: process_single_image(image_path, source_folder_path, target_folder_path, min_size), image_paths), total=total_images))
 
 def main():
     parser = argparse.ArgumentParser(description='Process images in a folder.')
     parser.add_argument('--source_folder', required=True, help='The source folder with images to process.')
     parser.add_argument('--target_folder', help='The target folder to save processed images. If not provided, images are saved to the source folder.')
+    parser.add_argument('--min_size', type=int, default=512, help='Minimum face size for detection. Default is 512.')
     args = parser.parse_args()
 
-    process_images(args.source_folder, args.target_folder)
+    process_images(args.source_folder, args.target_folder, args.min_size)
 
 
 if __name__ == "__main__":
