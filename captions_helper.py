@@ -43,7 +43,8 @@ class CustomListWidget(QListWidget):
         self.setResizeMode(QListView.Adjust)
         self.setFlow(QListView.LeftToRight)
         self.setWrapping(True)
-        #self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
+        self.setSizePolicy(QSizePolicy.MinimumExpanding , QSizePolicy.MinimumExpanding)
+        #self.setFixedSize(400, 300)
         #self.setLayoutMode(QListView.Flow)
         self.setStyleSheet("""
         QListWidget::item {
@@ -796,18 +797,18 @@ class ImageDropWidget(QWidget):
             if os.path.isdir(path):
                 for root, dirs, files in os.walk(path):
                     for file in files:
-                        if file.endswith('.jpg') or file.endswith('.png'):
+                        if file.endswith('.jpg') or file.endswith('.jpeg') or file.endswith('.png'):
                             full_path = os.path.join(root, file)
                             self.process_image(full_path)
             # If the path is a file, process the file directly
-            elif os.path.isfile(path) and (path.endswith('.jpg') or path.endswith('.png')):
+            elif os.path.isfile(path) and (path.endswith('.jpg') or path.endswith('.jpeg')  or path.endswith('.png')):
                 self.process_image(path)
             else:
                 event.ignore()
 
     def process_image(self, path):
         if path not in [label.path for label in self.images]:
-            if path.endswith('.jpg') or path.endswith('.png'):
+            if path.endswith('.jpg') or path.endswith('.jpeg')  or path.endswith('.png'):
                 pixmap = image_basic.load_image_with_exif(path)
                 pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
                                        aspectRatioMode=Qt.KeepAspectRatio)
