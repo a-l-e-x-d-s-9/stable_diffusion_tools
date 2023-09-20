@@ -6,11 +6,12 @@ import argparse
 import sys
 import threading
 from tqdm import tqdm
-#from PIL import Image
+# from PIL import Image
 
 from PIL import Image
 from PIL.ExifTags import TAGS
 from PIL.PngImagePlugin import PngImageFile
+
 
 def read_image_metadata(image_path):
     with Image.open(image_path) as img:
@@ -70,23 +71,22 @@ def diagnose_value(value):
     else:
         print("No invisible or control characters found.")
 
+
 allowed_chars = set(string.printable + '\t\n\r')
 
 
 def remove_invisible_characters(s):
-
     # Retain characters that are in the allowed set
     return ''.join(ch for ch in s if ch in allowed_chars)
 
 
-
 def parse_parameters(value):
     # Split by the "Steps:" keyword to separate the prompt and negative prompt from other parameters
-    #print(f"rfind: {value}")
+    # print(f"rfind: {value}")
 
-    #value = value.replace("\x00", "")
+    # value = value.replace("\x00", "")
     value = remove_invisible_characters(value)
-    #diagnose_value(value)
+    # diagnose_value(value)
     steps_index = value.rfind("Steps:")
 
     if steps_index < 0:
@@ -124,14 +124,18 @@ def parse_parameters(value):
 import re
 
 
-def simplify_prompt(prompt):
-    prompt = re.sub(r'\\\(', '<bracket_open>', prompt)
-    prompt = re.sub(r'\\\)', '<bracket_close>', prompt)
+# TODO: 1. remove new lines. 2. Remove everything within <> - loras. 3. handle numbers left as part of tags.
 
+def simplify_prompt(prompt):
+    prompt = re.sub(r'\\\(', 'bracket_open', prompt)
+    prompt = re.sub(r'\\\)', 'bracket_close', prompt)
 
     # Case 8: Insert comma after closing brackets if not followed by a comma and followed by non-closing bracket text
     prompt = re.sub(r'(?<=\))([^,\s\])])', r',\1', prompt)
     prompt = re.sub(r'(?<=\])([^,\s\])])', r',\1', prompt)
+
+    # Case Remove lora:
+    prompt = re.sub(r'<[^>]+>', '', prompt)
 
     # Case 1: (A:B:1.21) -> A, B
     prompt = re.sub(r'\(([^:]+):([^:]+):\d+(\.\d+)?\)', r'\1, \2', prompt)
@@ -147,7 +151,7 @@ def simplify_prompt(prompt):
 
     # Case 6: A: 1.21 -> A
     prompt = re.sub(r'([^:]+):\s*\d+(\.\d+)?', r'\1', prompt)
-    #prompt = re.sub(r'(?<!\()([^:]+):\s*\d+(\.\d+)?', r'\1', prompt)
+    # prompt = re.sub(r'(?<!\()([^:]+):\s*\d+(\.\d+)?', r'\1', prompt)
 
     # Case 7: \( and \) are left untouched
     # No action needed since regular expressions won't match escaped characters by default
@@ -158,15 +162,13 @@ def simplify_prompt(prompt):
     # Case 9: Free | -> removed
     prompt = prompt.replace('|', '')
 
-    # Case 10 and 11: Unbalanced "(" or ")" and "[" or "]" removed
-    while '(' in prompt or ')' in prompt:
-        prompt = prompt.replace('(', '', 1).replace(')', '', 1)
-    while '[' in prompt or ']' in prompt:
-        prompt = prompt.replace('[', '', 1).replace(']', '', 1)
+    # Case 10 and 11: Remove "(" or ")" and "[" or "]" removed
+    prompt = prompt.replace('(', '').replace(')', '')
+
+    prompt = prompt.replace('[', '').replace(']', '')
 
     # Case 12: ":" without a following number - removed
     prompt = re.sub(r':(?![ \d])', '', prompt)
-
 
     # Case 14: BREAK - removed
     prompt = prompt.replace('BREAK', '')
@@ -174,18 +176,24 @@ def simplify_prompt(prompt):
     # Cleanup: Remove spaces around commas
     prompt = re.sub(r'\s*,\s*', ', ', prompt)
 
-
-    prompt = re.sub( '<bracket_open>',  r'\(', prompt)
-    prompt = re.sub( '<bracket_close>', r'\)', prompt)
+    prompt = re.sub('bracket_open', r'\(', prompt)
+    prompt = re.sub('bracket_close', r'\)', prompt)
 
     # Cleanup:
     prompt = re.sub(r',\s*:\d+(\.\d+)?,', ', ', prompt)  # Remove ", :0.2, " patterns
-    prompt = re.sub(r',\s*\d+(\.\d+)?,', ', ', prompt)   # Remove ", 0.7, " patterns
-    prompt = re.sub(r', ,', ', ', prompt)                 # Remove occurrences of ", ,"
-    prompt = re.sub(r'^,|,$', '', prompt)                 # Remove leading or trailing commas
+    prompt = re.sub(r',\s*\d+(\.\d+)?,', ', ', prompt)  # Remove ", 0.7, " patterns
+    prompt = re.sub(r'^,|,$', '', prompt)  # Remove leading or trailing commas
+
+    # Remove new lines
+    prompt = re.sub(r'[\n\r]', ' ', prompt)
+
+    prompt = re.sub(r', ,', ', ', prompt)  # Remove occurrences of ", ,"
+
+    # Remove remaining numbers
+    prompt = re.sub(r'\d+\.\d+', '', prompt)
 
     # Case 13: Double spaces removed
-    prompt = re.sub(r'  +', ' ', prompt)
+    prompt = re.sub(r' +', ' ', prompt)
 
     return prompt.strip()
 
@@ -206,6 +214,7 @@ def get_simplified_prompt(image_path):
         print(f"Error processing {image_path}: {e}")
         return ""
 
+
 def process_image(image_path, progress_bar):
     try:
         prompt = get_simplified_prompt(image_path)
@@ -221,8 +230,13 @@ def process_image(image_path, progress_bar):
 
 
 def main(directory):
-    image_files = [os.path.join(directory, f) for f in os.listdir(directory) if
-                   f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    image_files = []
+
+    # Using os.walk to get all image files from subfolders
+    for dirpath, dirnames, filenames in os.walk(directory):
+        for f in filenames:
+            if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                image_files.append(os.path.join(dirpath, f))
 
     with tqdm(total=len(image_files), desc="Processing images") as progress_bar:
         threads = []
@@ -254,7 +268,5 @@ if __name__ == "__main__":
 
     progress_bar_lock = threading.Lock()
     main(directory)
-
-
 
 # python3 png_info_to_captions.py dataset/

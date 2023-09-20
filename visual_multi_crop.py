@@ -15,6 +15,7 @@ import piexif
 import json
 from PyQt5.QtWidgets import QFileDialog
 
+
 class ItemDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -70,7 +71,6 @@ class ImageLabel(QLabel):
                 else:
                     self.__set_default_frame_color()
 
-
     def set_highlighted(self, is_highlighted):
         if self.__is_highlighted != is_highlighted:
             self.__is_highlighted = is_highlighted
@@ -81,7 +81,6 @@ class ImageLabel(QLabel):
             else:
                 if not self.__is_selected:
                     self.__set_default_frame_color()
-
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -96,7 +95,6 @@ class ImageLabel(QLabel):
 
         super().mousePressEvent(event)
 
-
     def mouseDoubleClickEvent(self, event):
         if self.path:
             if sys.platform.startswith('linux'):
@@ -110,6 +108,11 @@ class ImageLabel(QLabel):
 class OverlayLabel(QLabel):
     def __init__(self, main_window, parent=None):
         super(OverlayLabel, self).__init__(parent)
+        self.setFrameStyle(QFrame.Box)
+        self.setLineWidth(20)
+        self.setMidLineWidth(30)
+        self.setStyleSheet("border: 20px solid red;")  # Red frame for cropping
+
         self.main_window = main_window
         self.start_position = None
         self.dragging = False
@@ -138,8 +141,8 @@ class OverlayLabel(QLabel):
             new_height = int(self.height() + dy)  # Convert to int
 
             # Scale the ORIGINAL overlay pixmap to the new size
-            scaled_pixmap = self.main_window.original_overlay_pixmap.scaled(new_width, new_height, Qt.KeepAspectRatio, Qt.FastTransformation)
-
+            scaled_pixmap = self.main_window.original_overlay_pixmap.scaled(new_width, new_height, Qt.KeepAspectRatio,
+                                                                            Qt.FastTransformation)
 
             self.setPixmap(scaled_pixmap)
             self.resize(scaled_pixmap.size())
@@ -164,7 +167,6 @@ class OverlayLabel(QLabel):
 class ImageDropWidget(QWidget):
     def __init__(self, args, parent=None):
         super().__init__(parent)
-
 
         self.current_image_index = 0
 
@@ -213,7 +215,6 @@ class ImageDropWidget(QWidget):
         self.bottom_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
         self.main_layout.addLayout(self.bottom_layout)
 
-
         # Horizontal line
         self.line = QFrame(self)
         self.line.setFrameShape(QFrame.HLine)
@@ -235,9 +236,13 @@ class ImageDropWidget(QWidget):
         )
         self.main_layout.addWidget(self.key_help_label)
 
-
         # Preview label
         self.preview_label = QLabel(self)
+
+        # Initialize the OverlayLabel and add it over the preview label
+
+
+
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setMinimumSize(int(self.min_width // 3), int(self.min_height - 20))
         self.preview_label.setFrameShape(QFrame.Box)
@@ -247,6 +252,14 @@ class ImageDropWidget(QWidget):
         self.preview_label.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
         self.preview_layout.addWidget(self.preview_label, stretch=2)
+
+
+        # Initialize the overlay label for cropping frame
+        self.overlay_label = OverlayLabel(self.preview_label,self)
+        # self.overlay_label.setGeometry(50, 50, 200, 200)  # Default position and size
+
+        self.overlay_label.setGeometry(50, 50, 200, 200)  # Default position and size
+        self.overlay_label.show()
 
         self.images = []
         self.resize(self.min_width, self.min_height)
@@ -261,17 +274,15 @@ class ImageDropWidget(QWidget):
         # Initialize the vertical layout for buttons
         self.overlay_buttons_layout = QVBoxLayout()
 
-
         self.crop_current = QPushButton("Crop", self)
-        #self.crop_current.clicked.connect(self.do1)
+        # self.crop_current.clicked.connect(self.do1)
         self.overlay_buttons_layout.addWidget(self.crop_current)
 
         self.crop_all = QPushButton("Crop All", self)
-        #self.crop_all.clicked.connect(self.do1)
+        # self.crop_all.clicked.connect(self.do1)
         self.overlay_buttons_layout.addWidget(self.crop_all)
 
         self.overlay_buttons_layout.setAlignment(Qt.AlignRight)
-
 
         self.overlay_ui_layout = QHBoxLayout()
 
@@ -294,9 +305,9 @@ class ImageDropWidget(QWidget):
     def save_settings(self, filepath):
 
         data = {
-            "add_labels_on_load": False, #self.add_labels_checkbox.isChecked(),
-            "sync_labels": False,#self.sync_labels_checkbox.isChecked(),
-            "labels": False,#self.labels_list_widget.get_labels()
+            "add_labels_on_load": False,  # self.add_labels_checkbox.isChecked(),
+            "sync_labels": False,  # self.sync_labels_checkbox.isChecked(),
+            "labels": False,  # self.labels_list_widget.get_labels()
         }
         with open(filepath, 'w') as file:
             json.dump(data, file)
@@ -307,7 +318,7 @@ class ImageDropWidget(QWidget):
                 with open(filepath, 'r') as file:
                     data = json.load(file)
                 self.labels_list_widget.set_labels(data.get("labels", []))
-                #self.add_labels_checkbox.setChecked(data.get("add_labels_on_load", False))
+                # self.add_labels_checkbox.setChecked(data.get("add_labels_on_load", False))
                 self.sync_labels_checkbox.setChecked(data.get("sync_labels", False))
             else:
                 print(f"File '{filepath}' does not exist. Could not load labels.")
@@ -366,7 +377,6 @@ class ImageDropWidget(QWidget):
             except Exception as e:
                 print(f"Error when flipping image: {e}")
 
-
     def navigate_to_previous_image(self):
         if self.current_image_index > 0:  # prevent underflow
             self.current_image_index -= 1
@@ -378,20 +388,21 @@ class ImageDropWidget(QWidget):
         self.select_current_image()
 
     def navigate_to_previous_row_image(self):
-        items_in_grid_line = max(1, int((self.size().width() - self.preview_label.size().width()) / (self.grid_item_width + self.grid_spacing)))
+        items_in_grid_line = max(1, int((self.size().width() - self.preview_label.size().width()) / (
+                    self.grid_item_width + self.grid_spacing)))
         if self.current_image_index >= items_in_grid_line:  # if there's a row above
             self.current_image_index -= items_in_grid_line
         self.select_current_image()
 
     def navigate_to_next_row_image(self):
-        items_in_grid_line = max(1, int((self.size().width() - self.preview_label.size().width()) / (self.grid_item_width + self.grid_spacing)))
+        items_in_grid_line = max(1, int((self.size().width() - self.preview_label.size().width()) / (
+                    self.grid_item_width + self.grid_spacing)))
         if self.current_image_index < len(self.images) - items_in_grid_line:  # if there's a row below
             self.current_image_index += items_in_grid_line
         self.select_current_image()
 
     def select_current_image(self):
         self.on_image_clicked(self.images[self.current_image_index])
-
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -408,7 +419,6 @@ class ImageDropWidget(QWidget):
         for path in paths:
             self.process_image(path)
 
-
     def dropEvent(self, event):
         print(f"dropEvent, urls len: {len(event.mimeData().urls())}")
         for url in event.mimeData().urls():
@@ -422,14 +432,14 @@ class ImageDropWidget(QWidget):
                             full_path = os.path.join(root, file)
                             self.process_image(full_path)
             # If the path is a file, process the file directly
-            elif os.path.isfile(path) and (path.endswith('.jpg') or path.endswith('.jpeg')  or path.endswith('.png')):
+            elif os.path.isfile(path) and (path.endswith('.jpg') or path.endswith('.jpeg') or path.endswith('.png')):
                 self.process_image(path)
             else:
                 event.ignore()
 
     def process_image(self, path):
         if path not in [label.path for label in self.images]:
-            if path.endswith('.jpg') or path.endswith('.jpeg')  or path.endswith('.png'):
+            if path.endswith('.jpg') or path.endswith('.jpeg') or path.endswith('.png'):
                 pixmap = image_basic.load_image_with_exif(path)
                 pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
                                        aspectRatioMode=Qt.KeepAspectRatio)
@@ -444,15 +454,12 @@ class ImageDropWidget(QWidget):
                 close_button.setFixedSize(QSize(16, 16))
                 close_button.clicked.connect(lambda checked, lbl=label: self.remove_item(lbl))
 
-
                 self.images.append(label)
                 self.update_grid_layout()
 
 
         else:
             print(f"{path} already exists in the widget!")
-
-
 
     def resizeEvent(self, event):
         self.update_grid_layout()
@@ -461,7 +468,8 @@ class ImageDropWidget(QWidget):
 
     def update_grid_layout(self):
         window_size = self.size()
-        items_in_grid_line = max(1, int((window_size.width() - self.preview_label.size().width()) / (self.grid_item_width + self.grid_spacing)))
+        items_in_grid_line = max(1, int((window_size.width() - self.preview_label.size().width()) / (
+                    self.grid_item_width + self.grid_spacing)))
 
         for i, label in enumerate(self.images):
             label.setMinimumSize(self.grid_item_width, self.grid_item_height)
@@ -483,7 +491,6 @@ class ImageDropWidget(QWidget):
             label.deleteLater()
         self.images.clear()
         self.update_preview_clear()
-
 
     def remove_item(self, label):
         was_selected = False
@@ -510,13 +517,18 @@ class ImageDropWidget(QWidget):
         if self.images:
             self.on_image_clicked(self.images[next_index])
 
-
     def update_preview_clear(self):
         self.resize_timer.stop()
         self.last_preview = None
         self.preview_label.setPixmap(QPixmap())
 
-    def  reserved_for_preview_size(self) -> QPoint:
+        # Adjust the OverlayLabel's size and position to fit within the preview_label
+        self.overlay_label.resize(self.preview_label.size())
+        self.overlay_label.move(0, 0)  # Top-left corner
+        #self.overlay_label.raise_()  # Bring to front
+        self.overlay_label.show()
+
+    def reserved_for_preview_size(self) -> QPoint:
         window_size = self.size()
         return QPoint(int(window_size.width() // 3), int(window_size.height() - 150))
 
@@ -527,11 +539,11 @@ class ImageDropWidget(QWidget):
         height = pixmap.height()
         width = pixmap.width()
         if (height == 0) or (width == 0):
-            print(f"Warning: Image {self.current_label.path} has a wrong size: ({height}x{width}). Cannot calculate aspect ratio.")
+            print(
+                f"Warning: Image {self.current_label.path} has a wrong size: ({height}x{width}). Cannot calculate aspect ratio.")
             return pixmap
 
         image_aspect_ratio = pixmap.width() / pixmap.height()
-
 
         if image_aspect_ratio > preview_aspect_ratio:
             # Image is wider compared to the preview area, so scale based on width
@@ -549,6 +561,12 @@ class ImageDropWidget(QWidget):
 
         # pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio,
         #                                            transformMode=Qt.SmoothTransformation)
+
+        # Adjust the OverlayLabel's size and position to fit within the preview_label
+        self.overlay_label.resize(self.preview_label.size())
+        self.overlay_label.move(0, 0)  # Top-left corner
+        #self.overlay_label.raise_()  # Bring to front
+        self.overlay_label.show()
         # pixmap = pixmap.scaledToHeight(self.preview_label.height(), Qt.SmoothTransformation)
         self.last_preview = label
 
@@ -556,6 +574,16 @@ class ImageDropWidget(QWidget):
 
         self.base_image_pixmap = pixmap
         self.preview_label.setPixmap(pixmap)
+
+        # Ensure the OverlayLabel is displayed over the preview image
+        #self.overlay_label.raise_()
+        self.overlay_label.show()
+
+        # Adjust the OverlayLabel's size and position to fit within the preview_label
+        self.overlay_label.resize(self.preview_label.size())
+        self.overlay_label.move(0, 0)  # Top-left corner
+        self.overlay_label.raise_()  # Bring to front
+        self.overlay_label.show()
 
     def update_preview_simple(self):
         if (None != self.last_preview) and (None != self.last_preview.pixmap()):
@@ -574,6 +602,10 @@ class ImageDropWidget(QWidget):
             self.resize_timer.setSingleShot(True)
             self.resize_timer.start()
 
+            # Ensure the OverlayLabel is displayed over the preview image
+            #self.overlay_label.raise_()
+            self.overlay_label.show()
+
     def resize_done(self):
         self.resize_timer.stop()
         if (None != self.last_preview):
@@ -591,14 +623,12 @@ class ImageDropWidget(QWidget):
             if is_current_selected:
                 self.current_image_index = i  # update current image index
 
-
         self.update_preview_with_image_resize(label)
 
 
-
 class image_basic():
-
     skip_rotation = False
+
     def load_image_with_exif(path):
 
         skip_rotation = False
@@ -611,9 +641,9 @@ class image_basic():
 
         exif = image._getexif()
         if not exif:
-            #print(f"No EXIF data found for the image at {path}.")
+            # print(f"No EXIF data found for the image at {path}.")
             # You could return a default QPixmap here if you want
-            #return QPixmap()
+            # return QPixmap()
             skip_rotation = True
 
         if False == skip_rotation:
@@ -644,9 +674,9 @@ class image_basic():
                     # Rotated 270 degrees
                     image = image.rotate(90)
             except ValueError:
-                #print(f"Invalid EXIF orientation value {orientation} for the image at {path}.")
+                # print(f"Invalid EXIF orientation value {orientation} for the image at {path}.")
                 # You could return a default QPixmap here if you want
-                #return QPixmap()
+                # return QPixmap()
                 skip_rotation = True
 
         # Convert the PIL image to QPixmap

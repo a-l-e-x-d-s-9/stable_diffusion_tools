@@ -731,7 +731,7 @@ def add_tags_from_folder(args):
         for image in all_images:
 
             parent_name = Path(image).parent.name
-            tags = parent_name
+            tags = parent_name.lower().replace("_", " ")
 
             caption_file = os.path.splitext(image)[0] + ".txt"
 
@@ -759,7 +759,7 @@ def add_tags_from_argument(args):
             executor.submit(add_tag_to_file, caption_file, args.tag, args.start, args.end, args.dry_run)
 
 def main(args):
-    if args.mode in [ 'search_for_tags', 'full_statistic', 'statistic_for_subject',
+    if args.mode in [ 'search_for_tags', 'full_statistic',
                      'check_images_and_captions' ] and args.output_file is None:
         raise Exception(f"Output file must be specified for mode '{args.mode}'.")
 
@@ -822,7 +822,7 @@ def main(args):
         full_statistic(args.root, args.output_file, args.threads)
     elif args.mode == 'statistic_for_subject':
         subject_folder = os.path.join(args.root, args.tag)
-        validate_folder_structure(subject_folder)
+        #validate_folder_structure(subject_folder)
         statistic_for_subject(subject_folder, args.output_file)
     elif args.mode == 'add_tags_from_folder':
 
@@ -833,7 +833,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Script for handling captions for images.')
-    parser.add_argument('-m', '--mode', help='Mode of operation. Options: check_images_and_captions, remove_captions_without_image, remove_tags_beside_specified, remove_tag_all, replace_tag, add_tag_all, add_tag_single, move_to_validation, search_for_tags, full_statistic, statistic_for_subject, statistic_for_subject, add_tags_from_folder.')
+    parser.add_argument('-m', '--mode', help='Mode of operation. Options: check_images_and_captions, remove_captions_without_image, remove_tags_beside_specified, remove_tag_all, replace_tag, add_tag_all, add_tag_single, move_to_validation, search_for_tags, full_statistic, statistic_for_subject, add_tags_from_folder.')
     parser.add_argument('-r', '--root', help='Root folder containing all subject folders.')
     parser.add_argument('-t', '--tag', help='Tag to add or remove.')
     parser.add_argument('-tn', '--tag_new', help='New tag to use.')
