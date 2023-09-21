@@ -788,6 +788,12 @@ class ImageDropWidget(QWidget):
             #     else:
             #         print(f"{path} already exists in the widget!")
 
+    supported_formats_list = ['jpg', 'jpeg', 'png', 'bmp', 'tiff']
+    def is_supported_image_format(self, file_name):
+
+        return any(file_name.lower().endswith(ext) for ext in self.supported_formats_list)
+
+
     def dropEvent(self, event):
         print(f"dropEvent, urls len: {len(event.mimeData().urls())}")
         for url in event.mimeData().urls():
@@ -797,18 +803,18 @@ class ImageDropWidget(QWidget):
             if os.path.isdir(path):
                 for root, dirs, files in os.walk(path):
                     for file in files:
-                        if file.endswith('.jpg') or file.endswith('.jpeg') or file.endswith('.png'):
+                        if self.is_supported_image_format(file):
                             full_path = os.path.join(root, file)
                             self.process_image(full_path)
             # If the path is a file, process the file directly
-            elif os.path.isfile(path) and (path.endswith('.jpg') or path.endswith('.jpeg')  or path.endswith('.png')):
+            elif os.path.isfile(path) and self.is_supported_image_format(path):
                 self.process_image(path)
             else:
                 event.ignore()
 
     def process_image(self, path):
         if path not in [label.path for label in self.images]:
-            if path.endswith('.jpg') or path.endswith('.jpeg')  or path.endswith('.png'):
+            if self.is_supported_image_format(path):
                 pixmap = image_basic.load_image_with_exif(path)
                 pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
                                        aspectRatioMode=Qt.KeepAspectRatio)
@@ -1303,12 +1309,12 @@ class MainWindow(QMainWindow):
                     # Check if there is a corresponding image file
                     dir_path, file_name = os.path.split(path)
                     base_name, _ = os.path.splitext(file_name)
-                    for img_ext in ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'gif']:
+                    for img_ext in self.supported_formats_list:
                         img_path = os.path.join(dir_path, base_name + '.' + img_ext)
                         if os.path.isfile(img_path):
                             paths.append(img_path)
                             break
-                elif path.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.gif')):
+                elif self.is_supported_image_format(path):
                     paths.append(path)
 
         # Now, `paths` contains all the image paths that need to be added to the preview area
