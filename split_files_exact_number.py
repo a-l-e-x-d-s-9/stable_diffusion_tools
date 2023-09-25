@@ -4,14 +4,16 @@ import shutil
 import collections
 import random
 
-def split_files(source_folder, target_folder, split_amount, copy_files, exclude_folder, exclude_files):
+images_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
+
+def split_files(source_folder, target_folder, split_amount, copy_files, exclude_folder, exclude_files, with_captions):
     for root, _, files in os.walk(source_folder):
         if exclude_folder and exclude_folder in root:
             continue
 
         file_groups = collections.defaultdict(list)
         for file in files:
-            base_name, _ = os.path.splitext(file)
+            base_name, ext = os.path.splitext(file)
             if base_name not in exclude_files:
                 file_groups[base_name].append(file)
 
@@ -30,6 +32,17 @@ def split_files(source_folder, target_folder, split_amount, copy_files, exclude_
                 else:
                     shutil.move(src_file, dst_file)
 
+                # If --with_captions is used, move or copy the corresponding TXT file (if it exists)
+                if with_captions and ext.lower() in images_extensions:
+                    caption_file = base_name + ".txt"
+                    src_caption_file = os.path.join(root, caption_file)
+                    dst_caption_file = os.path.join(dst_dir, caption_file)
+                    if os.path.exists(src_caption_file):
+                        if copy_files:
+                            shutil.copy2(src_caption_file, dst_caption_file)
+                        else:
+                            shutil.move(src_caption_file, dst_caption_file)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Move or copy random files from a source folder to a target folder.')
@@ -40,9 +53,12 @@ if __name__ == "__main__":
     parser.add_argument('--copy-files', action='store_true', default=False, help='Copy files instead of moving them.')
     parser.add_argument('--exclude-folder', type=str, help='Folder to exclude from the operation.')
     parser.add_argument('--exclude-files', type=str, nargs='*', help='Files (without extension) to exclude from the operation.')
+    parser.add_argument('--with_captions', action='store_true', default=False,
+                        help='Move or copy corresponding TXT files for each image.')
+
     args = parser.parse_args()
 
-    split_files(args.source_folder, args.target_folder, args.split_amount, args.copy_files, args.exclude_folder, args.exclude_files)
+    split_files(args.source_folder, args.target_folder, args.split_amount, args.copy_files, args.exclude_folder, args.exclude_files, args.with_captions)
 
 
 # python3 split_files_exact_number.py --source-folder /path/to/source/folder --target-folder /path/to/target/folder --split-amount 3 --copy-files --exclude-folder /path/to/exclude/folder --exclude-files file1 file2 file3
