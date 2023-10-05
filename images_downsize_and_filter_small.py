@@ -105,7 +105,7 @@ if __name__ == '__main__':
     for dirpath, dirnames, filenames in os.walk(source_path):
         for file_name in filenames:
             file_path = os.path.join(dirpath, file_name)
-            if file_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+            if file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.tiff', '.bmp')):
                 images_to_process.append(file_path)
 
     process_map(process_image, images_to_process, [source_path] * len(images_to_process),
