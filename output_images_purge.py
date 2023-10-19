@@ -213,4 +213,4 @@ if __name__ == "__main__":
 
     process_images(args)
 
-    # output_images_purge.py --path "/home/alexds9/Documents/stable_diffusion/Babes/Babes 1.2/" --seed_start 0 --seed_end 300 --min_width 512 --min_height 768
+    # output_images_purge.py --path "/some/path/" --seed_start 0 --seed_end 300 --min_width 512 --min_height 768
