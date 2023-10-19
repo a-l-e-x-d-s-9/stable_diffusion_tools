@@ -214,7 +214,7 @@ if __name__ == "__main__":
         parser.error("Both --min_width and --min_height must be provided together.")
 
     # Validation: At least one removal criteria should be provided
-    if not any([args.seed_start, args.min_width]):
+    if (not args.seed_start) and (not args.min_width):
         parser.error("No removal criteria provided. Provide at least one of the criteria.")
 
 
