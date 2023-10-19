@@ -135,6 +135,7 @@ def extract_patterns(s: str):
 
 def handle_image(input_image, args):
     metadata = read_image_metadata(input_image)
+    deleted_file_size = 0
 
     for key, value in metadata.items():
         #print(f"KEY: {key}: \n VALUE:\n {value}")
@@ -156,11 +157,14 @@ def handle_image(input_image, args):
                             is_need_to_delete = True
 
             if is_need_to_delete:
+                deleted_file_size = os.path.getsize(input_image)  # Get the file size
                 if args.dry_run_off:
                     os.remove(input_image)
-                    return
+                    return deleted_file_size
                 else:
                     print(f"[NOT] Delete: {input_image}")
+
+    return deleted_file_size
 
 def process_images(args):
     source_folder_path = Path(args.path)
@@ -171,11 +175,14 @@ def process_images(args):
                        and p.suffix.lower() in ['.jpg', '.jpeg', '.png'])]
 
     total_images = len(image_paths)
+    total_deleted_size = 0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        # The map function takes a function and an iterable and applies the function to every element in the iterable
-        # Wrap tqdm around it to add a progress bar
-        list(tqdm(executor.map(lambda image_path: handle_image(image_path, args), image_paths), total=total_images))
+        with tqdm(total=total_images, unit="file", desc="Total deleted: 0 GB") as pbar:
+            for deleted_size in executor.map(lambda image_path: handle_image(image_path, args), image_paths):
+                pbar.update(1)
+                total_deleted_size += deleted_size
+                pbar.set_description(f"Total deleted: {total_deleted_size / (1024 ** 3):.3f} GB")
 
 
 
