@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 import time
 import random
-
+import brotli
 
 # Create an argument parser
 parser = argparse.ArgumentParser(description='Download images from Getty Images')
