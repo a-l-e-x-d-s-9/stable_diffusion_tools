@@ -632,7 +632,8 @@ class ImageDropWidget(QWidget):
 
             is_add = (False == only_changes) or \
                      (status and (label in self.disabled_tags_last)) or \
-                     (not status and (label in self.enabled_tags_last))
+                     (not status and (label in self.enabled_tags_last)) or \
+                     (not (label in self.enabled_tags_last) and not (label in self.disabled_tags_last))
 
             if is_add:
                 if status:
@@ -648,10 +649,14 @@ class ImageDropWidget(QWidget):
 
         comma_place_desired = 0
 
-        for label in self.images:
-            path = label.path
-            self.add_captions_to_path(enabled_tags, comma_place_desired, path)
-            self.remove_captions_from_path(disabled_tags, path)
+        if (enabled_tags != []) or (disabled_tags != []):
+            for label in self.images:
+                path = label.path
+                if (enabled_tags != []):
+                    self.add_captions_to_path(enabled_tags, comma_place_desired, path)
+
+                if (disabled_tags != []):
+                    self.remove_captions_from_path(disabled_tags, path)
 
     def load_args(self, args):
         self.args = args
