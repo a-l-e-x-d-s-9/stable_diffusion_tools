@@ -438,6 +438,10 @@ class ImageDropWidget(QWidget):
         self.checkboxes_layout.addWidget(self.sync_labels_checkbox)
         self.sync_labels_checkbox.stateChanged.connect(self.sync_labels_checkbox_changed)
 
+        self.sync_labels_changes_checkbox = QCheckBox("Sync labels changes", self)
+        self.checkboxes_layout.addWidget(self.sync_labels_changes_checkbox)
+        #self.sync_labels_changes_checkbox.stateChanged.connect(self.sync_labels_checkbox_changes_changed)
+
         self.labels_list_widget.changed_add_callback(self.labels_changed_callback)
 
 
@@ -595,6 +599,10 @@ class ImageDropWidget(QWidget):
             #print("sync_labels_checkbox_changed")
             self.sync_labels_on_change()
 
+    def sync_labels_checkbox_changes_changed(self):
+        if self.sync_labels_changes_checkbox.isChecked():
+            #print("sync_labels_checkbox_changed")
+            self.sync_labels_on_change()
 
     change_counter = 0
     def labels_changed_callback(self):
@@ -605,7 +613,12 @@ class ImageDropWidget(QWidget):
             print("sync_labels_checkbox_changed")
             self.sync_labels_on_change()
 
-    def sync_labels_on_change(self):
+        else:
+            if self.sync_labels_changes_checkbox.isChecked():
+                self.sync_labels_on_change(only_changes=True)
+
+
+    def sync_labels_on_change(self, only_changes:bool = False):
         # When label toggled
         # When loading image
         label_and_state = self.labels_list_widget.get_labels()
@@ -617,10 +630,21 @@ class ImageDropWidget(QWidget):
             print(f"{label}, {status}")
             tags = self.caption_to_tag_list(label)
 
-            if status:
-                enabled_tags.extend(tags)
-            else:
-                disabled_tags.extend(tags)
+            is_add = (False == only_changes) or \
+                     (status and (label in self.disabled_tags_last)) or \
+                     (not status and (label in self.enabled_tags_last))
+
+            if is_add:
+                if status:
+                    enabled_tags.extend(tags)
+                else:
+                    disabled_tags.extend(tags)
+
+        self.enabled_tags_last = [item for item in self.enabled_tags_last if item not in disabled_tags]
+        self.enabled_tags_last.extend(enabled_tags)
+
+        self.disabled_tags_last = [item for item in self.disabled_tags_last if item not in enabled_tags]
+        self.disabled_tags_last.extend(disabled_tags)
 
         comma_place_desired = 0
 
@@ -641,19 +665,33 @@ class ImageDropWidget(QWidget):
         data = {
             "add_labels_on_load": self.add_labels_checkbox.isChecked(),
             "sync_labels": self.sync_labels_checkbox.isChecked(),
+            "sync_labels_changes": self.sync_labels_changes_checkbox.isChecked(),
             "labels": self.labels_list_widget.get_labels()
         }
         with open(filepath, 'w') as file:
             json.dump(data, file)
+
+    def init_last_labels(self, labels_info):
+        self.enabled_tags_last = []
+        self.disabled_tags_last = []
+
+        for i, (label, enabled) in enumerate(labels_info):
+            if enabled:
+                self.enabled_tags_last.append(label)
+            else:
+                self.disabled_tags_last.append(label)
 
     def load_settings(self, filepath):
         try:
             if os.path.exists(filepath):
                 with open(filepath, 'r') as file:
                     data = json.load(file)
-                self.labels_list_widget.set_labels(data.get("labels", []))
+                labels_info = data.get("labels", [])
+                self.labels_list_widget.set_labels(labels_info)
+                self.init_last_labels(labels_info)
                 self.add_labels_checkbox.setChecked(data.get("add_labels_on_load", False))
                 self.sync_labels_checkbox.setChecked(data.get("sync_labels", False))
+                self.sync_labels_changes_checkbox.setChecked(data.get("sync_labels_changes", False))
             else:
                 print(f"File '{filepath}' does not exist. Could not load labels.")
         except Exception as e:
