@@ -2,8 +2,11 @@ import os
 import re
 import random
 import math
+import json
 
 image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp']
+
+FOLDER_SETTINGS_FILE_NAME = "folder_settings.json"
 
 def get_image_count_in_folder(folder_path):
     """Return the number of image files in the given folder."""
@@ -62,6 +65,24 @@ def hide_random_images(folder_path, number_images_to_hide):
         os.rename(os.path.join(folder_path, img), os.path.join(folder_path, "." + img))
 
 
+def save_folder_settings(folder_path, repeats):
+    """Save the calculated repeats to a folder_settings.json file inside the folder."""
+    settings_file_path = os.path.join(folder_path, FOLDER_SETTINGS_FILE_NAME)
+
+    # If folder_settings.json exists, read its contents
+    if os.path.exists(settings_file_path):
+        with open(settings_file_path, "r") as f:
+            settings = json.load(f)
+    else:
+        settings = {}
+
+    # Update the num_repeats key
+    settings["num_repeats"] = repeats
+
+    # Write the updated settings back to folder_settings.json
+    with open(settings_file_path, "w") as f:
+        json.dump(settings, f, indent=4)
+
 
 def process_folders(root_path, total_epochs):
     """Scan folders, calculate repeats and rename them."""
@@ -86,9 +107,9 @@ def process_folders(root_path, total_epochs):
             desired_images_from_folder = int(multiplier * images_in_folder * total_epochs)
             number_images_to_hide = 0
 
-            if  desired_images_from_folder < images_in_folder:
-                number_images_to_hide = images_in_folder - desired_images_from_folder
-                hide_random_images(folder_path, number_images_to_hide)
+            #if  desired_images_from_folder < images_in_folder:
+            #    number_images_to_hide = images_in_folder - desired_images_from_folder
+            #    hide_random_images(folder_path, number_images_to_hide)
 
             # Calculate repeats * images for the folder
             total_images_for_folder = repeats * (images_in_folder - number_images_to_hide)
@@ -104,7 +125,11 @@ def process_folders(root_path, total_epochs):
             print(f"\tImages per epoch (repeats * images / total_epochs): {total_images_for_folder / total_epochs}")
             print("-" * 50)
 
-            rename_folder(folder_path, repeats)
+            # Save the repeats to a folder_settings.json file inside the folder
+            save_folder_settings(folder_path, repeats)
+
+            # No longer using renames
+            # rename_folder(folder_path, repeats)
 
     avg_images_per_epoch = total_images_used / total_epochs
     print(f"Total images used for all epoch: {total_images_used}")
