@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Image Link Collector
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.2
 // @description  Collect image URLs by clicking on them
 // @author       You
 // @match        https://www.gettyimages.com/*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=gettyimages.com/
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
@@ -33,15 +34,16 @@
 
     function removeImageFromList(imageUrl) {
         clickedImages = clickedImages.filter(function(item) {
-            return item !== imageUrl;
+            return item.url !== imageUrl;
         });
         GM_setValue("clickedImages", clickedImages);
         updateCounter();
     }
 
-    function addImageToList(imageUrl) {
-        if (!clickedImages.includes(imageUrl)) {
-            clickedImages.push(imageUrl);
+    function addImageToList(imageUrl, imageAlt) {
+        var imageObject = { url: imageUrl, alt: imageAlt };
+        if (!clickedImages.some(item => item.url === imageUrl)) {
+            clickedImages.push(imageObject);
             GM_setValue("clickedImages", clickedImages);
             updateCounter();
         }
@@ -50,6 +52,8 @@
     function addClickListenerToImage(article) {
         var linkElement = article.getElementsByTagName('a')[0];
         var imageUrl = linkElement.href;
+        var imageTag = linkElement.querySelector('img');
+
 
         // Check if button already exists
         if (article.querySelector('.add-to-list-button')) {
@@ -58,18 +62,18 @@
 
 
         if (autoAddImages) {
-            addImageToList(imageUrl); // Automatically add image to the list if auto-add feature is enabled
+            addImageToList(imageUrl, imageTag.alt); // Automatically add image to the list if auto-add feature is enabled
         }
 
 
         var button = document.createElement('button');
-        button.innerHTML = clickedImages.includes(imageUrl) ? 'Added' : 'Add to list';
+        button.innerHTML = clickedImages.some(item => item.url === imageUrl) ? 'Added' : 'Add to list';
+        button.style.backgroundColor = clickedImages.some(item => item.url === imageUrl) ? 'lightgreen' : '';
         button.style.position = 'absolute';
         button.style.zIndex = '1000';
         button.style.bottom = '0';
         button.style.left = '50%';
         button.style.transform = 'translateX(-50%)';
-        button.style.backgroundColor = clickedImages.includes(imageUrl) ? 'lightgreen' : '';
         button.style.width = '100%'; // Increase button width
         button.style.height = '50px'; // Increase button height
         button.style.fontSize = '20px'; // Increase font size
@@ -79,18 +83,19 @@
         linkElement.parentNode.insertBefore(button, linkElement.nextSibling);
         button.addEventListener('click', function(e) {
             e.preventDefault();
-            if (!clickedImages.includes(imageUrl)) {
-                clickedImages.push(imageUrl);
+            var imageObject = { url: imageUrl, alt: imageTag.alt };
+            if (!clickedImages.some(item => item.url === imageUrl)) {
+                clickedImages.push(imageObject);
                 GM_setValue("clickedImages", clickedImages);
-                e.target.innerHTML = 'Added';
-                e.target.style.backgroundColor = 'lightgreen';
+                button.innerHTML = 'Added';
+                button.style.backgroundColor = 'lightgreen';
                 updateCounter();
-                addRemoveButton(article, imageUrl); // Add remove button when image is added
+                addRemoveButton(article, imageUrl);
             }
         });
 
         // If image is already added, create remove button
-        if (clickedImages.includes(imageUrl)) {
+        if (clickedImages.some(item => item.url === imageUrl)) {
             addRemoveButton(article, imageUrl);
         }
     }
@@ -128,8 +133,16 @@
     }
 
     async function copyToClipboard() {
+        var textToCopy = clickedImages.map(item => {
+            if (typeof item === 'object' && item.url && item.alt) {
+                return item.url + ' Alt: ' + item.alt;
+            } else {
+                return item; // In case there are still some plain URLs in the array
+            }
+        }).join('\n');
+
         try {
-            await navigator.clipboard.writeText(clickedImages.join('\n'));
+            await navigator.clipboard.writeText(textToCopy);
         } catch (err) {
             console.error('Failed to copy image URLs: ', err);
         }
