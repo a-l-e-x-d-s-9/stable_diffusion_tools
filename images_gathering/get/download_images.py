@@ -58,8 +58,10 @@ def extract_img_url(html_content: str, base_domain: str) -> str:
     return ""
 
 
-def download_image(idx, original_url):
+def download_image(idx, url_and_alt):
+    original_url, alt_text = url_and_alt.split(" Alt: ", 1)
     data = {'url': original_url}
+
 
     attempts_amount = 4
     success = False  # flag to indicate whether the image download was successful
@@ -88,6 +90,17 @@ def download_image(idx, original_url):
                             file.write(chunk)
                     if os.path.getsize(file_name) > 0:  # if file is not zero size
                         print(f'Image downloaded and saved as {file_name}')
+
+                        # Split the file name and its extension
+                        file_name_without_ext, _ = os.path.splitext(file_name)
+
+                        # Change the extension to .txt
+                        new_file_name = file_name_without_ext + ".txt"
+
+                        # Open the new file in write mode and write the alt text
+                        with open(new_file_name, 'w') as file:
+                            file.write(alt_text)
+
                         success = True  # set the flag to indicate that the image download was successful
                         break
                     else:  # if file is zero size
@@ -114,13 +127,13 @@ def download_image(idx, original_url):
         # Add the original URL to the failed URLs file
         with file_lock:
             with open(args.input + '_failed', 'a') as f:
-                f.write(f'{original_url}\n')
+                f.write(f'{original_url} Alt: {alt_text}\n')
 
 
 
 with open(args.input, 'r') as f:
-    urls = f.read().splitlines()
+    urls_and_alts = f.read().splitlines()
 
 with ThreadPoolExecutor(max_workers=50) as executor:
-    for idx, request_url in enumerate(urls, start=1):
-        executor.submit(download_image, idx, request_url)
+    for idx, url_and_alt in enumerate(urls_and_alts, start=1):
+        executor.submit(download_image, idx, url_and_alt)
