@@ -45,7 +45,8 @@ def get_image_files_in_current_folder(subject_folder):
 def get_caption_files(subject_folder):
     captions_files_list = []
 
-    found_captions = glob.glob(f"{subject_folder}/*.txt", recursive=False)
+    # Now using the recursive parameter to search within subdirectories
+    found_captions = glob.glob(f"{subject_folder}/*.txt", recursive=True)
     #print(f"DEBUG: Searching in {subject_folder}, found captions len: {len(found_captions)}")  # Debugging line
     if found_captions:
         captions_files_list += found_captions
@@ -72,7 +73,7 @@ def read_file(file_path: str) -> List[str]:
         raise
 
 def tags_str_to_list(all_tags_str: str) -> List[str]:
-    tags = all_tags_str.split(',')
+    tags = all_tags_str.lower().split(',')
     return [tag.strip() for tag in tags if tag.strip()]
 
 def detect_and_remove_empty_tags(file_path: str) -> None:
