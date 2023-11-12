@@ -2,7 +2,7 @@ import os
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
-import imghdr
+from PIL import UnidentifiedImageError
 import threading
 
 # We'll use a Lock to make sure that the counter is thread-safe
@@ -33,17 +33,20 @@ def get_all_images(source_folder, target_folder, quality):
             rel_path = os.path.relpath(source_path, source_folder)
             target_path = os.path.join(target_folder, rel_path)
 
-            # Change the extension to jpg because we are compressing to that format
             base, _ = os.path.splitext(target_path)
             target_path = base + '.jpg'
 
             target_subfolder = os.path.dirname(target_path)
             os.makedirs(target_subfolder, exist_ok=True)
 
-            # Check if the file is an image
-            if imghdr.what(source_path):
-                # If it is, then add it to the list of images to be compressed
-                all_images.append((source_path, target_path, quality))
+            # Check if the target file already exists
+            if not os.path.exists(target_path):
+                try:
+                    with Image.open(source_path):
+                        all_images.append((source_path, target_path, quality))
+                except UnidentifiedImageError:
+                    # Not an image, skip this file
+                    pass
 
     return all_images
 
