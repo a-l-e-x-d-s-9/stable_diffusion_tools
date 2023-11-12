@@ -7,18 +7,45 @@ import concurrent.futures
 parser = argparse.ArgumentParser(description='Download files from a list of URLs.')
 parser.add_argument('--file', metavar='FILE', type=str, help='the path to the file containing the URLs')
 parser.add_argument('--folder', metavar='FOLDER', type=str, help='the path to the folder to save downloaded files')
+parser.add_argument('--delimiter', metavar='DELIMITER', type=str, nargs='?', default=None, help='delimiter to split the text and save to a txt file')
 
-# Define a function to download a file
-def download_file(url, folder):
+# Define a function to download a file and create a text file if needed
+def download_file(url_text, folder, delimiter=None):
     try:
+        #print(f"url_text: {url_text}")
+        #print(f"delimiter: '{delimiter}'")
+        # Split the URL and the text if a delimiter is provided
+        if delimiter and delimiter in url_text:
+            url, text = url_text.split(delimiter, 1)
+            text = text.strip()
+        else:
+            url = url_text
+            text = None
+
+        #print(f"text: '{text}'")
+
         file_name = os.path.basename(url)
         file_path = os.path.join(folder, file_name)
 
-        if os.path.exists(file_path):
-            return "skipped"
-        else:
+        # Download the file
+        if not os.path.exists(file_path):
             urllib.request.urlretrieve(url, file_path)
-            return "downloaded"
+
+        # If text is available, create a .txt file
+        if text:
+            text_file_path = os.path.splitext(file_path)[0] + ".txt"
+            #print(f"text_file_path: {text_file_path}")
+            with open(text_file_path, 'w') as text_file:
+                text_file.write(text)
+
+        return "downloaded"
+
+    except urllib.error.HTTPError as e:
+        print(f"HTTP error ({e.code}): {e.reason} - {url}")
+    except urllib.error.URLError as e:
+        print(f"URL error: {e.reason} - {url}")
+    except Exception as e:
+        print(f"Error downloading {url}: {e}")
 
     except urllib.error.HTTPError as e:
         print(f"HTTP error ({e.code}): {e.reason} - {url}")
@@ -41,7 +68,7 @@ try:
         counter = 0
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(download_file, url, args.folder): url for url in urls}
+            futures = {executor.submit(download_file, url, args.folder, args.delimiter): url for url in urls}
 
             for future in concurrent.futures.as_completed(futures):
                 url = futures[future]
