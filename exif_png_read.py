@@ -3,7 +3,7 @@ import argparse
 from PIL import Image
 from PIL.ExifTags import TAGS
 from PIL.PngImagePlugin import PngImageFile
-
+Image.MAX_IMAGE_PIXELS = None # remove image check
 
 def read_image_metadata(image_path):
     with Image.open(image_path) as img:

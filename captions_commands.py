@@ -420,11 +420,13 @@ def full_statistic(root_folder, output_file, threads=10):
             file.write(f"{tag}: {count}\n")
 
 
-def statistic_for_subject(subject_folder, output_file):
+def statistic_for_subject(root_folder, output_file, threads):
     tag_counter = Counter()
-    for caption_file in get_caption_files(subject_folder):
-        tags = read_file(caption_file)
-        tag_counter.update(tags)
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        for subject_folder in get_all_sub_folders(root_folder):
+            for caption_file in get_caption_files(subject_folder):
+                tags = read_file(caption_file)
+                tag_counter.update([tags[0]])
     with open(output_file, 'w') as file:
         for tag, count in tag_counter.most_common():
             file.write(f"{tag}: {count}\n")
@@ -822,9 +824,9 @@ def main(args):
     elif args.mode == 'full_statistic':
         full_statistic(args.root, args.output_file, args.threads)
     elif args.mode == 'statistic_for_subject':
-        subject_folder = os.path.join(args.root, args.tag)
+        #subject_folder = os.path.join(args.root, args.tag)
         #validate_folder_structure(subject_folder)
-        statistic_for_subject(subject_folder, args.output_file)
+        statistic_for_subject(args.root, args.output_file, args.threads)
     elif args.mode == 'add_tags_from_folder':
 
         add_tags_from_folder(args)
