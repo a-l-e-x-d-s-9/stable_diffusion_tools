@@ -22,3 +22,4 @@ tiktoken==0.4.0
 tqdm==4.65.0
 tweepy==4.14.0
 brotli
+tweepy
