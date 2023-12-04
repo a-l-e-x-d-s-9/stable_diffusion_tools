@@ -470,14 +470,47 @@ class ImageDropWidget(QWidget):
         self.bottom_layout_remove.addWidget(self.remove_captions_button)
         self.remove_captions_button.clicked.connect(self.remove_captions)  # Connect the button to the add_captions method
 
-
         # Horizontal line
         self.line = QFrame(self)
         self.line.setFrameShape(QFrame.HLine)
         self.line.setFrameShadow(QFrame.Sunken)
         self.main_layout.addWidget(self.line)
 
+        # Bottom layout for search and replace
+        self.search_and_replace_layout = QHBoxLayout()
+        self.search_and_replace_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.main_layout.addLayout(self.search_and_replace_layout)
 
+        # Search field label
+        self.search_and_replace_search_label = QLabel("Search:", self)
+        self.search_and_replace_layout.addWidget(self.search_and_replace_search_label)
+
+        # Search text input
+        self.search_and_replace_search_input = QLineEdit(self)
+        self.search_and_replace_search_input.setPlaceholderText("Enter text to search")
+        self.search_and_replace_layout.addWidget(self.search_and_replace_search_input)
+
+        # Replace field label
+        self.search_and_replace_replace_label = QLabel("Replace:", self)
+        self.search_and_replace_layout.addWidget(self.search_and_replace_replace_label)
+
+        # Replace text input
+        self.search_and_replace_replace_input = QLineEdit(self)
+        self.search_and_replace_replace_input.setPlaceholderText("Enter replacement text")
+        self.search_and_replace_layout.addWidget(self.search_and_replace_replace_input)
+
+        # Search and Replace button
+        self.search_and_replace_button = QPushButton("Search and Replace", self)
+        self.search_and_replace_layout.addWidget(self.search_and_replace_button)
+        self.search_and_replace_button.clicked.connect(
+            self.search_and_replace)  # Connect the button to the search_and_replace method
+
+
+        # Horizontal line
+        self.line = QFrame(self)
+        self.line.setFrameShape(QFrame.HLine)
+        self.line.setFrameShadow(QFrame.Sunken)
+        self.main_layout.addWidget(self.line)
 
         # Captions layout
         self.captions_layout = QHBoxLayout()
@@ -939,6 +972,51 @@ class ImageDropWidget(QWidget):
         for label in self.images:
             path = label.path
             self.remove_captions_from_path(tags_to_remove, path)
+
+    # Define the search_and_replace method
+    def search_and_replace(self):
+        search_text = self.search_and_replace_search_input.text()
+        replace_text = self.search_and_replace_replace_input.text()
+        search_tags = search_text.split(',')
+        replace_tags = replace_text.split(',')
+
+        # Add your search and replace logic here
+        print(f"search_and_replace, search: \"{search_text}\", replace: \"{replace_text}\".")
+        for label in self.images:
+            path = label.path
+            self.search_and_replace_in_path(search_tags, replace_tags, path)
+
+    def search_and_replace_in_path(self, search_tags, replace_tags, path):
+        txt_path = os.path.splitext(path)[0] + '.txt'
+
+        if not os.path.exists(txt_path):
+            return  # Skip if no corresponding text file
+
+        # Get current tags
+        tag_list = self.caption_to_tag_list(self.image_captions[path])
+
+        # Track if any search tag is found and removed
+        search_tag_removed = False
+
+        # Create a new list excluding the search tags
+        new_tag_list = []
+        for tag in tag_list:
+            if tag.strip() not in search_tags:
+                new_tag_list.append(tag)
+            else:
+                search_tag_removed = True
+
+        # If a search tag was removed, add replace tags avoiding duplicates
+        if search_tag_removed:
+            for tag in replace_tags:
+                if tag not in new_tag_list:
+                    new_tag_list.append(tag)
+
+        final_captions = self.tag_list_to_string(new_tag_list)
+        self.image_captions[path] = final_captions
+
+        with open(txt_path, 'w') as txt_file:
+            txt_file.write(final_captions)
 
     def remove_captions_from_path(self, tags_to_remove, path):
         txt_path = os.path.splitext(path)[0] + '.txt'
