@@ -1389,6 +1389,9 @@ class image_basic():
                 #return QPixmap()
                 skip_rotation = True
 
+        if image.mode != 'RGBA':
+            image = image.convert('RGBA')
+
         # Convert the PIL image to QPixmap
         data = image.tobytes("raw", "RGBA")
         qimage = QImage(data, image.size[0], image.size[1], QImage.Format_RGBA8888)
