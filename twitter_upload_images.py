@@ -67,8 +67,9 @@ def select_entry(entries):
     total_images = sum(len(os.listdir(entry['source_folder'])) for entry in entries)
     if total_images == 0:
         return None
-    weighted_choices = [(entry, len(os.listdir(entry['source_folder'])) / total_images) for entry in entries]
-    return random.choices(weighted_choices, weights=[weight for entry, weight in weighted_choices], k=1)[0][0]
+
+    weights = [len(os.listdir(entry['source_folder'])) / total_images for entry in entries]
+    return random.choices(entries, weights=weights, k=1)[0]
 
 def main(settings_file):
     settings = load_json_file(settings_file)
