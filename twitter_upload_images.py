@@ -69,7 +69,18 @@ def select_entry(entries):
         return None
 
     weights = [len(os.listdir(entry['source_folder'])) / total_images for entry in entries]
-    return random.choices(entries, weights=weights, k=1)[0]
+
+    # Debug: Print weights for each entry
+    # for entry, weight in zip(entries, weights):
+    #     print(f"Entry: {entry['source_folder']}, Weight: {weight}")
+
+    selected_entry = random.choices(entries, weights=weights, k=1)[0]
+
+    # Debug: Print selected entry
+    # print(f"Selected Entry: {selected_entry['source_folder']}")
+
+    return selected_entry
+
 
 def main(settings_file):
     settings = load_json_file(settings_file)
@@ -108,6 +119,8 @@ def main(settings_file):
         if not os.path.exists(published_folder):
             os.makedirs(published_folder)
 
+        is_found_image = False
+
         for image_file in image_files:
             if not image_file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
                 continue
@@ -116,6 +129,7 @@ def main(settings_file):
             specific_text_file = os.path.splitext(image_path)[0] + '.txt'
             specific_message = read_message_from_file(specific_text_file) or ""
             message = common_message + specific_message
+            is_found_image = True
 
             if post_tweet_with_image(api, client, image_path, message):
                 published_image_path = os.path.join(published_folder, image_file)
@@ -124,13 +138,22 @@ def main(settings_file):
                     published_text_file = os.path.join(published_folder, os.path.basename(specific_text_file))
                     os.rename(specific_text_file, published_text_file)
 
+            break
+
+        if is_found_image:
+            wait_seconds = settings['interval']
             # Countdown timer
-            interval_minutes = settings['interval'] // 60
-            for remaining in range(interval_minutes, 0, -1):
-                sys.stdout.write(
-                    "\rNext upload in: {} minute(s)    ".format(remaining))  # Extra spaces to clear the line
-                sys.stdout.flush()
-                time.sleep(60)
+            interval_minutes = wait_seconds // 60
+            if interval_minutes > 0:
+                for remaining in range(interval_minutes, 0, -1):
+                    plural = "" if remaining == 0 else "s"
+                    sys.stdout.write(
+                        f"\rNext upload in: {remaining} minute{plural}    ")  # Extra spaces to clear the line
+                    sys.stdout.flush()
+                    time.sleep(60)
+            else:
+                sys.stdout.write(f"\nWaiting {wait_seconds} seconds.")
+                time.sleep(wait_seconds)
 
             sys.stdout.write("\r" + " " * 50 + "\r")  # Clear the line
             sys.stdout.flush()
