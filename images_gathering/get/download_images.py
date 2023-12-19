@@ -8,6 +8,8 @@ from threading import Lock
 import time
 import random
 import brotli
+from urllib.parse import quote
+import base64
 
 # Create an argument parser
 parser = argparse.ArgumentParser(description='Download images from Getty Images')
@@ -27,14 +29,14 @@ with open(args.cookie_file, 'r') as f:
 os.makedirs(args.output, exist_ok=True)
 
 # Specify the URL and the headers
-url = 'https://steptodown.com/getty-images-downloader/get.php'
+url = 'https://downloader.la/gt.php'
 headers = {
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
     'Accept-Encoding': 'gzip, deflate, br',
     'Accept-Language': 'en-IL,en;q=0.9,he-IL;q=0.8,he;q=0.7,en-GB;q=0.6,en-US;q=0.5',
     'Content-Type': 'application/x-www-form-urlencoded',
-    'Origin': 'https://steptodown.com',
-    'Referer': 'https://steptodown.com/getty-images-downloader/',
+    'Origin': 'https://downloader.la',
+    'Referer': 'https://downloader.la/gettyimages-downloader.html',
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
     'Cookie': cookie_data
 }
@@ -44,7 +46,7 @@ file_lock = Lock()
 
 def extract_img_url(html_content: str, base_domain: str) -> str:
     # Regex pattern to find image tag with the given style and src attributes
-    pattern = r'images/steptodown.com([^"]+)'
+    pattern = r'temp/([^"]+)'
     
     # Find all matches
     matches = re.findall(pattern, html_content)
@@ -60,7 +62,8 @@ def extract_img_url(html_content: str, base_domain: str) -> str:
 
 def download_image(idx, url_and_alt):
     original_url, alt_text = url_and_alt.split(" Alt: ", 1)
-    data = {'url': original_url}
+    #, 'token': ""
+    data = {'url': quote(original_url, safe='')}
 
 
     attempts_amount = 4
@@ -68,18 +71,32 @@ def download_image(idx, url_and_alt):
 
     for _ in range(attempts_amount):
         # Send the POST request
-        response = requests.post(url, headers=headers, data=data)
+        response = requests.get(url, headers=headers, params=data) # headers=headers,
 
+        print("URL accessed:", response.url)
         # If the POST request is successful, the status code will be 200
         if response.status_code == 200:
             print(f'Request was successful for URL {idx}.')
-            rawdata = response.content
+            # rawdata = response.content
+            json_response = response.json()
+            # html_content = rawdata.decode('utf-8')
 
-            html_content = rawdata.decode('utf-8')
-            image_file_url = extract_img_url(html_content, "https://steptodown.com/getty-images-downloader/images/steptodown.com")
+            #print(f'json_response {json_response}.')
+            page_with_image_url = json_response["result"]
+
+            # Extract the token from the URL fragment
+            token = page_with_image_url.split('#').pop()
+
+            # Decode the Base64-encoded string
+            decoded_url = base64.b64decode(token).decode('utf-8')
+
+            #print("Decoded URL:", decoded_url)
+
+            image_file_url = decoded_url#extract_img_url(html_content, "https://downloader.la/")
 
             # Get the filename from the image_file_url
             file_name = os.path.join(args.output, os.path.basename(urllib.parse.urlparse(image_file_url).path))
+
 
             # Download and save the image
             for _ in range(attempts_amount):
