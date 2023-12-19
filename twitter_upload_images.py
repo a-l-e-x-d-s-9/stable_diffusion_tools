@@ -72,13 +72,13 @@ def select_entry(entries):
     weights = [len(list(list_image_files(entry['source_folder']))) / total_images for entry in entries]
 
     # Debug: Print weights for each entry
-    for entry, weight in zip(entries, weights):
-        print(f"Entry: {entry['source_folder']}, Weight: {weight}")
+    # for entry, weight in zip(entries, weights):
+    #     print(f"Entry: {entry['source_folder']}, Weight: {weight}")
 
     selected_entry = random.choices(entries, weights=weights, k=1)[0]
 
     # Debug: Print selected entry
-    print(f"Selected Entry: {selected_entry['source_folder']}")
+    # print(f"Selected Entry: {selected_entry['source_folder']}")
 
     return selected_entry
 
