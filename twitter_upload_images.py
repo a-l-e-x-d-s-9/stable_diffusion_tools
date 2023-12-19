@@ -11,27 +11,47 @@ import argparse
 
 def resize_image(image_path, output_path, scale_factor):
     with Image.open(image_path) as img:
+        # Check if image has alpha channel (transparency)
+        if img.mode == 'RGBA':
+            # Convert to RGB
+            img = img.convert('RGB')
+
         new_size = tuple(int(dim * scale_factor) for dim in img.size)
         img = img.resize(new_size, Image.LANCZOS)
         img.save(output_path, quality=95)
 
+
 def prepare_image(image_path):
     max_size = 700 * 1024  # 700 KB
-    current_size = os.path.getsize(image_path)
     scale_factor = 0.9
 
-    if current_size <= max_size:
-        return image_path
+    # Open the image to check its format and size
+    with Image.open(image_path) as img:
+        if img.format not in ['JPEG', 'JPG']:
+            # Convert non-JPG images to JPG
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+            temp_file.close()
 
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
-    temp_file.close()
+            # Convert to RGB if necessary (for images with alpha channel)
+            if img.mode == 'RGBA':
+                img = img.convert('RGB')
 
-    while current_size > max_size:
-        resize_image(image_path, temp_file.name, scale_factor)
-        current_size = os.path.getsize(temp_file.name)
-        scale_factor *= 0.9
+            img.save(temp_file.name, format='JPEG', quality=95)
+            image_path = temp_file.name
 
-    return temp_file.name
+        current_size = os.path.getsize(image_path)
+
+        # If the image is already small enough, return the converted path or original path
+        if current_size <= max_size:
+            return image_path
+
+        # Resize if still too large
+        while current_size > max_size:
+            resize_image(image_path, temp_file.name, scale_factor)
+            current_size = os.path.getsize(temp_file.name)
+            scale_factor *= 0.9
+
+        return temp_file.name
 
 def load_json_file(filename):
     try:
