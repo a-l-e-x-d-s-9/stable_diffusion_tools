@@ -64,23 +64,29 @@ def read_message_from_file(file_path):
         return None
 
 def select_entry(entries):
-    total_images = sum(len(os.listdir(entry['source_folder'])) for entry in entries)
+    # Count total images including those in sub-folders
+    total_images = sum(len(list(list_image_files(entry['source_folder']))) for entry in entries)
     if total_images == 0:
         return None
 
-    weights = [len(os.listdir(entry['source_folder'])) / total_images for entry in entries]
+    weights = [len(list(list_image_files(entry['source_folder']))) / total_images for entry in entries]
 
     # Debug: Print weights for each entry
-    # for entry, weight in zip(entries, weights):
-    #     print(f"Entry: {entry['source_folder']}, Weight: {weight}")
+    for entry, weight in zip(entries, weights):
+        print(f"Entry: {entry['source_folder']}, Weight: {weight}")
 
     selected_entry = random.choices(entries, weights=weights, k=1)[0]
 
     # Debug: Print selected entry
-    # print(f"Selected Entry: {selected_entry['source_folder']}")
+    print(f"Selected Entry: {selected_entry['source_folder']}")
 
     return selected_entry
 
+def list_image_files(directory):
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                yield os.path.join(root, file)
 
 def main(settings_file):
     settings = load_json_file(settings_file)
@@ -112,7 +118,7 @@ def main(settings_file):
         if not os.path.isdir(image_folder):
             sys.exit(f"Error: '{image_folder}' is not a directory.")
 
-        image_files = sorted(os.listdir(image_folder))
+        image_files = sorted(list(list_image_files(image_folder)))
         if entry['random_order']:
             random.shuffle(image_files)
 
@@ -121,24 +127,28 @@ def main(settings_file):
 
         is_found_image = False
 
-        for image_file in image_files:
-            if not image_file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
-                continue
-
-            image_path = os.path.join(image_folder, image_file)
+        for image_path in image_files:
             specific_text_file = os.path.splitext(image_path)[0] + '.txt'
             specific_message = read_message_from_file(specific_text_file) or ""
             message = common_message + specific_message
             is_found_image = True
 
             if post_tweet_with_image(api, client, image_path, message):
-                published_image_path = os.path.join(published_folder, image_file)
+                # Handle sub-folder structure
+                sub_folder_structure = os.path.relpath(os.path.dirname(image_path), image_folder)
+                published_sub_folder = os.path.join(published_folder, sub_folder_structure)
+
+                if not os.path.exists(published_sub_folder):
+                    os.makedirs(published_sub_folder)
+
+                published_image_path = os.path.join(published_sub_folder, os.path.basename(image_path))
                 os.rename(image_path, published_image_path)
+
                 if os.path.exists(specific_text_file):
-                    published_text_file = os.path.join(published_folder, os.path.basename(specific_text_file))
+                    published_text_file = os.path.join(published_sub_folder, os.path.basename(specific_text_file))
                     os.rename(specific_text_file, published_text_file)
 
-            break
+            break  # Remove this if you want to process all images in one go
 
         if is_found_image:
             wait_seconds = settings['interval']
