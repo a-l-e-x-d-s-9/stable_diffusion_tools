@@ -39,6 +39,11 @@ def prepare_image(image_path):
             img.save(temp_file.name, format='JPEG', quality=95)
             image_path = temp_file.name
 
+        # Check if temp_file was created; if not, create a new temp file for resizing
+        if not temp_file:
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+            temp_file.close()
+
         current_size = os.path.getsize(image_path)
 
         # If the image is already small enough, return the converted path or original path
