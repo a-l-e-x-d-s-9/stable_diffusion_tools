@@ -25,6 +25,9 @@ def prepare_image(image_path):
     max_size = 700 * 1024  # 700 KB
     scale_factor = 0.9
 
+    # Initialize temp_file to None
+    temp_file = None
+
     # Open the image to check its format and size
     with Image.open(image_path) as img:
         if img.format not in ['JPEG', 'JPG']:
