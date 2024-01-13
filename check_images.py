@@ -1,35 +1,47 @@
 import os
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError, ImageFile
 from tqdm import tqdm
 
 def check_image(source_path):
+    ImageFile.LOAD_TRUNCATED_IMAGES = False  # Handle truncated images
+
+    # Define a set of acceptable image formats
+    acceptable_formats = {'JPEG', 'PNG', 'BMP', 'GIF', 'TIFF'}
+
     try:
-        with Image.open(source_path):
-            # If this succeeds, the image is accessible and can be opened
-            pass  # We don't do anything as we only want to catch errors
+        with Image.open(source_path) as img:
+            img.load()  # Explicitly load the image data
+            if img.format not in acceptable_formats:
+                print(f"Unacceptable image format ({img.format}) for file: {source_path}")
+                return False
+            # If this succeeds, the image is accessible, in the correct format, and can be opened
+            return True
 
     except UnidentifiedImageError:
-        # If the file is not an image, skip it
-        pass
+        print(f"File is not an image or unrecognized format: {source_path}")
+        return False
 
     except Exception as e:
-        # If any other error occurs, print the file path and the error message
         print(f"Error processing file {source_path}: {e}")
         try:
             os.remove(source_path)
             print(f"File {source_path} successfully deleted.")
         except Exception as delete_error:
             print(f"Failed to delete {source_path}: {delete_error}")
+        return False
 
 def get_all_images(source_folder):
     all_images = []
+    # Define a set of acceptable image file extensions
+    image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif'}
 
     for root, dirs, files in os.walk(source_folder):
         for file in files:
-            source_path = os.path.join(root, file)
-            all_images.append(source_path)
+            if os.path.splitext(file)[1].lower() in image_extensions:
+                source_path = os.path.join(root, file)
+                all_images.append(source_path)
 
     return all_images
 
