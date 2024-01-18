@@ -22,6 +22,7 @@ def compress_image(args):
             print(f'\rImages converted and copied: {num_converted}', end='')
 
     except:
+        print(f'Failed {source_path}')
         pass
 
 def get_all_images(source_folder, target_folder, quality):
@@ -45,6 +46,7 @@ def get_all_images(source_folder, target_folder, quality):
                     with Image.open(source_path):
                         all_images.append((source_path, target_path, quality))
                 except UnidentifiedImageError:
+                    print(f'Failed {source_path}')
                     # Not an image, skip this file
                     pass
 
