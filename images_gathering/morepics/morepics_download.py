@@ -52,6 +52,8 @@ def main():
         for entry in data.values():
             modelName = ", ".join(tag.lower() for tag in entry["modelName"])
             tags = ", ".join(tag.lower() for tag in entry["tags"])
+            channelName = "watermark " + ", watermark ".join(f'"{tag.lower()}"' for tag in entry["channelName"])
+
 
             additional_tags = args.additional_tags
             # remove leading and trailing spaces, convert to lowercase, replace "_" with space, and split into a list
@@ -62,7 +64,7 @@ def main():
                 tag_string_cleaned = ", ".join(tag_list)
                 tag_string_cleaned = ", " + tag_string_cleaned
 
-            txt_content = f"{modelName}, {tags}{tag_string_cleaned}"
+            txt_content = f"{modelName}, {tags}{tag_string_cleaned}{channelName}"
 
             for image_url in entry["imageLinks"]:
                 if image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):

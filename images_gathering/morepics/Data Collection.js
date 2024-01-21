@@ -72,6 +72,7 @@
     GM_registerMenuCommand('Remove current page data', removeCurrentPageData);
 
     let imageLinks = [];
+    let channelName = [];
     let modelName = [];
     let tags = [];
 
@@ -79,6 +80,19 @@
     let thumbwookElems = document.querySelectorAll("li.thumbwook a.rel-link");
     thumbwookElems.forEach(function (elem) {
         imageLinks.push(elem.href);
+    });
+
+    // Check for Channels title and Extract model name from div with class 'gallery-info__content'
+    let channelTitleElems = document.querySelectorAll(".gallery-info__item span.gallery-info__title");
+    channelTitleElems.forEach(function(channelTitleElem) {
+        console.log(channelTitleElem.innerText.trim())
+        if (channelTitleElem.innerText.trim().startsWith("Channel:")) {
+            let channelLinks = channelTitleElem.parentElement.querySelectorAll("a");
+            channelLinks.forEach(function (channelLink) {
+                // Assuming you want to push the text content of each <a> tag
+                channelName.push(channelLink.innerText);
+            });
+        }
     });
 
     // Check for Model title and Extract model name from div with class 'gallery-info__content'
@@ -103,6 +117,7 @@
 
     var data = {
         "url": currentUrl,
+        "channelName": channelName,
         "modelName": modelName,
         "tags": tags,
         "imageLinks": imageLinks
