@@ -70,11 +70,58 @@ def load_json_file(filename):
     except json.JSONDecodeError:
         sys.exit("Error: Invalid JSON file format.")
 
-def post_tweet_with_image(api, client, image_path, message):
+def make_message_for_tweet(common_message, specific_message, tags_probability):
+    # tags_probability is 0 to 1.0
+    # tags_probability controlling the words that would be used from common_message
+    # Rules:
+    # 1. First word in common_message always used
+    # 2. Words can be separated by spaces or new line, the character before word need to be included when added to combined_message
+    # 3. The probability 0 means that only first word from common_message included
+    # 4. The probability 1 means that all words from common_message included
+    # 5. The probability (0,1.0) means the independent probability of each word to be included.
+    # 6. combined_message starting with words from common_message, then specific_message always included
+    # Example:
+    # common_message="#door gate /here/path/ sit pipe", specific_message=" always here", tags_probability=0.5
+    # selected_words_from_common_message: By the rules, "#door" must be added as first word.
+    # selected_words_from_common_message: 0.5 probability for " gate" - not selected
+    # selected_words_from_common_message: 0.5 probability for " /here/path/" - selected
+    # selected_words_from_common_message: 0.5 probability for " sit" - selected
+    # selected_words_from_common_message: 0.5 probability for " pipe" - not selected
+    # Therefore: selected_words_from_common_message="#door /here/path/ sit"
+
+    # Split common_message into words while keeping separators
+    words = []
+    current_word = ""
+    for char in common_message:
+        if char in " \n":
+            if current_word:
+                words.append(current_word)  # Add the word before the separator
+                current_word = ""
+
+        current_word += char
+
+    if current_word:  # Add any remaining word
+        words.append(current_word)
+
+    # Always include the first word or separator in the combined message
+    combined_message = words[0]
+
+    # Include other words based on tags_probability
+    for word in words[1:]:
+        if random.random() < tags_probability:
+            combined_message += word
+
+    # Always include specific_message
+    combined_message += specific_message
+
+    return combined_message
+
+def post_tweet_with_image(api, client, image_path, common_message, specific_message, tags_probability):
     is_published = False
     try:
         prepared_image_path = prepare_image(image_path)
         media = api.media_upload(prepared_image_path)
+        message = make_message_for_tweet(common_message, specific_message, tags_probability)
         client.create_tweet(text=message, media_ids=[media.media_id_string])
         print(f"Uploaded: {image_path}")
         is_published = True
@@ -158,10 +205,11 @@ def main(settings_file):
         for image_path in image_files:
             specific_text_file = os.path.splitext(image_path)[0] + '.txt'
             specific_message = read_message_from_file(specific_text_file) or ""
-            message = common_message + specific_message
+            #message = common_message + specific_message
+            tags_probability = entry['tags_probability']
             is_found_image = True
 
-            if post_tweet_with_image(api, client, image_path, message):
+            if post_tweet_with_image(api, client, image_path, common_message, specific_message, tags_probability):
                 # Handle sub-folder structure
                 sub_folder_structure = os.path.relpath(os.path.dirname(image_path), image_folder)
                 published_sub_folder = os.path.join(published_folder, sub_folder_structure)
@@ -221,7 +269,8 @@ if __name__ == "__main__":
 #       "source_folder": "path/to/images1",
 #       "published_folder": "path/to/published_images1",
 #       "text_file": "path/to/common_message1.txt",
-#       "random_order": true
+#       "random_order": true,
+#       "tags_probability": 0.5
 #     },
 #     // More entries...
 #   ]
