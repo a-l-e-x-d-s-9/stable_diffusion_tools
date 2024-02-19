@@ -126,7 +126,14 @@ import re
 
 # TODO: 1. remove new lines. 2. Remove everything within <> - loras. 3. handle numbers left as part of tags.
 
-def simplify_prompt(prompt):
+def simplify_prompt(prompt, exclude_patterns):
+    # First, apply exclude_patterns to remove unwanted text
+    for pattern in exclude_patterns:
+        prompt = re.sub(pattern, '', prompt)
+
+    prompt = re.sub(r'\(:0\)', '', prompt)
+    prompt = re.sub(r'\( :0\)', ' ', prompt)
+
     prompt = re.sub(r'\\\(', 'bracket_open', prompt)
     prompt = re.sub(r'\\\)', 'bracket_close', prompt)
 
@@ -157,7 +164,7 @@ def simplify_prompt(prompt):
     # No action needed since regular expressions won't match escaped characters by default
 
     # Cleanup: Remove occurrences of ", ,"
-    prompt = re.sub(r', ,', ', ', prompt)
+    prompt = re.sub(r',[ ]+,', ', ', prompt)
 
     # Case 9: Free | -> removed
     prompt = prompt.replace('|', '')
@@ -195,6 +202,8 @@ def simplify_prompt(prompt):
     # Case 13: Double spaces removed
     prompt = re.sub(r' +', ' ', prompt)
 
+    prompt = re.sub(r',[ ]+,', ',', prompt)
+
     return prompt.strip()
 
 
@@ -202,22 +211,22 @@ def simplify_prompt(prompt):
 # prompt = "(photorealistic:1.21), [A|B], test: 1.21, \(escaped\), extra ( spaces ) here, BREAK, unbalanced)bracket"
 # print(simplify_prompt(prompt))
 
-def get_simplified_prompt(image_path):
+def get_simplified_prompt(image_path, exclude_patterns):
     try:
         metadata = read_image_metadata(image_path)
         value = metadata.get('parameters') or metadata.get('UserComment')
         if not value:
             return ""
         generation_settings = parse_parameters(value)
-        return simplify_prompt(generation_settings.get('prompt', ''))
+        return simplify_prompt(generation_settings.get('prompt', ''), exclude_patterns)
     except Exception as e:
         print(f"Error processing {image_path}: {e}")
         return ""
 
 
-def process_image(image_path, progress_bar):
+def process_image(image_path, progress_bar, exclude_patterns):
     try:
-        prompt = get_simplified_prompt(image_path)
+        prompt = get_simplified_prompt(image_path, exclude_patterns)
         if prompt:
             txt_path = os.path.splitext(image_path)[0] + '.txt'
             with open(txt_path, 'w') as txt_file:
@@ -229,7 +238,7 @@ def process_image(image_path, progress_bar):
             progress_bar.update(1)
 
 
-def main(directory):
+def main(directory, exclude_patterns):
     image_files = []
 
     # Using os.walk to get all image files from subfolders
@@ -241,7 +250,7 @@ def main(directory):
     with tqdm(total=len(image_files), desc="Processing images") as progress_bar:
         threads = []
         for image_path in image_files:
-            thread = threading.Thread(target=process_image, name="process_image", args=(image_path, progress_bar))
+            thread = threading.Thread(target=process_image, name="process_image", args=(image_path, progress_bar, exclude_patterns))
             threads.append(thread)
             thread.start()
 
@@ -257,16 +266,17 @@ def main(directory):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python3 png_info_to_caption.py <directory_path>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Process some images.")
+    parser.add_argument("directory", type=str, help="Directory containing images to process")
+    parser.add_argument("--exclude_patterns", type=str, nargs='*', default=[], help="Regex patterns to exclude files")
 
-    directory = sys.argv[1]
-    if not os.path.isdir(directory):
-        print(f"Error: {directory} is not a valid directory.")
+    args = parser.parse_args()
+
+    if not os.path.isdir(args.directory):
+        print(f"Error: {args.directory} is not a valid directory.")
         sys.exit(1)
 
     progress_bar_lock = threading.Lock()
-    main(directory)
+    main(args.directory, args.exclude_patterns)
 
 # python3 png_info_to_captions.py dataset/
