@@ -211,22 +211,27 @@ def simplify_prompt(prompt, exclude_patterns):
 # prompt = "(photorealistic:1.21), [A|B], test: 1.21, \(escaped\), extra ( spaces ) here, BREAK, unbalanced)bracket"
 # print(simplify_prompt(prompt))
 
-def get_simplified_prompt(image_path, exclude_patterns):
+def get_simplified_prompt(image_path, exclude_patterns, use_original_prompt):
     try:
         metadata = read_image_metadata(image_path)
         value = metadata.get('parameters') or metadata.get('UserComment')
         if not value:
             return ""
         generation_settings = parse_parameters(value)
-        return simplify_prompt(generation_settings.get('prompt', ''), exclude_patterns)
+        extracted_prompt = generation_settings.get('prompt', '')
+        prompt_to_use = extracted_prompt
+        if not use_original_prompt:
+            prompt_to_use = simplify_prompt(extracted_prompt, exclude_patterns)
+
+        return prompt_to_use
     except Exception as e:
         print(f"Error processing {image_path}: {e}")
         return ""
 
 
-def process_image(image_path, progress_bar, exclude_patterns):
+def process_image(image_path, progress_bar, exclude_patterns, use_original_prompt):
     try:
-        prompt = get_simplified_prompt(image_path, exclude_patterns)
+        prompt = get_simplified_prompt(image_path, exclude_patterns, use_original_prompt)
         if prompt:
             txt_path = os.path.splitext(image_path)[0] + '.txt'
             with open(txt_path, 'w') as txt_file:
@@ -238,7 +243,7 @@ def process_image(image_path, progress_bar, exclude_patterns):
             progress_bar.update(1)
 
 
-def main(directory, exclude_patterns):
+def main(directory, exclude_patterns, use_original_prompt):
     image_files = []
 
     # Using os.walk to get all image files from subfolders
@@ -250,7 +255,7 @@ def main(directory, exclude_patterns):
     with tqdm(total=len(image_files), desc="Processing images") as progress_bar:
         threads = []
         for image_path in image_files:
-            thread = threading.Thread(target=process_image, name="process_image", args=(image_path, progress_bar, exclude_patterns))
+            thread = threading.Thread(target=process_image, name="process_image", args=(image_path, progress_bar, exclude_patterns, use_original_prompt))
             threads.append(thread)
             thread.start()
 
@@ -268,6 +273,7 @@ def main(directory, exclude_patterns):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process some images.")
     parser.add_argument("directory", type=str, help="Directory containing images to process")
+    parser.add_argument('--use_original_prompt', action='store_true', help='Store whole prompt as is.')
     parser.add_argument("--exclude_patterns", type=str, nargs='*', default=[], help="Regex patterns to exclude files")
 
     args = parser.parse_args()
@@ -277,6 +283,6 @@ if __name__ == "__main__":
         sys.exit(1)
 
     progress_bar_lock = threading.Lock()
-    main(args.directory, args.exclude_patterns)
+    main(args.directory, args.exclude_patterns, args.use_original_prompt)
 
 # python3 png_info_to_captions.py dataset/
