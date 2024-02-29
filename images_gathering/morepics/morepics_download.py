@@ -52,7 +52,7 @@ def main():
         for entry in data.values():
             modelName = ", ".join(tag.lower() for tag in entry["modelName"])
             tags = ", ".join(tag.lower() for tag in entry["tags"])
-            channelName = "watermark " + ", watermark ".join(f'"{tag.lower()}"' for tag in entry["channelName"])
+            channelName = ", watermark " + ", watermark ".join(f'"{tag.lower()}"' for tag in entry["channelName"])
 
 
             additional_tags = args.additional_tags
@@ -65,10 +65,17 @@ def main():
                 tag_string_cleaned = ", " + tag_string_cleaned
 
             txt_content = f"{modelName}, {tags}{tag_string_cleaned}{channelName}"
+            txt_content = txt_content.replace(", , ",", ")
+            txt_content = txt_content.replace(", , ",", ")
+            txt_content = txt_content.replace(",, ",", ")
+            txt_content = txt_content.replace(",, ",", ")
+            txt_content = txt_content.replace("  "," ")
+            txt_content = txt_content.replace("  "," ")
 
             for image_url in entry["imageLinks"]:
                 if image_url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
                     executor.submit(download_image, image_url, args.folder, txt_content, counter)
+
                 #else:
                     #print(f"Skipping non-image URL: {image_url}")
 

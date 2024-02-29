@@ -1,13 +1,11 @@
 import json
+import os.path
 import subprocess
+import argparse
 from collections import Counter
-
-base_folder = "/path_to_base_folder/"
-
 
 def get_clipboard_content():
     return subprocess.check_output(['xclip', '-selection', 'clipboard', '-o']).decode('utf-8')
-
 
 
 def process_json(json_data):
@@ -28,28 +26,40 @@ def process_json(json_data):
 
     return json_data, popular_name_with_underscores
 
-def save_json(json_data, popular_name):
-    path = f"{base_folder}/datset_preparations/{popular_name}.json"
+def save_json(base_folder, json_data, popular_name):
+    path = os.path.join(base_folder, f"{popular_name}.json")
     with open(path, 'w') as f:
         json.dump(json_data, f, indent=4)
     return path
 
-def run_bash_commands(popular_name):
-    folder_path = f"{base_folder}/datset_preparations/{popular_name}/"
-    json_path = f"{base_folder}/datset_preparations/{popular_name}.json"
-    
+def run_bash_commands(base_folder, popular_name):
+    folder_path = os.path.join(base_folder, f"{popular_name}")
+    json_path = os.path.join(base_folder, f"{popular_name}.json")
+
+    os.makedirs(folder_path, exist_ok=True)
+    # Removed: "text, English text, signature, watermark, site address"
     commands = [
-        f'mkdir "{folder_path}"',
-        f'python3 morepics/morepics_download.py --folder "{folder_path}" --additional-tags "text, English text, signature, watermark, site address" --data "{json_path}"'
+        f'python3  images_gathering/morepics/morepics_download.py --folder "{folder_path}" --additional-tags "" --data "{json_path}"'
     ]
     
     for cmd in commands:
         subprocess.run(cmd, shell=True)
 
-# Get JSON content from clipboard
-clipboard_content = get_clipboard_content()
-json_content = json.loads(clipboard_content)
+def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Process JSON data.")
+    parser.add_argument('--base_folder', type=str, required=True, help="Base folder path.")
+    args = parser.parse_args()
 
-processed_json, popular_name = process_json(json_content)
-save_json(processed_json, popular_name)
-run_bash_commands(popular_name)
+    base_folder = args.base_folder
+
+    # Get JSON content from clipboard
+    clipboard_content = get_clipboard_content()
+    json_content = json.loads(clipboard_content)
+
+    processed_json, popular_name = process_json(json_content)
+    save_json(base_folder, processed_json, popular_name)
+    run_bash_commands(base_folder, popular_name)
+
+if __name__ == "__main__":
+    main()
