@@ -20,8 +20,8 @@ def process_image(image_file, min_resolution, source_path, small_images_folder):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--min_resolution", type=int, default=576, help="Minimum resolution")
-    parser.add_argument("source_path", help="Source path containing images")
-    parser.add_argument("small_images_folder", help="Target folder for small images")
+    parser.add_argument("--source_path", help="Source path containing images")
+    parser.add_argument("--small_images_folder", help="Target folder for small images")
 
     args = parser.parse_args()
 
