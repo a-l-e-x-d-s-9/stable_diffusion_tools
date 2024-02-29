@@ -9,6 +9,7 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
+// @run-at       document-idle
 // ==/UserScript==
 
 (function() {
@@ -129,18 +130,32 @@
             function openLink(index) {
                 if (index >= hrefs.length) return; // No more links
 
+                let wait_milliseconds = 250;
+                let timeout_counter_maximum = 15000 / wait_milliseconds;
                 const win = window.open(hrefs[index], '_blank');
                 if (win) {
-                    win.focus();
+                    //win.focus();
+                    let timeout_counter = 0;
                     const checkLoad = setInterval(() => {
+                        let is_done = false;
                         if (win.document.readyState === 'complete') {
-                            clearInterval(checkLoad);
-                            if (index + 1 < hrefs.length) {
-                                win.close(); // Close the tab if you're done with it
-                                openLink(index + 1); // Open the next link
+                            console.log("waiting for childMutationObserver")
+                            if (win.document && win.document.body.getAttribute('data-child-ready') === 'true') {
+                                clearInterval(checkLoad);
+                                if (index + 1 < hrefs.length) {
+                                    win.close(); // Close the tab if you're done with it
+                                    openLink(index + 1); // Open the next link
+                                }
+                            }
+                            timeout_counter += 1;
+                            if (is_done === false){
+                                if (timeout_counter_maximum < timeout_counter){
+                                    win.close();
+                                    openLink(index);
+                                }
                             }
                         }
-                    }, 250);
+                    }, wait_milliseconds);
                 } else {
                     console.log('Popup blocked or window could not be opened');
                 }
@@ -156,10 +171,25 @@
     GM_registerMenuCommand('Open all links', open_all_links);
     GM_registerMenuCommand('Find most popular model name', findMostPopularModelNameShow);
 
+    const observer = new MutationObserver((mutations) => {
+        // React to mutations here
+        console.log("MutationObserver");
+//        if (window.opener) {
+//            // Send a message to the parent window
+//            // Replace "http://example.com" with the actual origin of the parent window
+//            window.opener.postMessage('MutationObserver', 'http://pornpics.com');
+//        }
+
+        //window.childMutationObserver = true;
+        document.body.setAttribute('data-child-ready', 'true');
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
     window.onload = () => {
+    //function run_on_load(){
         const urlParams = new URLSearchParams(window.location.search);
         const extra = urlParams.get('extra');
-
+        console.log("window.onload")
         if (extra === 'copy') {
             copyToClipboard();
             makePageBlink();
@@ -167,9 +197,39 @@
         }
 
         if (extra === 'autoclose') {
-            window.close();
+//            window.close();
         }
+
+
     };
+
+    document.addEventListener('DOMContentLoaded', (event) => {
+        console.log('DOM fully loaded and parsed');
+        // Your code here
+    });
+
+    function waitForElement(selector, callback) {
+        const element = document.querySelector(selector);
+
+        if (element) {
+            callback(element);
+        } else {
+            setTimeout(() => waitForElement(selector, callback), 500);
+        }
+    }
+
+    waitForElement("body", function() {
+        console.log("Loaded!");
+        const urlParams = new URLSearchParams(window.location.search);
+        const extra = urlParams.get('extra');
+
+//        run_on_load();
+        if (extra === 'auto_download_all') {
+            clearList();
+            open_all_links();
+        }
+    });
+
 
     function findMostPopularModelNameShow() {
         alert(findMostPopularModelName());
