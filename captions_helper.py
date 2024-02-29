@@ -864,7 +864,7 @@ class ImageDropWidget(QWidget):
             #     else:
             #         print(f"{path} already exists in the widget!")
 
-    supported_formats_list = ['jpg', 'jpeg', 'png', 'bmp', 'tiff']
+    supported_formats_list = ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'webp']
     def is_supported_image_format(self, file_name):
 
         return any(file_name.lower().endswith(ext) for ext in self.supported_formats_list)
