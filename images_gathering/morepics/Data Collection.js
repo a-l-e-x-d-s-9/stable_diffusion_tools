@@ -67,6 +67,21 @@
         updateCounter();
     }
 
+    function extract_valid_link()
+    {
+        const links = document.querySelectorAll('li.thumbwook a.rel-link');
+        //let hrefs = Array.from(links).slice(0, desired_pages).map(a => a.href); // Get up to 55 links
+        let hrefs = Array.from(links)
+            .filter(a => a.href.includes("www.pornpics.com/galleries/")) // Filter links containing "www.coolpics.com"
+            .map(a => a.href); // Extract hrefs
+
+//        for (let i = 0; i < hrefs.length - 1; i++) {
+//            console.log("HREF [" + i + "]: " + hrefs[i])
+//        }
+
+        return hrefs;
+    }
+
     function open_all_links(){
         let desired_pages = 55;
 
@@ -75,7 +90,10 @@
             let lastCount = 0;
             let intervalId = setInterval(() => {
                 window.scrollTo(0, document.body.scrollHeight); // Scroll to the bottom of the page
-                let currentCount = document.querySelectorAll('li.thumbwook a.rel-link').length;
+                //let currentCount = document.querySelectorAll('li.thumbwook a.rel-link').length;
+                let currentCount = extract_valid_link().length;
+
+
 
                 if (currentCount >= finalCount || lastCount === currentCount) {
                     clearInterval(intervalId); // Stop scrolling
@@ -88,8 +106,10 @@
 
         scrollToLoadMore(desired_pages, () => {
             // After scrolling and loading, proceed to open links
-            const links = document.querySelectorAll('li.thumbwook a.rel-link');
-            let hrefs = Array.from(links).slice(0, desired_pages).map(a => a.href); // Get up to 55 links
+            let hrefs = extract_valid_link().slice(0, desired_pages); // Get up to desired_pages links
+
+            console.log('scrollToLoadMore: ' + hrefs.length);
+            console.log('scrollToLoadMore: ' + hrefs.length);
 
             if (hrefs.length > 0) {
 
