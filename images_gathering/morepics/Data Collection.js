@@ -68,7 +68,7 @@
     }
 
     function open_all_links(){
-        let desired_pages = 5;
+        let desired_pages = 55;
 
         // Function to scroll and load more elements
         function scrollToLoadMore(finalCount, callback) {
@@ -92,6 +92,14 @@
             let hrefs = Array.from(links).slice(0, desired_pages).map(a => a.href); // Get up to 55 links
 
             if (hrefs.length > 0) {
+
+//                // Modify all hrefs except the last to add "?extra=autoclose"
+//                for (let i = 0; i < hrefs.length - 1; i++) {
+//                    let url = new URL(hrefs[i]);
+//                    url.searchParams.append("extra", "autoclose"); // Add the query parameter for auto-closing
+//                    hrefs[i] = url.toString(); // Update the href with the modified URL
+//                }
+
                 // Modify only the last href to add "?extra=copy"
                 let lastUrl = new URL(hrefs[hrefs.length - 1]);
                 lastUrl.searchParams.append("extra", "copy"); // Add the query parameter
@@ -112,7 +120,7 @@
                                 openLink(index + 1); // Open the next link
                             }
                         }
-                    }, 50);
+                    }, 250);
                 } else {
                     console.log('Popup blocked or window could not be opened');
                 }
@@ -134,8 +142,12 @@
 
         if (extra === 'copy') {
             copyToClipboard();
-            alert("Copied!");
+            makePageBlink();
             //window.close();
+        }
+
+        if (extra === 'autoclose') {
+            window.close();
         }
     };
 
@@ -172,6 +184,22 @@
         return mostPopularName;
     }
 
+    // Inject CSS for blinking animation
+    const style = document.createElement('style');
+    style.type = 'text/css';
+    style.innerHTML = `
+        @keyframes blink {
+            0% { background-color: initial; }
+            50% { background-color: green; }
+            100% { background-color: initial; }
+        }
+
+        .blinking {
+            animation: blink 0.5s infinite;
+        }
+    `;
+
+    document.head.appendChild(style);
 
     let imageLinks = [];
     let channelName = [];
@@ -224,6 +252,15 @@
         "tags": tags,
         "imageLinks": imageLinks
     };
+
+    function makePageBlink() {
+        const body = document.body;
+        body.classList.add('blinking');
+
+        setTimeout(() => {
+            body.classList.remove('blinking');
+        }, 3000);
+    }
 
     console.log(data);
     addDataToList(currentUrl, data);

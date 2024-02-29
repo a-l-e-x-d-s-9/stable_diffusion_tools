@@ -41,9 +41,12 @@ def run_bash_commands(base_folder, popular_name):
     commands = [
         f'python3  images_gathering/morepics/morepics_download.py --folder "{folder_path}" --additional-tags "" --data "{json_path}"'
     ]
-    
+    print(f"Downloading: {popular_name}")
+
     for cmd in commands:
         subprocess.run(cmd, shell=True)
+
+    print(f"Downloaded: {popular_name}")
 
 def main():
     # Parse command-line arguments
