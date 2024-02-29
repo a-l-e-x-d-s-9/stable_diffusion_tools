@@ -8,7 +8,7 @@ def check_image(source_path):
     ImageFile.LOAD_TRUNCATED_IMAGES = False  # Handle truncated images
 
     # Define a set of acceptable image formats
-    acceptable_formats = {'JPEG', 'PNG', 'BMP', 'GIF', 'TIFF'}
+    acceptable_formats = {'JPEG', 'PNG', 'BMP', 'GIF', 'TIFF', 'WEBP'}
 
     try:
         with Image.open(source_path) as img:
@@ -35,7 +35,7 @@ def check_image(source_path):
 def get_all_images(source_folder):
     all_images = []
     # Define a set of acceptable image file extensions
-    image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif'}
+    image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', '.webp'}
 
     for root, dirs, files in os.walk(source_folder):
         for file in files:
