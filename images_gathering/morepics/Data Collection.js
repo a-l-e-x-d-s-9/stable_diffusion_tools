@@ -89,21 +89,28 @@
         // Function to scroll and load more elements
         function scrollToLoadMore(finalCount, callback) {
             let lastCount = 0;
+            let noChangeCount = 0; // Counter to track how many times the content count hasn't changed
+            const maxNoChange = 3; // Number of intervals to wait with no change before assuming all content has loaded
+
             let intervalId = setInterval(() => {
                 window.scrollTo(0, document.body.scrollHeight); // Scroll to the bottom of the page
-                //let currentCount = document.querySelectorAll('li.thumbwook a.rel-link').length;
                 let currentCount = extract_valid_link().length;
 
-
-
-                if (currentCount >= finalCount || lastCount === currentCount) {
+                // Check if we've reached the final count or if there's been no change for maxNoChange intervals
+                if (currentCount >= finalCount || noChangeCount >= maxNoChange) {
                     clearInterval(intervalId); // Stop scrolling
                     callback(); // Proceed after scrolling
+                } else if (lastCount === currentCount) {
+                    // If the count hasn't changed, increment noChangeCount
+                    noChangeCount++;
                 } else {
-                    lastCount = currentCount; // Update last count for the next iteration
+                    // If new content was loaded, reset noChangeCount and update lastCount
+                    noChangeCount = 0;
+                    lastCount = currentCount;
                 }
-            }, 1000); // Adjust time as needed for your site's loading behavior
+            }, 1500); // Adjust time as needed for your site's loading behavior
         }
+
 
         scrollToLoadMore(desired_pages, () => {
             // After scrolling and loading, proceed to open links
@@ -145,6 +152,15 @@
                                 if (index + 1 < hrefs.length) {
                                     win.close(); // Close the tab if you're done with it
                                     openLink(index + 1); // Open the next link
+                                }else{
+                                    window.close();
+                                }
+
+                            }
+                            if (1 == (index % 44)){
+                                window.focus();
+                                if (Notification.permission === "granted") {
+                                    new Notification("Time to check back on your process!");
                                 }
                             }
                             timeout_counter += 1;
@@ -171,17 +187,28 @@
     GM_registerMenuCommand('Open all links', open_all_links);
     GM_registerMenuCommand('Find most popular model name', findMostPopularModelNameShow);
 
+    let is_ready = false;
+
     const observer = new MutationObserver((mutations) => {
         // React to mutations here
-        console.log("MutationObserver");
 //        if (window.opener) {
 //            // Send a message to the parent window
 //            // Replace "http://example.com" with the actual origin of the parent window
 //            window.opener.postMessage('MutationObserver', 'http://pornpics.com');
 //        }
 
-        //window.childMutationObserver = true;
-        document.body.setAttribute('data-child-ready', 'true');
+        const urlParams = new URLSearchParams(window.location.search);
+        const extra = urlParams.get('extra');
+        console.log("MutationObserver")
+
+
+        if (is_ready == false){
+            is_ready = true;
+
+            //window.childMutationObserver = true;
+            document.body.setAttribute('data-child-ready', 'true');
+        }
+
     });
     observer.observe(document.body, { childList: true, subtree: true });
 
@@ -190,16 +217,24 @@
         const urlParams = new URLSearchParams(window.location.search);
         const extra = urlParams.get('extra');
         console.log("window.onload")
+
+        if (extra === 'autoclose') {
+            window.close();
+        }
+
         if (extra === 'copy') {
             copyToClipboard();
             makePageBlink();
+            fetch("http://localhost:5001/trigger?message=reached_last_for_actress")
+              .then(response => response.text()) // or response.json() if the server responds with JSON
+              .then(data =>
+              {
+                console.log(data);
+                window.close();
+              })
+              .catch(error => console.error('Error:', error));
             //window.close();
         }
-
-        if (extra === 'autoclose') {
-//            window.close();
-        }
-
 
     };
 
