@@ -122,9 +122,9 @@ upload_monitor = UploadMonitor()
 def get_args():
     parser = argparse.ArgumentParser(description="Upload files to Hugging Face")
     parser.add_argument("--configurations", required=True,
-                        help="Configuration file with list of files and base directory")
-    parser.add_argument("--repository", required=True, help="Repository on huggingface.com")
-    parser.add_argument("--token", required=True, help="File containing your Hugging Face token")
+                        help="Configuration file with list of files and their target paths in the repository")
+    parser.add_argument("--repository", required=False, help="Repository on huggingface.com")
+    parser.add_argument("--token_file", required=False, help="File containing your Hugging Face token")
     parser.add_argument("--remove", action="store_true", help="Remove files after upload")
     parser.add_argument("--threads", type=int, default=3, help='Number of threads for parallel processing.')
     return parser.parse_args()
@@ -140,12 +140,12 @@ def compute_sha256(filepath, chunk_size=8192):
             hash_sha256.update(chunk)
     return hash_sha256.hexdigest()
 
-def upload_file(filepath, base_directory, repo_id, token, api, progress_bar_lock, max_attempts=3, remove=False):
+def upload_file(filepath, path_in_repository, repo_id, token, api, progress_bar_lock, max_attempts=3, remove=False):
     filename = os.path.basename(filepath)
     file_size = os.path.getsize(filepath)
 
-    # Compute the path in the repository by removing the base directory
-    path_in_repo = os.path.relpath(filepath, base_directory)
+    # Use the explicit path in the repository provided
+    path_in_repo = os.path.join(path_in_repository, filename)
 
     # Add file size to upload monitor
     upload_monitor.add_file(file_size)
@@ -189,30 +189,30 @@ def upload_file(filepath, base_directory, repo_id, token, api, progress_bar_lock
     upload_monitor.finish_file(file_size)  # Update uploaded size in upload monitor
 
 
-def upload_files(args, base_directory, valid_files):
+def upload_files(args, path_in_repository, valid_files_paths):
 
     try:
-        with open(args.token, "r") as token_file:
+        with open(args.token_file, "r") as token_file:
             token = token_file.read().strip()
     except Exception as e:
-        logger.exception(f"Token file {token}: {e}")
+        logger.exception(f"Token file {args.token_file}: {e}")
         return
 
     api = HfApi()
     repo_id = args.repository
     progress_bar_lock = Lock()
 
-
-    upload_func = lambda filepath: upload_file(filepath, base_directory, repo_id, token, api, progress_bar_lock, remove=args.remove)
+    upload_func = lambda filepath: upload_file(filepath, path_in_repository, repo_id, token, api, progress_bar_lock, remove=args.remove)
 
     # Use thread_map function to parallelize the uploads
-    thread_map(upload_func, valid_files, max_workers=args.threads)
+    thread_map(upload_func, valid_files_paths, max_workers=args.threads)
 
     # Signal that uploads are done
     progress_updates.put(None)
 
     logger.info("DONE")
     logger.info("Go to your repo and accept the PRs this created to see your files")
+
 
 
 def manage_progress_bar(progress_bar):
@@ -230,7 +230,6 @@ def main():
         logger.error("Number of threads must be greater than zero.")
         return
 
-
     speed_monitor = SpeedMonitor()
     speed_monitor.start()
     upload_monitor.start()
@@ -242,19 +241,27 @@ def main():
         logger.exception(f"Configurations file {config_file}: {e}")
         return
 
-    base_directory = config.get('base_directory')
+    path_in_repository = config.get('path_in_repository')
     file_list = config.get('files', [])
+    if 'repository' in config and not args.repository:
+        args.repository = config['repository']
+    if 'token_file' in config and not args.token_file:
+        args.token_file = config['token_file']
 
-    if not base_directory or not file_list:
-        logger.error("Invalid configurations file.")
+    if not args.repository:
+        logger.error("Repository not specified in either command line or JSON settings.")
+        return
+
+    if not args.token_file:
+        logger.error("Token not specified in either command line or JSON settings.")
         return
 
     total_size = 0
-    valid_files = []
+    valid_files_paths = []
     for filepath in file_list:
         if os.path.isfile(filepath):
             total_size += os.path.getsize(filepath)
-            valid_files.append(filepath)
+            valid_files_paths.append(filepath)
         else:
             logger.warning(f"File {filepath} does not exist.")
 
@@ -263,7 +270,7 @@ def main():
     thread_manage_progress_bar = threading.Thread(target=manage_progress_bar, args=(progress_bar,), daemon=True)
     thread_manage_progress_bar.start()
 
-    upload_files(args, base_directory, valid_files)
+    upload_files(args, path_in_repository, valid_files_paths)
 
     # Wait for manage_progress_bar thread to finish
     thread_manage_progress_bar.join()
@@ -276,6 +283,6 @@ if __name__ == "__main__":
     main()
 
 # Example Usage:
-# python3 huggingface_upload.py --configurations "huggingface_upload_settings.json" --repository "your_username/your_repository" --token "token_file.txt"
+# python3 huggingface_upload.py --configurations "huggingface_upload_settings.json" --repository "your_username/your_repository" --token_file "token_file.txt"
 # Use --remove to remove files after upload, for example:
-# python3 huggingface_upload.py --configurations "huggingface_upload_settings.json" --repository "your_username/your_repository" --token "token_file.txt" --remove
+# python3 huggingface_upload.py --configurations "huggingface_upload_settings.json" --repository "your_username/your_repository" --token_file "token_file.txt" --remove
