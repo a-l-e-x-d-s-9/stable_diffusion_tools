@@ -1,5 +1,7 @@
 {
-    "base_directory": "/path/to/base/directory",
+    "repository": "user/Repository",
+    "path_in_repository": "path/in/repository",
+    "token_file": "path/to/token_file",
     "files": [
         "/path/to/base/directory/subdirectory1/file1.txt",
         "/path/to/base/directory/subdirectory2/file2.txt"
