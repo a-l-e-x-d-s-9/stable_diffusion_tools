@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import QListWidget, QListWidgetItem
 from PIL import Image, UnidentifiedImageError
 import piexif
 import json
+import re
 
 class ItemDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
@@ -499,6 +500,13 @@ class ImageDropWidget(QWidget):
         self.search_and_replace_replace_input.setPlaceholderText("Enter replacement text")
         self.search_and_replace_layout.addWidget(self.search_and_replace_replace_input)
 
+        self.search_and_replace_all_text = QCheckBox("All text", self)
+        self.search_and_replace_layout.addWidget(self.search_and_replace_all_text)
+        #self.search_and_replace_all_text.stateChanged.connect(self.search_and_replace_all_text_checkbox_changed)
+
+        self.search_and_replace_use_re = QCheckBox("RE", self)
+        self.search_and_replace_layout.addWidget(self.search_and_replace_use_re)
+
         # Search and Replace button
         self.search_and_replace_button = QPushButton("Search and Replace", self)
         self.search_and_replace_layout.addWidget(self.search_and_replace_button)
@@ -626,6 +634,11 @@ class ImageDropWidget(QWidget):
         if self.add_labels_checkbox.isChecked():
             #print("add_labels_checkbox_changed")
             self.sync_labels_on_change()
+
+    # def search_and_replace_all_text_checkbox_changed(self):
+    #     if self.search_and_replace_all_text.isChecked():
+    #         # print("search_and_replace_all_text_checkbox_changed")
+    #         None
 
     def sync_labels_checkbox_changed(self):
         if self.sync_labels_checkbox.isChecked():
@@ -977,46 +990,65 @@ class ImageDropWidget(QWidget):
     def search_and_replace(self):
         search_text = self.search_and_replace_search_input.text()
         replace_text = self.search_and_replace_replace_input.text()
+
         search_tags = search_text.split(',')
         replace_tags = replace_text.split(',')
+        is_search_all_text = self.search_and_replace_all_text.isChecked()
+        is_re = self.search_and_replace_use_re.isChecked()
 
         # Add your search and replace logic here
         print(f"search_and_replace, search: \"{search_text}\", replace: \"{replace_text}\".")
         for label in self.images:
             path = label.path
-            self.search_and_replace_in_path(search_tags, replace_tags, path)
+            self.search_and_replace_in_path(is_search_all_text, is_re, search_text, search_tags, replace_text, replace_tags, path)
 
-    def search_and_replace_in_path(self, search_tags, replace_tags, path):
+    def search_and_replace_in_path(self, is_search_all_text, is_re, search_text, search_tags, replace_text,
+                                   replace_tags, path):
         txt_path = os.path.splitext(path)[0] + '.txt'
 
         if not os.path.exists(txt_path):
             return  # Skip if no corresponding text file
 
-        # Get current tags
-        tag_list = self.caption_to_tag_list(self.image_captions[path])
+        with open(txt_path, 'r') as txt_file:
+            content = txt_file.read()
 
-        # Track if any search tag is found and removed
-        search_tag_removed = False
-
-        # Create a new list excluding the search tags
-        new_tag_list = []
-        for tag in tag_list:
-            if tag.strip() not in search_tags:
-                new_tag_list.append(tag)
+        if is_search_all_text:
+            if is_re:
+                # Use regular expressions to search and replace in the whole text
+                updated_content = re.sub(search_text, replace_text, content)
             else:
-                search_tag_removed = True
+                # Simple string replace in the whole text
+                updated_content = content.replace(search_text, replace_text)
+        else:
+            # Get current tags
+            tag_list = self.caption_to_tag_list(self.image_captions[path])
+            search_tag_removed = False
+            new_tag_list = []
 
-        # If a search tag was removed, add replace tags avoiding duplicates
-        if search_tag_removed:
-            for tag in replace_tags:
-                if tag not in new_tag_list:
-                    new_tag_list.append(tag)
+            for tag in tag_list:
+                if is_re:
+                    # If the tag matches the search pattern, replace it
+                    if re.search(search_text, tag):
+                        search_tag_removed = True
+                        if replace_text not in new_tag_list:  # Prevent duplicates
+                            new_tag_list.append(re.sub(search_text, replace_text, tag))
+                    else:
+                        new_tag_list.append(tag)
+                else:
+                    if tag.strip() in search_tags:
+                        search_tag_removed = True
+                        if replace_text not in new_tag_list:  # This might need adjusting based on how you handle multiple replace_tags
+                            new_tag_list.extend(replace_tags)
+                    else:
+                        new_tag_list.append(tag)
 
-        final_captions = self.tag_list_to_string(new_tag_list)
-        self.image_captions[path] = final_captions
+            updated_content = self.tag_list_to_string(new_tag_list) if search_tag_removed else content
 
-        with open(txt_path, 'w') as txt_file:
-            txt_file.write(final_captions)
+        # Update the captions dictionary if there was a change
+        if content != updated_content:
+            self.image_captions[path] = updated_content
+            with open(txt_path, 'w') as txt_file:
+                txt_file.write(updated_content)
 
     def remove_captions_from_path(self, tags_to_remove, path):
         txt_path = os.path.splitext(path)[0] + '.txt'
