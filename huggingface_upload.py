@@ -256,7 +256,7 @@ def main():
                 expanded_file_list.append(file_pattern)
 
     # Ensure file paths are unique before proceeding
-    valid_files_paths = list(set(expanded_file_list))
+    expanded_file_list = list(set(expanded_file_list))
 
 
     if 'repository' in config and not args.repository:
@@ -274,7 +274,7 @@ def main():
 
     total_size = 0
     valid_files_paths = []
-    for filepath in valid_files_paths:
+    for filepath in expanded_file_list:
         if os.path.isfile(filepath):
             total_size += os.path.getsize(filepath)
             valid_files_paths.append(filepath)
