@@ -247,12 +247,13 @@ def main():
     expanded_file_list = []
     for file_pattern in file_list:
         if "*" in file_pattern:
-            # Assuming the path is relative to the current working directory
-            # or an absolute path is provided in the pattern.
-            for filepath in glob.glob(file_pattern):
-                expanded_file_list.append(filepath)
-        else:
-            expanded_file_list.append(file_pattern)
+            # Check if the pattern includes a wildcard character
+            if "*" in file_pattern:
+                # Expand the pattern to match files
+                matched_files = glob.glob(file_pattern)
+                expanded_file_list.extend(matched_files)
+            else:
+                expanded_file_list.append(file_pattern)
 
     # Ensure file paths are unique before proceeding
     valid_files_paths = list(set(expanded_file_list))
