@@ -13,6 +13,7 @@ import queue
 import psutil
 from collections import deque
 from threading import Lock
+import glob
 
 progress_updates = queue.Queue()
 
@@ -243,6 +244,20 @@ def main():
 
     path_in_repository = config.get('path_in_repository')
     file_list = config.get('files', [])
+    expanded_file_list = []
+    for file_pattern in file_list:
+        if file_pattern.startswith("*"):
+            # Assuming the path is relative to the current working directory
+            # or an absolute path is provided in the pattern.
+            for filepath in glob.glob(file_pattern):
+                expanded_file_list.append(filepath)
+        else:
+            expanded_file_list.append(file_pattern)
+
+    # Ensure file paths are unique before proceeding
+    valid_files_paths = list(set(expanded_file_list))
+
+
     if 'repository' in config and not args.repository:
         args.repository = config['repository']
     if 'token_file' in config and not args.token_file:
@@ -258,7 +273,7 @@ def main():
 
     total_size = 0
     valid_files_paths = []
-    for filepath in file_list:
+    for filepath in valid_files_paths:
         if os.path.isfile(filepath):
             total_size += os.path.getsize(filepath)
             valid_files_paths.append(filepath)
