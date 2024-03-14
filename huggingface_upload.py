@@ -246,7 +246,7 @@ def main():
     file_list = config.get('files', [])
     expanded_file_list = []
     for file_pattern in file_list:
-        if file_pattern.startswith("*"):
+        if "*" in file_pattern:
             # Assuming the path is relative to the current working directory
             # or an absolute path is provided in the pattern.
             for filepath in glob.glob(file_pattern):
