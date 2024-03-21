@@ -66,7 +66,7 @@ def download_image(idx, url_and_alt):
     data = {'url': quote(original_url, safe='')}
 
 
-    attempts_amount = 4
+    attempts_amount = 8
     success = False  # flag to indicate whether the image download was successful
 
     for _ in range(attempts_amount):
@@ -102,31 +102,34 @@ def download_image(idx, url_and_alt):
             for _ in range(attempts_amount):
                 image_response = requests.get(image_file_url, stream=True)
                 if image_response.status_code == 200:
-                    with open(file_name, 'wb') as file:
-                        for chunk in image_response.iter_content(chunk_size=128):
-                            file.write(chunk)
-                    if os.path.getsize(file_name) > 0:  # if file is not zero size
-                        print(f'Image downloaded and saved as {file_name}')
+                    payload_size = len(image_response.content)
 
-                        # Split the file name and its extension
-                        file_name_without_ext, _ = os.path.splitext(file_name)
+                    if 0 < int(payload_size):
+                        with open(file_name, 'wb') as file:
+                            for chunk in image_response.iter_content(chunk_size=8192):
+                                file.write(chunk)
+                        if os.path.getsize(file_name) > 0:  # if file is not zero size
+                            print(f'Image downloaded and saved as {file_name}')
 
-                        # Change the extension to .txt
-                        new_file_name = file_name_without_ext + ".txt"
+                            # Split the file name and its extension
+                            file_name_without_ext, _ = os.path.splitext(file_name)
 
-                        # Open the new file in write mode and write the alt text
-                        with open(new_file_name, 'w') as file:
-                            file.write(alt_text)
+                            # Change the extension to .txt
+                            new_file_name = file_name_without_ext + ".txt"
 
-                        success = True  # set the flag to indicate that the image download was successful
-                        break
-                    else:  # if file is zero size
-                        os.remove(file_name)  # remove the zero-sized file
+                            # Open the new file in write mode and write the alt text
+                            with open(new_file_name, 'w') as file:
+                                file.write(alt_text)
+
+                            success = True  # set the flag to indicate that the image download was successful
+                            break
+                        else:  # if file is zero size
+                            os.remove(file_name)  # remove the zero-sized file
                 else:
                     print('Image download failed with status code', image_response.status_code)
 
                 # Wait before the next attempt
-                time.sleep(random.uniform(1, 4))  # wait for 1 to 4 seconds before next attempt
+                time.sleep(random.uniform(3, 6))  # wait for 1 to 4 seconds before next attempt
 
             # if the image is successfully downloaded, break the outer loop as well
             if success:
@@ -151,6 +154,6 @@ def download_image(idx, url_and_alt):
 with open(args.input, 'r') as f:
     urls_and_alts = f.read().splitlines()
 
-with ThreadPoolExecutor(max_workers=50) as executor:
+with ThreadPoolExecutor(max_workers=25) as executor:
     for idx, url_and_alt in enumerate(urls_and_alts, start=1):
         executor.submit(download_image, idx, url_and_alt)
