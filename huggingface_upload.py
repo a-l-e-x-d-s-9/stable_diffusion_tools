@@ -145,11 +145,17 @@ def upload_file(filepath, path_in_repository, repo_id, token, api, progress_bar_
     filename = os.path.basename(filepath)
     file_size = os.path.getsize(filepath)
 
-    # Use the explicit path in the repository provided
     path_in_repo = os.path.join(path_in_repository, filename)
 
-    # Add file size to upload monitor
-    upload_monitor.add_file(file_size)
+    # Retrieve a list of files in the repository
+    repo_files = api.list_repo_files(repo_id=repo_id, token=token)
+    full_path_in_repo = f"{path_in_repository}/{filename}".strip('/')
+
+    # Check if the file already exists in the repository
+    if full_path_in_repo in repo_files:
+        logger.info(f"File {filepath} already exists in the repository. Skipping upload.")
+        return
+
 
     for attempt in range(1, max_attempts + 1):
         try:
