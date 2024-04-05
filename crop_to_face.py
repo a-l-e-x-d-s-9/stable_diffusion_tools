@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 from tqdm import tqdm  # You need to install tqdm. If not installed, run: pip install tqdm
 import concurrent.futures
-
+import common
 
 def expand_bounding_box(x, y, w, h, img_width, img_height, margin_ratio):
     """
@@ -158,7 +158,7 @@ def process_images(source_folder, target_folder=None, min_size=512):
     # Prepare list of image paths, ignoring hidden files and directories
     image_paths = [p for p in source_folder_path.glob('**/*')
                    if ('/.' not in p.as_posix()
-                       and p.suffix.lower() in ['.jpg', '.jpeg', '.png'])]
+                       and p.suffix.lower() in common.image_extensions)]
 
     total_images = len(image_paths)
 

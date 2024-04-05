@@ -15,22 +15,24 @@ import base64
 parser = argparse.ArgumentParser(description='Download images from Getty Images')
 parser.add_argument('--output', required=True, help='Output directory for downloaded images')
 parser.add_argument('--input', required=True, help='Input file with URLs')
-parser.add_argument('--cookie_file', required=True, help='File containing Cookie data for the requests')
+parser.add_argument('--cookie_file', required=False, help='File containing Cookie data for the requests')
 
 # Parse the arguments
 args = parser.parse_args()
 
-# Read cookie data from file
-with open(args.cookie_file, 'r') as f:
-    cookie_data = f.read().strip()
+cookie_data = ""
+if args.cookie_file:
+    # Read cookie data from file
+    with open(args.cookie_file, 'r') as f:
+        cookie_data = f.read().strip()
 
 
 # Create output directory if it doesn't exist
 os.makedirs(args.output, exist_ok=True)
 
 # Specify the URL and the headers
-url = 'https://downloader.la/gt.php'
-headers = {
+url_dla = 'https://downloader.la/gt.php'
+headers_dla = {
     'Accept': 'application/json, text/javascript, */*; q=0.01',
     'Accept-Encoding': 'gzip, deflate, br',
     'Accept-Language': 'en-IL,en;q=0.9,he-IL;q=0.8,he;q=0.7,en-GB;q=0.6,en-US;q=0.5',
@@ -41,12 +43,24 @@ headers = {
     'Cookie': cookie_data
 }
 
+url_sdw = 'https://steptodown.com/getty-images-downloader/get.php'
+headers_sdw = {
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Accept-Language': 'en-IL,en;q=0.9,he-IL;q=0.8,he;q=0.7,en-GB;q=0.6,en-US;q=0.5',
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'Origin': 'https://steptodown.com',
+    'Referer': 'https://steptodown.com/getty-images-downloader/',
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
+    'Cookie': cookie_data
+}
+
 # Create a lock for file operations
 file_lock = Lock()
 
-def extract_img_url(html_content: str, base_domain: str) -> str:
+def extract_img_url(html_content: str, base_domain: str, pattern) -> str:
     # Regex pattern to find image tag with the given style and src attributes
-    pattern = r'temp/([^"]+)'
+    #pattern = r'temp/([^"]+)'
     
     # Find all matches
     matches = re.findall(pattern, html_content)
@@ -71,28 +85,33 @@ def download_image(idx, url_and_alt):
 
     for _ in range(attempts_amount):
         # Send the POST request
-        response = requests.get(url, headers=headers, params=data) # headers=headers,
+        #response = requests.get(headers_dla, headers=headers_sdw, params=data) # headers=headers,
+        response = requests.post(url_sdw, headers=headers_sdw, data=data)  # headers=headers,
 
         print("URL accessed:", response.url)
         # If the POST request is successful, the status code will be 200
         if response.status_code == 200:
             print(f'Request was successful for URL {idx}.')
-            # rawdata = response.content
-            json_response = response.json()
-            # html_content = rawdata.decode('utf-8')
+            rawdata = str(response.content)
 
-            #print(f'json_response {json_response}.')
-            page_with_image_url = json_response["result"]
+            if False:
+                json_response = response.json()
+                # html_content = rawdata.decode('utf-8')
 
-            # Extract the token from the URL fragment
-            token = page_with_image_url.split('#').pop()
+                #print(f'json_response {json_response}.')
+                page_with_image_url = json_response["result"]
 
-            # Decode the Base64-encoded string
-            decoded_url = base64.b64decode(token).decode('utf-8')
+                # Extract the token from the URL fragment
+                token = page_with_image_url.split('#').pop()
 
-            #print("Decoded URL:", decoded_url)
+                # Decode the Base64-encoded string
+                decoded_url = base64.b64decode(token).decode('utf-8')
 
-            image_file_url = decoded_url#extract_img_url(html_content, "https://downloader.la/")
+                #print("Decoded URL:", decoded_url)
+
+                image_file_url = decoded_url#extract_img_url(html_content, "https://downloader.la/")
+
+            image_file_url = extract_img_url(rawdata, "https://steptodown.com/getty-images-downloader/images/steptodown", r"src=\"images/steptodown([^\"]+)")
 
             # Get the filename from the image_file_url
             file_name = os.path.join(args.output, os.path.basename(urllib.parse.urlparse(image_file_url).path))
