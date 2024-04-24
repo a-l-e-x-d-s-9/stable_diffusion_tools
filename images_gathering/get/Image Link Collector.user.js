@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Image Link Collector
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @description  Collect image URLs by clicking on them
 // @author       You
 // @match        https://www.gettyimages.com/*
@@ -15,7 +15,7 @@
     'use strict';
 
     var clickedImages = GM_getValue("clickedImages", []);
-    var autoAddImages = GM_getValue("autoAddImages", false); // Initialize auto-add feature as disabled
+    var autoAddImages = GM_getValue("autoAddImages", false);
 
     // Create a fixed counter element
     var counter = document.createElement('div');
@@ -40,8 +40,8 @@
         updateCounter();
     }
 
-    function addImageToList(imageUrl, imageAlt) {
-        var imageObject = { url: imageUrl, alt: imageAlt };
+    function addImageToList(imageSrc, imageUrl, imageAlt) {
+        var imageObject = { src: imageSrc, url: imageUrl, alt: imageAlt };
         if (!clickedImages.some(item => item.url === imageUrl)) {
             clickedImages.push(imageObject);
             GM_setValue("clickedImages", clickedImages);
@@ -53,16 +53,15 @@
         var linkElement = article.getElementsByTagName('a')[0];
         var imageUrl = linkElement.href;
         var imageTag = linkElement.querySelector('img');
-
+        var imageSrc = imageTag ? imageTag.src : '';
 
         // Check if button already exists
         if (article.querySelector('.add-to-list-button')) {
             return;
         }
 
-
         if (autoAddImages) {
-            addImageToList(imageUrl, imageTag.alt); // Automatically add image to the list if auto-add feature is enabled
+            addImageToList(imageSrc, imageUrl, imageTag.alt); // Automatically add image with source if auto-add feature is enabled
         }
 
 
@@ -83,10 +82,8 @@
         linkElement.parentNode.insertBefore(button, linkElement.nextSibling);
         button.addEventListener('click', function(e) {
             e.preventDefault();
-            var imageObject = { url: imageUrl, alt: imageTag.alt };
             if (!clickedImages.some(item => item.url === imageUrl)) {
-                clickedImages.push(imageObject);
-                GM_setValue("clickedImages", clickedImages);
+                addImageToList(imageSrc, imageUrl, imageTag.alt);
                 button.innerHTML = 'Added';
                 button.style.backgroundColor = 'lightgreen';
                 updateCounter();
@@ -134,17 +131,17 @@
 
     async function copyToClipboard() {
         var textToCopy = clickedImages.map(item => {
-            if (typeof item === 'object' && item.url && item.alt) {
-                return item.url + ' Alt: ' + item.alt;
+            if (typeof item === 'object' && item.src && item.url && item.alt) {
+                return item.src + ' ' + item.url + ' Alt: ' + item.alt;
             } else {
-                return item; // In case there are still some plain URLs in the array
+                return item;
             }
         }).join('\n');
 
         try {
             await navigator.clipboard.writeText(textToCopy);
         } catch (err) {
-            console.error('Failed to copy image URLs: ', err);
+            console.error('Failed to copy image URLs to clipboard:', err);
         }
     }
 
