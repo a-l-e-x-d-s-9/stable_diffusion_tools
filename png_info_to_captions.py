@@ -211,7 +211,7 @@ def simplify_prompt(prompt, exclude_patterns):
 # prompt = "(photorealistic:1.21), [A|B], test: 1.21, \(escaped\), extra ( spaces ) here, BREAK, unbalanced)bracket"
 # print(simplify_prompt(prompt))
 
-def get_simplified_prompt(image_path, exclude_patterns, use_original_prompt):
+def get_simplified_prompt(image_path, exclude_patterns, use_original_prompt, include_all_metadata):
     try:
         metadata = read_image_metadata(image_path)
         value = metadata.get('parameters') or metadata.get('UserComment')
@@ -220,8 +220,11 @@ def get_simplified_prompt(image_path, exclude_patterns, use_original_prompt):
         generation_settings = parse_parameters(value)
         extracted_prompt = generation_settings.get('prompt', '')
         prompt_to_use = extracted_prompt
-        if not use_original_prompt:
-            prompt_to_use = simplify_prompt(extracted_prompt, exclude_patterns)
+        if include_all_metadata:
+            prompt_to_use = value
+        else:
+            if not use_original_prompt:
+                prompt_to_use = simplify_prompt(extracted_prompt, exclude_patterns)
 
         return prompt_to_use
     except Exception as e:
@@ -229,10 +232,16 @@ def get_simplified_prompt(image_path, exclude_patterns, use_original_prompt):
         return ""
 
 
-def process_image(image_path, progress_bar, exclude_patterns, use_original_prompt):
+def flat_prompt(text):
+    # Replace newlines with ', '
+    return text.replace('\n', ', ')
+
+def process_image(image_path, progress_bar, exclude_patterns, use_original_prompt, include_all_metadata, is_flat_prompt):
     try:
-        prompt = get_simplified_prompt(image_path, exclude_patterns, use_original_prompt)
+        prompt = get_simplified_prompt(image_path, exclude_patterns, use_original_prompt, include_all_metadata)
         if prompt:
+            if is_flat_prompt:
+                prompt = flat_prompt(prompt)
             txt_path = os.path.splitext(image_path)[0] + '.txt'
             with open(txt_path, 'w') as txt_file:
                 txt_file.write(prompt)
@@ -243,7 +252,7 @@ def process_image(image_path, progress_bar, exclude_patterns, use_original_promp
             progress_bar.update(1)
 
 
-def main(directory, exclude_patterns, use_original_prompt):
+def main(directory, exclude_patterns, use_original_prompt, include_all_metadata, flat_prompt):
     image_files = []
 
     # Using os.walk to get all image files from subfolders
@@ -255,7 +264,7 @@ def main(directory, exclude_patterns, use_original_prompt):
     with tqdm(total=len(image_files), desc="Processing images") as progress_bar:
         threads = []
         for image_path in image_files:
-            thread = threading.Thread(target=process_image, name="process_image", args=(image_path, progress_bar, exclude_patterns, use_original_prompt))
+            thread = threading.Thread(target=process_image, name="process_image", args=(image_path, progress_bar, exclude_patterns, use_original_prompt, include_all_metadata, flat_prompt))
             threads.append(thread)
             thread.start()
 
@@ -273,7 +282,9 @@ def main(directory, exclude_patterns, use_original_prompt):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process some images.")
     parser.add_argument("directory", type=str, help="Directory containing images to process")
-    parser.add_argument('--use_original_prompt', action='store_true', help='Store whole prompt as is.')
+    parser.add_argument('--use_original_prompt', action='store_true', default=False, help='use_original_prompt')
+    parser.add_argument('--include_all_metadata', action='store_true', default=False, help='include_all_metadata')
+    parser.add_argument('--flat_prompt', action='store_true', default=False, help='flat_prompt')
     parser.add_argument("--exclude_patterns", type=str, nargs='*', default=[], help="Regex patterns to exclude files")
 
     args = parser.parse_args()
@@ -283,6 +294,6 @@ if __name__ == "__main__":
         sys.exit(1)
 
     progress_bar_lock = threading.Lock()
-    main(args.directory, args.exclude_patterns, args.use_original_prompt)
+    main(args.directory, args.exclude_patterns, args.use_original_prompt, args.include_all_metadata, args.flat_prompt)
 
 # python3 png_info_to_captions.py dataset/
