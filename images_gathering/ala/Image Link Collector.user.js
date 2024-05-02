@@ -66,12 +66,14 @@
         var imageSrc = imgElement ? imgElement.src : '';
 
 
+
+
         // Check if button already exists
         if (divElement.querySelector('.add-to-list-button')) {
             return;
         }
 
-        var altText = imgElement?.alt ?? "";
+        var altText = linkElement?.title ?? "";
 
         //console.log("imageUrl add: " + imageUrl);
         console.log("altText: " + altText);
@@ -148,7 +150,7 @@
 
     async function copyToClipboard() {
         var textToCopy = clickedImages.map(item => {
-            if (typeof item === 'object' && item.src && item.url && item.alt) {
+            if (typeof item === 'object') {
                 return item.src + ' ' + item.url + ' Alt: ' + item.alt;
             } else {
                 return item;
@@ -190,19 +192,19 @@
     // Listen for right arrow key press to click on "Next" button
     document.addEventListener('keydown', function(e) {
         if (e.key === 'ArrowRight') {
-            var nextButton = document.querySelector('[data-testid="pagination-button-next"]');
+            var nextButton = document.querySelector('[data-testid="next"]');
             if (nextButton) {
                 nextButton.click();
             }
         }
     });
 
-    // Listen for right arrow key press to click on "PREVIOUS" button
+    // Listen for left arrow key press to click on "Previous" button
     document.addEventListener('keydown', function(e) {
         if (e.key === 'ArrowLeft') {
-            var nextButton = document.querySelector('[data-testid="pagination-button-prev"]');
-            if (nextButton) {
-                nextButton.click();
+            var prevButton = document.querySelector('[data-testid="previous"]');
+            if (prevButton) {
+                prevButton.click();
             }
         }
     });
