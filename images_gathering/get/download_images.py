@@ -140,7 +140,12 @@ def download_preview_image(image_url, file_path):
 
     return success
 
-def download_image(idx, data_for_entry, download_small, download_large_skip):
+def download_image(idx, data_for_entry, download_small, download_large_skip, output_dir, download_site):
+
+    global url_sdw
+    global headers_sdw
+    global extract_url_start
+
     image_path, original_url, alt_text = extract_components(data_for_entry)
     #, 'token': ""
 
@@ -150,7 +155,7 @@ def download_image(idx, data_for_entry, download_small, download_large_skip):
         # Extract the filename from the image URL
         filename = generate_unique_filename(image_path)
         if filename:
-            output_dir = args.output
+            #output_dir = args.output
             preview_image_path = os.path.join(output_dir, filename)
 
             # Download the image and save it with the correct filename
@@ -199,10 +204,10 @@ def download_image(idx, data_for_entry, download_small, download_large_skip):
 
                     image_file_url = decoded_url#extract_img_url(html_content, "https://downloader.la/")
 
-                image_file_url = extract_img_url(rawdata, "https://steptodown.com/getty-images-downloader/images/steptodown", r"src=\"images/steptodown([^\"]+)")
+                image_file_url = extract_img_url(rawdata, extract_url_start, r"src=\"images/steptodown([^\"]+)")
 
                 # Get the filename from the image_file_url
-                file_name = os.path.join(args.output, os.path.basename(urllib.parse.urlparse(image_file_url).path))
+                file_name = os.path.join(output_dir, os.path.basename(urllib.parse.urlparse(image_file_url).path))
 
                 # Download and save the image
                 MAX_FILE_SIZE = 4 * 1024 * 1024  # 4MB in bytes
@@ -265,9 +270,26 @@ def download_image(idx, data_for_entry, download_small, download_large_skip):
             with file_lock:
                 with open(args.input + '_failed', 'a') as f:
                     f.write(f'{original_url} Alt: {alt_text}\n')
+def detect_site(input_file):
+    # with open(input_file, 'r') as f:
+    #     urls = f.read()
 
+    # Define regular expressions for each site
+    getty_pattern = r'https?://www\.gettyimages\.[a-z]+/'
+    alamy_pattern = r'https?://www\.alamy\.[a-z]+/'
+    istock_pattern = r'https?://www\.istockphoto\.[a-z]+/'
 
-if __name__ == "__main__":
+    # Check for matches with each pattern
+    if re.search(getty_pattern, input_file):
+        return 'getty'
+    elif re.search(alamy_pattern, input_file):
+        return 'alamy'
+    elif re.search(istock_pattern, input_file):
+        return 'istock'
+    else:
+        return 'unknown'
+
+def main():
     # Create an argument parser
     parser = argparse.ArgumentParser(description='Download images from Getty Images')
     parser.add_argument('--output', required=True, help='Output directory for downloaded images')
@@ -281,8 +303,12 @@ if __name__ == "__main__":
     # Parse the arguments
     args = parser.parse_args()
 
-    read_cookie = False # It needs
-    
+    global url_sdw
+    global headers_sdw
+    global extract_url_start
+
+    read_cookie = False  # It needs
+
     cookie_data = ""
     if args.cookie_file:
         # Read cookie data from file
@@ -294,10 +320,27 @@ if __name__ == "__main__":
 
     # Create output directory if it doesn't exist
     os.makedirs(args.output, exist_ok=True)
-
+    download_site = 'unknown'
     with open(args.input, 'r') as f:
-        urls_and_alts = f.read().splitlines()
+        input_text = f.read()
+        urls_and_alts = input_text.splitlines()
+        download_site = detect_site(input_text)
+
+    print(download_site)
+
+    if 'getty' == download_site:
+        url_sdw = 'https://steptodown.com/getty-images-downloader/get.php'
+        headers_sdw['Referer'] = 'https://steptodown.com/getty-images-downloader/'
+        extract_url_start = "https://steptodown.com/getty-images-downloader/images/steptodown"
+
+    if 'alamy' == download_site:
+        url_sdw = 'https://steptodown.com/alamy-downloader/get.php'
+        headers_sdw['Referer'] = 'https://steptodown.com/alamy-downloader/'
+        extract_url_start = "https://steptodown.com/alamy-downloader/images/steptodown"
 
     with ThreadPoolExecutor(max_workers=25) as executor:
         for idx, data_for_entry in enumerate(urls_and_alts, start=1):
-            executor.submit(download_image, idx, data_for_entry, args.download_small, args.download_large_skip)
+            executor.submit(download_image, idx, data_for_entry, args.download_small, args.download_large_skip, args.output, download_site)
+
+if __name__ == "__main__":
+    main()

@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         Getty Image Link Collector
+// @name         Alamy Image Link Collector
 // @namespace    http://tampermonkey.net/
 // @version      0.3
 // @description  Collect image URLs by clicking on them
 // @author       You
-// @match        https://www.gettyimages.com/*
+// @match        https://www.alamy.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=gettyimages.com/
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -53,19 +53,32 @@
         }
     }
 
-    function addClickListenerToImage(article) {
-        var linkElement = article.getElementsByTagName('a')[0];
-        var imageUrl = linkElement.href;
-        var imageTag = linkElement.querySelector('img');
-        var imageSrc = imageTag ? imageTag.src : '';
+    function addClickListenerToImage(divElement) {
+        //var linkElement = article.getElementsByTagName('div')[0];
+        //var imageUrl = linkElement.href;
+        //var imageTag = linkElement.querySelector('img');
+        //var imageSrc = imageTag ? imageTag.src : '';
+
+        //var divElement = article.querySelector('div[data-testid^="search-tile"]');
+        var imgElement = divElement ? divElement.querySelector('img') : null;
+        var linkElement = divElement ? divElement.querySelector('a') : null;
+        var imageUrl = linkElement ? linkElement.href : '';
+        var imageSrc = imgElement ? imgElement.src : '';
+
 
         // Check if button already exists
-        if (article.querySelector('.add-to-list-button')) {
+        if (divElement.querySelector('.add-to-list-button')) {
             return;
         }
 
+        var altText = imgElement?.alt ?? "";
+
+        //console.log("imageUrl add: " + imageUrl);
+        console.log("altText: " + altText);
+        //console.log("linkElement.alt: " + linkElement.alt);
+
         if (autoAddImages) {
-            addImageToList(imageSrc, imageUrl, imageTag.alt); // Automatically add image with source if auto-add feature is enabled
+            addImageToList(imageSrc, imageUrl, altText); // Automatically add image with source if auto-add feature is enabled
         }
 
 
@@ -87,17 +100,17 @@
         button.addEventListener('click', function(e) {
             e.preventDefault();
             if (!clickedImages.some(item => item.url === imageUrl)) {
-                addImageToList(imageSrc, imageUrl, imageTag.alt);
+                addImageToList(imageSrc, imageUrl, altText);
                 button.innerHTML = 'Added';
                 button.style.backgroundColor = 'lightgreen';
                 updateCounter();
-                addRemoveButton(article, imageUrl);
+                addRemoveButton(divElement, imageUrl);
             }
         });
 
         // If image is already added, create remove button
         if (clickedImages.some(item => item.url === imageUrl)) {
-            addRemoveButton(article, imageUrl);
+            addRemoveButton(divElement, imageUrl);
         }
     }
 
@@ -159,9 +172,12 @@
     GM_registerMenuCommand('Clear Image List', clearList);
 
     function addClickListenersToAllImages() {
-        var articles = document.getElementsByTagName('article');
-        for (var i = 0; i < articles.length; i++) {
-            addClickListenerToImage(articles[i]);
+        // Select all div elements with the specific data-testid attribute
+        var divs = document.querySelectorAll('div[data-testid^="search-tile-"]');
+
+        for (var i = 0; i < divs.length; i++) {
+            //console.log("i: " + i);
+            addClickListenerToImage(divs[i]);
         }
     }
 
