@@ -16,7 +16,7 @@ psutil
 PyQt5
 PyQt5_sip
 Requests
-skimage
+scikit-image
 tiktoken
 tqdm
 tweepy
