@@ -58,16 +58,20 @@ def extract_img_url(html_content: str, base_domain: str, pattern) -> str:
 MAX_FILE_SIZE = 4 * 1024 * 1024  # 4 MB in bytes
 
 # Function to extract components from a given text line
-def extract_components(line):
+def extract_components(line, download_site):
     # Initialize the image_path as None
     image_path = ""
 
+    image_indication_start = "https://media."
+    if "alamy" == download_site:
+        image_indication_start = "https://c"
+
     # Check for "https://media." to find and extract the image path
-    if "https://media." in line:
+    if image_indication_start in line:
         # Split by space and identify the image path (first occurrence of "https://media.")
         words = line.split(" ")
         for word in words:
-            if word.startswith("https://media."):
+            if word.startswith(image_indication_start):
                 image_path = word
                 break
 
@@ -146,7 +150,7 @@ def download_image(idx, data_for_entry, download_small, download_large_skip, out
     global headers_sdw
     global extract_url_start
 
-    image_path, original_url, alt_text = extract_components(data_for_entry)
+    image_path, original_url, alt_text = extract_components(data_for_entry, download_site)
     #, 'token': ""
 
     if download_small and ("" != image_path):
