@@ -3,12 +3,18 @@ import os
 import shutil
 import collections
 import random
+import common
 
-images_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
 
 def split_files(source_folder, target_folder, split_amount, copy_files, exclude_folder, exclude_files, with_captions):
+    #print(
+    #    f"Starting split_files with source_folder={source_folder}, target_folder={target_folder}, split_amount={split_amount}, copy_files={copy_files}, exclude_folder={exclude_folder}, exclude_files={exclude_files}, with_captions={with_captions}")
+
     for root, _, files in os.walk(source_folder):
+        #print(f"Checking directory: {root}")
+
         if exclude_folder and exclude_folder in root:
+            #print(f"Excluding directory: {root}")
             continue
 
         file_groups = collections.defaultdict(list)
@@ -17,7 +23,10 @@ def split_files(source_folder, target_folder, split_amount, copy_files, exclude_
             if base_name not in exclude_files:
                 file_groups[base_name].append(file)
 
+        #print(f"Found file groups: {file_groups.keys()}")
+
         base_names_to_move = random.sample(list(file_groups.keys()), min(split_amount, len(file_groups)))
+        #print(f"Selected base names to move: {base_names_to_move}")
 
         for base_name in base_names_to_move:
             files_to_move = file_groups[base_name]
@@ -27,17 +36,22 @@ def split_files(source_folder, target_folder, split_amount, copy_files, exclude_
                 os.makedirs(dst_dir, exist_ok=True)
                 dst_file = os.path.join(dst_dir, file)
 
+                #print(f"Moving {'copying' if copy_files else 'moving'} file from {src_file} to {dst_file}")
+
                 if copy_files:
                     shutil.copy2(src_file, dst_file)
                 else:
                     shutil.move(src_file, dst_file)
 
                 # If --with_captions is used, move or copy the corresponding TXT file (if it exists)
-                if with_captions and ext.lower() in images_extensions:
+                if with_captions and ext.lower() in common.image_extensions:
                     caption_file = base_name + ".txt"
                     src_caption_file = os.path.join(root, caption_file)
                     dst_caption_file = os.path.join(dst_dir, caption_file)
                     if os.path.exists(src_caption_file):
+                        #print(
+                        #    f"Moving {'copying' if copy_files else 'moving'} caption file from {src_caption_file} to {dst_caption_file}")
+
                         if copy_files:
                             shutil.copy2(src_caption_file, dst_caption_file)
                         else:
@@ -52,7 +66,7 @@ if __name__ == "__main__":
                         help='The number of files to move or copy.')
     parser.add_argument('--copy-files', action='store_true', default=False, help='Copy files instead of moving them.')
     parser.add_argument('--exclude-folder', type=str, help='Folder to exclude from the operation.')
-    parser.add_argument('--exclude-files', type=str, nargs='*', help='Files (without extension) to exclude from the operation.')
+    parser.add_argument('--exclude-files', default=[], required=False, type=str, nargs='*', help='Files (without extension) to exclude from the operation.')
     parser.add_argument('--with_captions', action='store_true', default=False,
                         help='Move or copy corresponding TXT files for each image.')
 
