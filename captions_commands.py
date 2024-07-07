@@ -510,10 +510,24 @@ def check_caption_validity(file_path: str, min_tags: int, dry_run: bool) -> str:
     return None
 
 
+def find_duplicate_image_names(image_files):
+    base_names = {}
+    duplicates = []
+    for image_file in image_files:
+        base_name = os.path.splitext(image_file)[0]
+        if base_name in base_names:
+            base_names[base_name].append(image_file)
+        else:
+            base_names[base_name] = [image_file]
+
+    for base_name, files in base_names.items():
+        if len(files) > 1:
+            duplicates.append((base_name, files))
+
+    return duplicates
 
 
-def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, min_tags: int, threads: int, dry_run: bool) -> List[
-    Tuple[str, str]]:
+def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, min_tags: int, threads: int, dry_run: bool) -> List[Tuple[str, str]]:
     errors = []
     all_sub_folders = get_all_sub_folders(root_folder)
     subject_folders = iter(all_sub_folders)
@@ -542,6 +556,12 @@ def check_image_caption_pairs(root_folder: str, min_size: int, max_size: int, mi
 
             caption_files = get_caption_files(subject_folder)
             image_files = get_image_files_in_current_folder(subject_folder)
+
+            # Check for duplicate image names with different extensions
+            duplicates = find_duplicate_image_names(image_files)
+            if duplicates:
+                for base_name, files in duplicates:
+                    errors.append((base_name, f"Duplicate image names with different extensions: {', '.join(files)}"))
 
             for caption_file in caption_files:
                 # get the file name without the extension
