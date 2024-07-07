@@ -8,18 +8,28 @@ import sys
 TIMEOUT = 30  # in seconds
 
 # Function to fetch the top most popular image data from Civitai API with pagination
-def fetch_top_images(images_limit, period=None):
+def fetch_top_images(images_limit, period=None, modelId=None, modelVersionId=None):
     # The endpoint to get images
     endpoint = "https://civitai.com/api/v1/images"
 
     params = {
-        "limit": 200,  # Maximum allowed limit per request
+        "limit": 2000,  # Maximum allowed limit per request
         "sort": "Most Reactions",  # Fetching images sorted by most reactions
+        "modelId": "",
+        "modelVersionId": "",
+        "nsfw": "X" # (None, Soft, Mature, X)
+
     }
 
     # If a period is specified, add it to the parameters
     if period:
         params['period'] = period
+
+    if modelId:
+        params['modelId'] = modelId
+
+    if modelVersionId:
+        params['modelVersionId'] = modelVersionId
 
     image_data = []
     remaining_images = images_limit
@@ -104,13 +114,13 @@ def download_images(image_data, target_folder):
         executor.map(download_image, image_data)
 
 # Main function to execute the script
-def main(target_folder, images_limit, period=None):
+def main(target_folder, images_limit, period=None, modelId=None, modelVersionId=None):
     # Ensure the target folder exists or create it
     if not os.path.exists(target_folder):
         os.makedirs(target_folder)
 
     # Fetch the top images based on popularity and period
-    image_data = fetch_top_images(images_limit, period)
+    image_data = fetch_top_images(images_limit, period, modelId, modelVersionId)
 
     # Download images with metadata and text files
     download_images(image_data, target_folder)
@@ -122,13 +132,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("--target_path", type=str, required=True, help="The target folder to download images.")
     parser.add_argument('--images_limit', type=int, default=100, help='Limit of images to fetch.')
-    parser.add_argument('--period', type=str, choices=['Week', 'Month'], help='Period to filter images (Week or Month).')
+    parser.add_argument('--period', type=str, choices=['AllTime', 'Year', 'Month', 'Week', 'Day'], help='Period to filter images (Week or Month).')
+    parser.add_argument('--model_id', type=int, default=None, help='model_id')
+    parser.add_argument('--model_version_id', type=int, default=None, help='model_version_id')
 
     # Parse arguments
     args = parser.parse_args()
 
-    try:
-        main(args.target_path, args.images_limit, args.period)  # Run the main function with the target folder as an argument
+    try: # modelId=None, modelVersionId=None
+        main(args.target_path, args.images_limit, args.period, args.model_id, args.model_version_id)  # Run the main function with the target folder as an argument
     except Exception as e:
         sys.exit(str(e))  # Exit with error message
 
