@@ -78,7 +78,7 @@ def extract_components(line, download_site):
         # Remove the image path from the original line
         cleaned_line = " ".join([w for w in words if w != image_path])
     else:
-        cleaned_line = line  # If no image path, use the original line
+        cleaned_line = line.strip()  # If no image path, use the original line
 
     # Split the cleaned line by "Alt:" to get the original URL and alt text
     if "Alt:" in cleaned_line:
