@@ -6,7 +6,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 import glob
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 import traceback
 import mimetypes
 from queue import Queue, Empty
@@ -15,8 +15,9 @@ from pathlib import Path
 from tqdm import tqdm
 from multiprocessing import Value
 
-IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
+IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp']
 VALID_MIME_TYPES = [mimetypes.types_map[ext] for ext in IMAGE_EXTENSIONS if ext in mimetypes.types_map]
+VALID_MIME_TYPES.append('image/webp')
 LOG_FORMAT = "%(asctime)s — %(levelname)s — %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 
@@ -479,8 +480,10 @@ def check_image_validity_and_size(file_path: str, min_size: int, max_size: int) 
         with open(file_path, 'rb') as file:
             img = Image.open(file)
 
-            if Image.MIME.get(img.format) not in VALID_MIME_TYPES:
-                return f"Invalid image format: {Image.MIME.get(img.format)}"
+            img_format = img.format
+            mime_type = Image.MIME.get(img_format)
+            if mime_type not in VALID_MIME_TYPES:
+                return f"Invalid image format: {mime_type}"
 
             width, height = img.size
             if width * height < min_size**2:
