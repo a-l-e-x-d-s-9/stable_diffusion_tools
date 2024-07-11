@@ -242,7 +242,7 @@ def main():
     generate_solid_color_images()
     create_shapes()
     ##rotate_shapes()
-    combine_images(200)  # Set the desired number of combinations
+    combine_images(400)  # Set the desired number of combinations
 
 if __name__ == "__main__":
     main()
