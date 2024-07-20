@@ -3,7 +3,7 @@ import re
 import argparse
 
 
-def delete_safetensors_files(base_path):
+def delete_safetensors_files(base_path, besides_final):
     # Compile regex for matching the folder format
     folder_pattern = re.compile(r'tr_\d{2,3}$')
 
@@ -15,12 +15,19 @@ def delete_safetensors_files(base_path):
                     for file_name in subdir_files:
                         if file_name.endswith('.safetensors'):
                             file_path = os.path.join(subdir_root, file_name)
-                            print(f"Deleting: {file_path}")
-                            os.remove(file_path)
+                            if besides_final:
+                                if '-000' in file_name:
+                                    print(f"Deleting: {file_path}")
+                                    os.remove(file_path)
+                            else:
+                                print(f"Deleting: {file_path}")
+                                os.remove(file_path)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Delete .safetensors files in specific folders.')
     parser.add_argument('path', type=str, help='The base path to scan')
+    parser.add_argument('--besides-final', action='store_true',
+                        help='Delete only files containing "-000" in their names')
     args = parser.parse_args()
-    delete_safetensors_files(args.path)
+    delete_safetensors_files(args.path, args.besides_final)
