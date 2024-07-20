@@ -1,16 +1,15 @@
 // ==UserScript==
 // @name         Extract files to clipboard
 // @namespace    http://tampermonkey.net/
-// @version      2024-03-11
-// @description  try to take over the world!
+// @version      2024-07-20
+// @description  Extract download links from Civitai
 // @author       You
 // @match        https://civitai.com/models/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=civitai.com
 // @grant        GM_registerMenuCommand
 // @grant        GM_setClipboard
-// @grant        GM_getClipboard
-// @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_setValue
 // ==/UserScript==
 
 (function() {
@@ -22,50 +21,67 @@
         return titleElement ? titleElement.innerText.trim() : '';
     }
 
-    // Function to extract download links and return them as an array
-    function getDownloadLinks() {
-
-        const civitai_download_token = GM_getValue("civitai_download_token", null);
-        if (!civitai_download_token){
-            alert("Civitai download token missing, go to menu and click to add it.");
-            createSplash('red', 'Civitai download token missing.');
-            return;
+    // Function to extract model version ID from the page
+    function getModelVersionId() {
+        const versionElements = document.querySelectorAll('.mantine-Group-root.mantine-z88oh code.mantine-Code-root.mantine-iff5o4');
+        if (versionElements.length >= 2) {
+            return versionElements[1].innerText.trim();
         }
+        return '';
+    }
 
-        const links = [];
-        document.querySelectorAll('.mantine-Accordion-item a.mantine-UnstyledButton-root.mantine-Button-root[type="button"][data-button="true"]').forEach(link => {
-            const href = link.getAttribute('href');
-            if (href) {
-                links.push(`https://civitai.com${href.replace('&amp;', '&')}&token=` + civitai_download_token);
+    // Function to fetch download links from API
+    async function fetchDownloadLinks(versionId, token) {
+        const response = await fetch(`https://civitai.com/api/v1/model-versions/${versionId}`, {
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
             }
         });
-        return links;
+
+        if (!response.ok) {
+            throw new Error('Failed to fetch download links');
+        }
+
+        const data = await response.json();
+        return data.files.map(file => file.downloadUrl);
     }
 
     // Main function to format and copy the data
     async function formatAndCopyData() {
         const title = getModelTitle();
-        const downloadLinks = getDownloadLinks();
+        const versionId = getModelVersionId();
         const currentPageUrl = window.location.href;
 
-        // Generating the final string for each download link
-        const finalStrings = downloadLinks.map(link => `wget --content-disposition "${link}" # ${title} # ${currentPageUrl}`).join('\n');
+        if (!versionId) {
+            alert('Model version ID not found on the page.');
+            return;
+        }
+
+        const civitaiDownloadToken = GM_getValue("civitai_download_token", null);
+        if (!civitaiDownloadToken) {
+            alert("Civitai download token missing, go to menu and click to add it.");
+            createSplash('red', 'Civitai download token missing.');
+            return;
+        }
 
         try {
-            let clipboardContent = await navigator.clipboard.readText(); // Wait for the clipboard content
-            if (clipboardContent.length > 0) { // Corrected property name from 'lenght' to 'length'
-                clipboardContent += "\n"; // Add a new line if there's existing content
+            const downloadLinks = await fetchDownloadLinks(versionId, civitaiDownloadToken);
+            const finalStrings = downloadLinks.map(link => `wget --content-disposition "${link}?token=` + civitaiDownloadToken + `" # ${title} # ${currentPageUrl}`).join('\n');
+
+            let clipboardContent = await navigator.clipboard.readText();
+            if (clipboardContent.length > 0) {
+                clipboardContent += "\n";
             }
-            // Copying the result to clipboard
+
             GM_setClipboard(clipboardContent + finalStrings);
             createSplash('green', 'Links have been extracted, converted, and sorted.');
             console.log('Links have been extracted, converted, and sorted.');
         } catch (error) {
-            console.error('Error accessing the clipboard', error);
-            createSplash('red', 'Failed to access clipboard.');
+            console.error('Error fetching download links', error);
+            createSplash('red', 'Failed to fetch download links.');
         }
     }
-
 
     document.addEventListener('keydown', async function(e) {
         if (e.ctrlKey && e.shiftKey && e.code === 'KeyX') {
@@ -93,20 +109,20 @@
         document.body.appendChild(splash);
         setTimeout(function() {
             splash.remove();
-        }, 200);
+        }, 300);
     }
 
     const clearClipboard = () => {
         GM_setClipboard('');
         createSplash('yellow', 'Clipboard cleared.');
-        console('Clipboard cleared.');
+        console.log('Clipboard cleared.');
     };
 
     // Function to prompt user for sensitive information and save it
     function setCivitaiToken() {
-        const civitai_download_token = prompt("Please enter your Civitai download token:", "");
-        if (civitai_download_token != null) {
-            GM_setValue("civitai_download_token", civitai_download_token);
+        const civitaiDownloadToken = prompt("Please enter your Civitai download token:", "");
+        if (civitaiDownloadToken != null) {
+            GM_setValue("civitai_download_token", civitaiDownloadToken);
             alert("Civitai download token saved securely.");
         }
     }
