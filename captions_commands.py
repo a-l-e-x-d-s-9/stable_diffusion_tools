@@ -77,22 +77,30 @@ def tags_str_to_list(all_tags_str: str) -> List[str]:
     tags = all_tags_str.lower().split(',')
     return [tag.strip() for tag in tags if tag.strip()]
 
+
 def detect_and_remove_empty_tags(file_path: str) -> None:
     validate_input(file_path)
     try:
         with open(file_path, 'r') as file:
             tags_str = file.read()
-            tags = tags_str.split(',')
 
-        new_tags = tags_str_to_list(tags_str)
-        # only write back to the file if empty tags were removed
-        if len(tags) != len(new_tags):
-            logging.info(f"Remove empty tags from: {file_path}.")
+            # Replace newline characters with commas
+            new_tags_str = tags_str.replace('\n', ',')
+            newline_replaced = tags_str != new_tags_str
+
+            tags = new_tags_str.split(',')
+
+        new_tags = tags_str_to_list(new_tags_str)
+
+        # Write back to the file if empty tags were removed or newlines were replaced
+        if len(tags) != len(new_tags) or newline_replaced:
+            logging.info(f"Remove empty tags from or replaced newlines in: {file_path}.")
             with open(file_path, 'w') as file:
                 file.write(', '.join(new_tags))
     except (IOError, PermissionError) as e:
         logging.error(f"Unable to read or write to file {file_path}: {str(e)}")
         raise
+
 
 def write_file(file_path: str, tags: List[str], dry_run: bool = False) -> None:
     validate_input(file_path)
