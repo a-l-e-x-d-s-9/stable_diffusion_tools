@@ -14,10 +14,50 @@ def remove_header(value):
         value = value[len("UNICODE"):]
     return value
 
-def get_exif(image_path):
+def get_image_metadata(image_path):
     try:
         with Image.open(image_path) as img:
-            exif_data_raw = img.info.get("exif")
+            if img.format == 'JPEG':
+                exif_data_raw = img.info.get('exif')
+                if exif_data_raw:
+                    exif_dict = piexif.load(exif_data_raw)
+                    exif_data = {}
+                    for ifd_name in exif_dict:
+                        if ifd_name != "thumbnail":  # Skip the thumbnail data
+                            for tag, value in exif_dict[ifd_name].items():
+                                decoded_tag = TAGS.get(tag, tag)
+                                exif_data[decoded_tag] = value
+                    return exif_data
+            elif img.format == 'PNG':
+                text_data = img.info
+                print(f"text_data: {text_data}")
+                return text_data
+                #return {key: text_data[key] for key in text_data if key not in ['exif', 'dpi']}
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+
+def get_exif(image_path):
+    try:
+        exif_data = get_image_metadata(image_path)
+        for key in exif_data:
+            print(f"AAA: {key}")
+        with Image.open(image_path) as img:
+            # exif_data_raw = img.info.get("exif")
+            text_data = img.info
+            exif_data_raw = {key: text_data[key] for key in text_data if key not in ['exif', 'dpi']}
+
+            # if img.format == 'JPEG':
+            #     exif_data_raw = img.info.get('exif')
+            #     if exif_data_raw:
+            #         exif_dict = piexif.load(exif_data_raw)
+            #         exif_data = {TAGS.get(tag, tag): exif_dict[ifd][tag] for ifd in exif_dict for tag in exif_dict[ifd] if ifd != 'thumbnail'}
+            #         return exif_data
+            # elif img.format == 'PNG':
+            #     text_data = img.info
+            #     return {key: text_data[key] for key in text_data if key not in ['exif', 'dpi']}
+
+
             if exif_data_raw:
                 exif_dict = piexif.load(exif_data_raw)
                 exif = {}

@@ -14,7 +14,7 @@ def main(parent_dir, minimum_warning=None):
         if os.path.isdir(dir_path):
             # Count the number of image files in the subfolder
             file_count = sum(
-                [len([f for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))]) for r, d, files in
+                [len([f for f in files if f.lower().endswith(('.webp', '.png', '.jpg', '.jpeg', '.gif'))]) for r, d, files in
                  os.walk(dir_path)])
 
             results.append((dir_name, file_count))
