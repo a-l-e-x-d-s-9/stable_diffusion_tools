@@ -1,8 +1,10 @@
 import os
 import random
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageColor
 from tqdm import tqdm
 import numpy as np
+import argparse
+
 # Create directories if they do not exist
 os.makedirs("solid_colors", exist_ok=True)
 os.makedirs("shapes", exist_ok=True)
@@ -79,26 +81,29 @@ colors = [
 shapes = ["square", "triangle", "circle", "parallel+lines", "rectangle", "pentagon"]
 basic_colors = ["#FFFFFF", "#000000", "#FFFFFF", "#000000", "#FF0000", "#00FF00", "#0000FF", "#808080"]
 
+
 # Function to generate solid color images
 def generate_solid_color_images():
     for color in colors:
         for i in range(color["amount"]):
             for resolution in resolutions:
                 img = Image.new('RGB', resolution, color['hex'])
-                concatenated_aliases_for_filename = (",".join([s + " background" for s in color['aliases']])).replace(' ', '_')
+                concatenated_aliases_for_filename = (",".join([s + " background" for s in color['aliases']])).replace(
+                    ' ', '_')
                 index_string = ""
                 if i != 0:
-                    index_string = f"_{i+1}"
-                    
+                    index_string = f"_{i + 1}"
+
                 img_path_and_name = f"solid_colors/{concatenated_aliases_for_filename}{index_string}"
                 img_name = f"{img_path_and_name}.png"
                 img.save(img_name)
-                
+
                 # Create a TXT file with color name and hex value
                 txt_name = f"{img_path_and_name}.txt"
-                
+
                 with open(txt_name, 'w') as txt_file:
-                    text_content = ", ".join([s + " background" for s in color['aliases']]) + f", {color['hex']} background"
+                    text_content = ", ".join(
+                        [s + " background" for s in color['aliases']]) + f", {color['hex']} background"
                     txt_file.write(text_content)
 
 
@@ -114,16 +119,23 @@ def create_shapes():
                     margin = resolution[0] // 10
 
                     if shape == "square":
-                        draw.rectangle([margin, margin, resolution[0] - margin, resolution[1] - margin], outline=color, width=line_width)
+                        draw.rectangle([margin, margin, resolution[0] - margin, resolution[1] - margin], outline=color,
+                                       width=line_width)
                     elif shape == "triangle":
-                        draw.polygon([resolution[0] // 2, margin, resolution[0] - margin, resolution[1] - margin, margin, resolution[1] - margin], outline=color, width=line_width)
+                        draw.polygon(
+                            [resolution[0] // 2, margin, resolution[0] - margin, resolution[1] - margin, margin,
+                             resolution[1] - margin], outline=color, width=line_width)
                     elif shape == "circle":
-                        draw.ellipse([margin, margin, resolution[0] - margin, resolution[1] - margin], outline=color, width=line_width)
+                        draw.ellipse([margin, margin, resolution[0] - margin, resolution[1] - margin], outline=color,
+                                     width=line_width)
                     elif shape == "parallel+lines":
-                        draw.line([margin, resolution[1] // 3, resolution[0] - margin, resolution[1] // 3], fill=color, width=line_width)
-                        draw.line([margin, 2 * resolution[1] // 3, resolution[0] - margin, 2 * resolution[1] // 3], fill=color, width=line_width)
+                        draw.line([margin, resolution[1] // 3, resolution[0] - margin, resolution[1] // 3], fill=color,
+                                  width=line_width)
+                        draw.line([margin, 2 * resolution[1] // 3, resolution[0] - margin, 2 * resolution[1] // 3],
+                                  fill=color, width=line_width)
                     elif shape == "rectangle":
-                        draw.rectangle([margin, resolution[1] // 4, resolution[0] - margin, 3 * resolution[1] // 4], outline=color, width=line_width)
+                        draw.rectangle([margin, resolution[1] // 4, resolution[0] - margin, 3 * resolution[1] // 4],
+                                       outline=color, width=line_width)
                     elif shape == "pentagon":
                         center_x, center_y = resolution[0] // 2, resolution[1] // 2
                         radius = min(resolution) // 2 - margin
@@ -149,8 +161,6 @@ def create_shapes():
                             y = center_y + radius * np.sin(np.radians(angle - 90))
                             points.append((x, y))
 
-                        # Adjust the points slightly for better connections
-                        #points = [(int(x), int(y)) for x, y in points]
                         draw.polygon(points, outline=color, width=line_width)
 
                     if line_width <= 55:
@@ -159,18 +169,7 @@ def create_shapes():
                         line_category = "normal"
                     else:
                         line_category = "thick"
-                    ###color_name = color in colors where
-                    img.save(f"shapes/{shape}_{color}_{line_category}_line_{line_width}px.png") # img.save(f"shapes/{shape}_{color[1:]}_{line_width}px_{resolution[0]}x{resolution[1]}.png")
-
-# Function to rotate shapes
-def rotate_shapes():
-    for shape_file in os.listdir("shapes"):
-        shape_path = os.path.join("shapes", shape_file)
-        img = Image.open(shape_path)
-
-        for angle in [90, 180, 270]:
-            rotated_img = img.rotate(angle, expand=True)
-            rotated_img.save(f"shapes/{shape_file[:-4]}_{angle}deg.png")
+                    img.save(f"shapes/{shape}_{color}_{line_category}_line_{line_width}px.png")
 
 
 def get_color_name_by_hex(hex_value):
@@ -179,7 +178,7 @@ def get_color_name_by_hex(hex_value):
             return color['name']
     return "unknown"
 
-# Function to combine shapes with solid color backgrounds
+
 # Function to combine shapes with solid color backgrounds
 def combine_images(total_combinations):
     combinations = set()
@@ -219,7 +218,8 @@ def combine_images(total_combinations):
         pbar.update(1)
 
         bg_img = Image.new('RGB', resolution, color['hex'])
-        shape_img = Image.open(os.path.join("shapes", shape_file)).resize(resolution, Image.ANTIALIAS).rotate(rotation, expand=True)
+        shape_img = Image.open(os.path.join("shapes", shape_file)).resize(resolution, Image.ANTIALIAS).rotate(rotation,
+                                                                                                              expand=True)
 
         combined_img = bg_img.copy()
         combined_img.paste(shape_img, (0, 0), shape_img)
@@ -236,15 +236,73 @@ def combine_images(total_combinations):
     pbar.close()
 
 
+# New function to process images in a folder
+def process_images_in_folder(folder_path):
+    # Recursively scan the folder for images
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            # Check if file is an image
+            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.webp')):
+                image_path = os.path.join(root, file)
+                try:
+                    with Image.open(image_path) as img:
+                        size = img.size
+                        format = img.format
+                        mode = img.mode
+                        info = img.info
+
+                        # Select a color
+                        color = random.choice(colors)
+
+                        # Handle different image modes
+                        if mode in ('RGB', 'RGBA'):
+                            new_img = Image.new(mode, size, color['hex'])
+                        elif mode == 'L':
+                            # Convert color to grayscale
+                            r, g, b = ImageColor.getrgb(color['hex'])
+                            gray = int(0.299 * r + 0.587 * g + 0.114 * b)
+                            new_img = Image.new('L', size, gray)
+                        elif mode == 'P':
+                            # Convert to RGB and then to 'P' mode
+                            temp_img = Image.new('RGB', size, color['hex'])
+                            new_img = temp_img.convert('P', palette=Image.ADAPTIVE)
+                        else:
+                            # For other modes, convert to 'RGB'
+                            new_img = Image.new('RGB', size, color['hex'])
+
+                        # Preserve EXIF data if available
+                        if 'exif' in info:
+                            exif_data = info['exif']
+                            new_img.save(image_path, format=format, exif=exif_data)
+                        else:
+                            new_img.save(image_path, format=format)
+
+                    # Create or overwrite the TXT file with same name
+                    txt_file_name = os.path.splitext(file)[0] + '.txt'
+                    txt_file_path = os.path.join(root, txt_file_name)
+                    with open(txt_file_path, 'w') as txt_file:
+                        txt_file.write(color['name'])
+
+                except Exception as e:
+                    print(f"Error processing {image_path}: {e}")
+
 
 # Main function to run all tasks
 def main():
-    generate_solid_color_images()
-    create_shapes()
-    ##rotate_shapes()
-    combine_images(400)  # Set the desired number of combinations
+    parser = argparse.ArgumentParser(description='Generate images or process a folder.')
+    parser.add_argument('--convert-folder', help='Folder to scan and process images recursively.')
+    parser.add_argument('--generate-amount', type=int, default=400, help='How many images to generate.')
+    args = parser.parse_args()
+
+    if args.convert_folder:
+        process_images_in_folder(args.convert_folder)
+    else:
+        generate_solid_color_images()
+        create_shapes()
+        combine_images(args.generate_amount)  # Set the desired number of combinations
+
 
 if __name__ == "__main__":
     main()
 
-#python3 generate_backgrounds_and_shapes.py
+# python3 generate_backgrounds_and_shapes.py
