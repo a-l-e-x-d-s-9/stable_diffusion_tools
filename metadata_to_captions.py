@@ -26,21 +26,26 @@ def extract_field_values_from_json(json_data):
                 user_data = field_value
                 if "fullname" in user_data and isinstance(user_data["fullname"], str):
                     author_name = user_data["fullname"].strip()
+                elif "displayName" in user_data and isinstance(user_data["displayName"], str):
+                    author_name = user_data["displayName"].strip()
             elif field == "taken_at" and "taken_at" in json_data:
                 taken_at_value = json_data["taken_at"]
                 try:
-                    # Parse the date string and format it as "photography taken on YYYY.MM.DD"
-                    date_obj = datetime.strptime(taken_at_value, "%Y-%m-%dT%H:%M:%S%z")
-                    formatted_date = date_obj.strftime("%Y.%m.%d")
-                    extracted_values.append(f"photography taken on {formatted_date}")
-                except ValueError as e:
-                    print(f"Error parsing date for {taken_at_value}: {e}")
+                    if isinstance(taken_at_value, str):
+                        # Parse the date string and format it as "photography taken on YYYY.MM.DD"
+                        date_obj = datetime.strptime(taken_at_value, "%Y-%m-%dT%H:%M:%S%z")
+                        formatted_date = date_obj.strftime("%Y.%m.%d")
+                        extracted_values.append(f"photography taken on {formatted_date}")
+                    else:
+                        print(f"Invalid date format or missing value for 'taken_at' in {field_value}")
+                except (ValueError, TypeError) as e:
+                    print(f"Error parsing date for 'taken_at' in {field_value}: {e}")
             elif field == 'camera' or field == 'lens' or field == 'location':
                 if isinstance(field_value, str) and field_value.strip():
                     extracted_values.append(f"{field} {field_value.strip()}")
             elif field == 'watermark':
                 if isinstance(field_value, bool):
-                    if True == field_value:
+                    if field_value:  # If True, add 'watermark'
                         extracted_values.append('watermark')
             elif isinstance(field_value, list):
                 if all(isinstance(tag, str) for tag in field_value):
@@ -53,6 +58,7 @@ def extract_field_values_from_json(json_data):
         extracted_values.insert(0, f"photography by {author_name}")
 
     return extracted_values
+
 
 
 def process_json_file(json_file_path):
@@ -89,7 +95,7 @@ def save_extracted_values_to_text_file(json_file_path, extracted_values):
     try:
         with open(text_file_path, 'w', encoding='utf-8') as text_file:
             text_file.write(", ".join(extracted_values))
-        print(f"Extracted values saved to {text_file_path}")
+        #print(f"Extracted values saved to {text_file_path}")
     except Exception as e:
         print(f"Error saving file {text_file_path}: {e}")
 
