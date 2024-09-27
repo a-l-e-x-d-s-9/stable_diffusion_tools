@@ -35,7 +35,7 @@ def extract_field_values_from_json(json_data):
                         # Parse the date string and format it as "photography taken on YYYY.MM.DD"
                         date_obj = datetime.strptime(taken_at_value, "%Y-%m-%dT%H:%M:%S%z")
                         formatted_date = date_obj.strftime("%Y.%m.%d")
-                        extracted_values.append(f"photography taken on {formatted_date}")
+                        extracted_values.append(f"photograph taken on {formatted_date}")
                     else:
                         print(f"Invalid date format or missing value for 'taken_at' in {field_value}")
                 except (ValueError, TypeError) as e:
