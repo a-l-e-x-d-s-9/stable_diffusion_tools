@@ -21,14 +21,18 @@
         return titleElement ? titleElement.innerText.trim() : '';
     }
 
-    // Function to extract model version ID from the page
+    // Function to extract model version ID from the download link
     function getModelVersionId() {
-        const versionElements = document.querySelectorAll('.mantine-Group-root.mantine-z88oh code.mantine-Code-root.mantine-iff5o4');
-        if (versionElements.length >= 2) {
-            return versionElements[1].innerText.trim();
+        const downloadButton = document.querySelector('.mantine-UnstyledButton-root.mantine-Button-root.mantine-14hm07m');
+        if (downloadButton) {
+            const href = downloadButton.getAttribute('href');
+            const match = href.match(/\/api\/download\/models\/(\d+)\?/);
+            return match ? match[1] : '';
         }
         return '';
     }
+
+
 
     // Function to fetch download links from API
     async function fetchDownloadLinks(versionId, token) {
