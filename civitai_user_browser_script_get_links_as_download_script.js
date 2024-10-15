@@ -21,12 +21,13 @@
         return titleElement ? titleElement.innerText.trim() : '';
     }
 
-    // Function to extract model version ID from the download link
+    // Function to extract model version ID from download links with a specific URL pattern
     function getModelVersionId() {
-        const downloadButton = document.querySelector('.mantine-UnstyledButton-root.mantine-Button-root.mantine-14hm07m');
-        if (downloadButton) {
-            const href = downloadButton.getAttribute('href');
-            const match = href.match(/\/api\/download\/models\/(\d+)\?/);
+        // Select the <a> element with an href containing '/api/download/models/'
+        const downloadLink = document.querySelector('a[href*="/api/download/models/"]');
+        if (downloadLink) {
+            const href = downloadLink.getAttribute('href');
+            const match = href.match(/\/api\/download\/models\/(\d+)/);
             return match ? match[1] : '';
         }
         return '';
