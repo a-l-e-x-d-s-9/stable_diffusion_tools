@@ -2,10 +2,40 @@ import argparse
 import os
 import shutil
 import random
-import collections
+import re
+import string
 
 # List of image extensions to filter by
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']
+
+# Characters to use for generating random suffixes
+RANDOM_CHARS = string.ascii_letters + string.digits
+
+
+def sanitize_filename(filename, source_folder, target_folder):
+    # Remove special characters
+    sanitized_name = re.sub(r'[<>:"/\\|?*]', '', filename)
+    original_sanitized_name = sanitized_name  # Keep track for the caption file
+    count = 0  # Ensure we don't end up in an infinite loop
+
+    # Function to check if a file exists in either source or target
+    def file_exists_in_source_or_target(name):
+        return (
+                os.path.exists(os.path.join(target_folder, name)) or
+                os.path.exists(os.path.join(source_folder, name))
+        )
+
+    # Append a unique random suffix if the file already exists
+    while file_exists_in_source_or_target(sanitized_name) and count < 100:
+        suffix = ''.join(random.choices(RANDOM_CHARS, k=4))
+        sanitized_name = f"{original_sanitized_name}_{suffix}"
+        count += 1
+
+    if count >= 100:
+        raise Exception("Failed to generate a unique filename after 100 attempts.")
+
+    return sanitized_name
+
 
 def split_files(source_folder, target_folder, split_amount, copy_files, exclude_folder, exclude_files, with_captions):
     all_images = []
@@ -21,7 +51,8 @@ def split_files(source_folder, target_folder, split_amount, copy_files, exclude_
 
     # Ensure we have enough images
     if len(all_images) < split_amount:
-        print(f"Not enough images to meet the required split_amount of {split_amount}. Available images: {len(all_images)}")
+        print(
+            f"Not enough images to meet the required split_amount of {split_amount}. Available images: {len(all_images)}")
         split_amount = len(all_images)
 
     # Randomly select the required number of images
@@ -30,8 +61,12 @@ def split_files(source_folder, target_folder, split_amount, copy_files, exclude_
     for src_image in selected_images:
         dst_dir = os.path.join(target_folder, os.path.relpath(os.path.dirname(src_image), source_folder))
         os.makedirs(dst_dir, exist_ok=True)
-        dst_image = os.path.join(dst_dir, os.path.basename(src_image))
 
+        # Sanitize and generate a unique destination filename
+        sanitized_filename = sanitize_filename(os.path.basename(src_image), source_folder, dst_dir)
+        dst_image = os.path.join(dst_dir, sanitized_filename)
+
+        # Copy or move the image file
         if copy_files:
             shutil.copy2(src_image, dst_image)
         else:
@@ -41,8 +76,10 @@ def split_files(source_folder, target_folder, split_amount, copy_files, exclude_
         if with_captions:
             base_name, _ = os.path.splitext(src_image)
             src_caption_file = base_name + ".txt"
-            dst_caption_file = os.path.join(dst_dir, os.path.basename(src_caption_file))
             if os.path.exists(src_caption_file):
+                # Sanitize and use the same name as the image
+                sanitized_caption_filename = os.path.splitext(sanitized_filename)[0] + ".txt"
+                dst_caption_file = os.path.join(dst_dir, sanitized_caption_filename)
                 if copy_files:
                     shutil.copy2(src_caption_file, dst_caption_file)
                 else:
@@ -56,14 +93,12 @@ if __name__ == "__main__":
     parser.add_argument('--split-amount', type=int, required=True, help='The number of images to move or copy.')
     parser.add_argument('--copy-files', action='store_true', default=False, help='Copy images instead of moving them.')
     parser.add_argument('--exclude-folder', type=str, help='Folder to exclude from the operation.')
-    parser.add_argument('--exclude-files', default=[], required=False, type=str, nargs='*', help='Files (without extension) to exclude from the operation.')
-    parser.add_argument('--with_captions', action='store_true', default=False, help='Move or copy corresponding TXT files for each image.')
+    parser.add_argument('--exclude-files', default=[], required=False, type=str, nargs='*',
+                        help='Files (without extension) to exclude from the operation.')
+    parser.add_argument('--with_captions', action='store_true', default=False,
+                        help='Move or copy corresponding TXT files for each image.')
 
     args = parser.parse_args()
 
-    split_files(args.source_folder, args.target_folder, args.split_amount, args.copy_files, args.exclude_folder, args.exclude_files, args.with_captions)
-
-
-# python3 images_split_exact_number.py --source-folder /path/to/source/folder --target-folder /path/to/target/folder --split-amount 3 --copy-files --exclude-folder /path/to/exclude/folder --exclude-files file1 file2 file3
-
-
+    split_files(args.source_folder, args.target_folder, args.split_amount, args.copy_files, args.exclude_folder,
+                args.exclude_files, args.with_captions)
