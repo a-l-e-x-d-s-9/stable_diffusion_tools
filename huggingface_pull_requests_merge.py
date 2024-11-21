@@ -1,5 +1,6 @@
 import argparse
-from huggingface_hub import HfApi, merge_pull_request, get_repo_discussions
+from huggingface_hub import HfApi, merge_pull_request, get_repo_discussions, change_discussion_status
+from huggingface_hub.utils._errors import BadRequestError
 
 
 def get_args():
@@ -24,9 +25,19 @@ def merge_pull_requests(args):
     # Loop through each discussion and merge it if it's a pull request
     for discussion in discussions:
         if discussion.is_pull_request and discussion.status == "open":
-            print(f"Merging pull request #{discussion.num}: {discussion.title}")
-            merge_pull_request(repo_id=repo_id, discussion_num=discussion.num, token=token)
-            print(f"Pull request #{discussion.num} merged.")
+            print(f"Processing pull request #{discussion.num}: {discussion.title}")
+            try:
+                merge_pull_request(repo_id=repo_id, discussion_num=discussion.num, token=token)
+                print(f"Pull request #{discussion.num} merged.")
+            except BadRequestError as e:
+                if "This Pull Request has no associated changes" in str(e):
+                    print(f"Pull request #{discussion.num} has no associated changes. Closing it.")
+                    change_discussion_status(repo_id=repo_id, discussion_num=discussion.num, new_status="closed", token=token)
+                    print(f"Pull request #{discussion.num} closed.")
+                else:
+                    print(f"Failed to merge pull request #{discussion.num} due to unexpected error: {e}")
+            except Exception as e:
+                print(f"An error occurred while processing pull request #{discussion.num}: {e}")
 
 
 def main():
@@ -36,8 +47,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
 
 # python3 huggingface_pull_requests_merge.py --repository "your_username/your_repository" --token_file "token_file.txt" --repo_type "model"
