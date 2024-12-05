@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Extract files to clipboard
 // @namespace    http://tampermonkey.net/
-// @version      2024-07-20
+// @version      2024-12-05
 // @description  Extract download links from Civitai
 // @author       You
 // @match        https://civitai.com/models/*
@@ -23,7 +23,6 @@
 
     // Function to extract model version ID from download links with a specific URL pattern
     function getModelVersionId() {
-        // Select the <a> element with an href containing '/api/download/models/'
         const downloadLink = document.querySelector('a[href*="/api/download/models/"]');
         if (downloadLink) {
             const href = downloadLink.getAttribute('href');
@@ -33,7 +32,13 @@
         return '';
     }
 
-
+    // Function to sanitize the title into a valid filename
+    function sanitizeFilename(title) {
+        return title
+            .replace(/[^a-zA-Z0-9]/g, '_')  // Replace non-alphanumeric characters with _
+            .replace(/_+/g, '_')            // Replace multiple underscores with a single underscore
+            .replace(/^_|_$/g, '');         // Remove leading and trailing underscores
+    }
 
     // Function to fetch download links from API
     async function fetchDownloadLinks(versionId, token) {
@@ -55,6 +60,7 @@
     // Main function to format and copy the data
     async function formatAndCopyData() {
         const title = getModelTitle();
+        const sanitizedTitle = sanitizeFilename(title);
         const versionId = getModelVersionId();
         const currentPageUrl = window.location.href;
 
@@ -72,7 +78,14 @@
 
         try {
             const downloadLinks = await fetchDownloadLinks(versionId, civitaiDownloadToken);
-            const finalStrings = downloadLinks.map(link => `wget --content-disposition "${link}?token=` + civitaiDownloadToken + `" # ${title} # ${currentPageUrl}`).join('\n');
+            const finalStrings = downloadLinks.map(link => {
+                const isTraining = link.includes('type=Training');
+                let wgetLine = `wget --content-disposition -O "${sanitizedTitle}.safetensors" "${link}?token=${civitaiDownloadToken}"`;
+                if (isTraining){
+                    wgetLine = `wget --content-disposition "${link}?token=${civitaiDownloadToken}"`;
+                }
+                return isTraining ? `# ${wgetLine} # ${title} # ${currentPageUrl}` : `${wgetLine} # ${title} # ${currentPageUrl}`;
+            }).join('\n');
 
             let clipboardContent = await navigator.clipboard.readText();
             if (clipboardContent.length > 0) {
@@ -123,7 +136,6 @@
         console.log('Clipboard cleared.');
     };
 
-    // Function to prompt user for sensitive information and save it
     function setCivitaiToken() {
         const civitaiDownloadToken = prompt("Please enter your Civitai download token:", "");
         if (civitaiDownloadToken != null) {
@@ -132,7 +144,6 @@
         }
     }
 
-    // Add menu command to set credentials
     GM_registerMenuCommand("Set Civitai download token", setCivitaiToken);
     GM_registerMenuCommand('Extract and Convert Links [CTRL+SHIFT+X]', formatAndCopyData);
     GM_registerMenuCommand('Clear Clipboard [CTRL+SHIFT+Z]', clearClipboard);
