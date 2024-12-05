@@ -36,6 +36,7 @@
     function sanitizeFilename(title) {
         return title
             .replace(/[^a-zA-Z0-9]/g, '_')  // Replace non-alphanumeric characters with _
+            .replace(/[ ]/g, '_')  // Replace spaces characters with _
             .replace(/_+/g, '_')            // Replace multiple underscores with a single underscore
             .replace(/^_|_$/g, '');         // Remove leading and trailing underscores
     }
