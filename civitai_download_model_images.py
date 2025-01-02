@@ -4,9 +4,13 @@ import argparse
 import concurrent.futures
 import sys
 import json
+import imghdr
+import io
+from PIL import Image
 
 # Timeout value for server responses
 TIMEOUT = 30  # in seconds
+
 
 # Function to load the API key from a JSON file
 def load_api_key(json_path):
@@ -25,6 +29,7 @@ def load_api_key(json_path):
     except json.JSONDecodeError:
         print("Error: Invalid JSON file.")
         exit(1)
+
 
 # Function to fetch image data from Civitai API based on the model_version_id
 def fetch_image_data(model_version_id, api_key):
@@ -71,6 +76,7 @@ def fetch_image_data(model_version_id, api_key):
 
     return image_data
 
+
 # Function to download images and associated metadata
 def download_images(image_data, target_folder):
     if not os.path.exists(target_folder):
@@ -80,28 +86,34 @@ def download_images(image_data, target_folder):
         image_id = item["id"]
         image_url = item["url"]
 
-        # Extract the file extension from the URL (default to .jpeg if not found)
-        file_extension = os.path.splitext(image_url)[1].lower()
-        if file_extension not in [".jpeg", ".jpg", ".png", ".webp"]:
-            file_extension = ".jpeg"
-
-        image_filename = os.path.join(target_folder, f"{image_id}{file_extension}")
-
-        if os.path.isfile(image_filename):
-            return
-
+        # Download the image to a temporary byte stream
         try:
             image_response = requests.get(image_url, stream=True, timeout=TIMEOUT)
-            if image_response.status_code == 200:
-                with open(image_filename, "wb") as image_file:
-                    for chunk in image_response.iter_content(chunk_size=1024):
-                        if chunk:
-                            image_file.write(chunk)
-            else:
+            if image_response.status_code != 200:
                 raise Exception(f"Failed to download image. HTTP Status: {image_response.status_code}")
+
+            temp_image_data = image_response.content
 
         except requests.Timeout:
             raise Exception(f"Timeout while downloading image {image_id} after {TIMEOUT} seconds.")
+
+        # Detect the image type using Pillow
+        try:
+            image_stream = io.BytesIO(temp_image_data)
+            image = Image.open(image_stream)
+            file_extension = f".{image.format.lower()}"
+        except Exception:
+            file_extension = ".jpeg"  # Default if detection fails
+
+        image_filename = os.path.join(target_folder, f"{image_id}{file_extension}")
+
+        # Check if the file already exists
+        if os.path.isfile(image_filename):
+            return
+
+        # Save the image to the target folder
+        with open(image_filename, "wb") as image_file:
+            image_file.write(temp_image_data)
 
         # Save the metadata file
         metadata_filename = os.path.join(target_folder, f"{image_id}.metadata")
@@ -117,6 +129,7 @@ def download_images(image_data, target_folder):
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         executor.map(download_image, image_data)
+
 
 # Main function to execute the script with named arguments
 def main():
@@ -143,12 +156,12 @@ def main():
         files_list_filename = os.path.join(target_folder, f"{model_version_id}_filelist.txt")
         with open(files_list_filename, "w") as files_list_file:
             for item in image_data:
+                image_id = item["id"]
                 image_url = item["url"]
-                print(image_url)
                 file_extension = os.path.splitext(image_url)[1].lower()
                 if file_extension not in [".jpeg", ".jpg", ".png", ".webp"]:
                     file_extension = ".jpeg"
-                files_list_file.write(f"{item['id']}{file_extension}\n")
+                files_list_file.write(f"{image_id}{file_extension}\n")
 
         download_images(image_data, target_folder)
 
