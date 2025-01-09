@@ -41,8 +41,8 @@
             .replace(/^_|_$/g, '');         // Remove leading and trailing underscores
     }
 
-    // Function to fetch download links from API
-    async function fetchDownloadLinks(versionId, token) {
+    // Function to fetch download links and version name from API
+    async function fetchDownloadData(versionId, token) {
         const response = await fetch(`https://civitai.com/api/v1/model-versions/${versionId}`, {
             headers: {
                 'Content-Type': 'application/json',
@@ -51,11 +51,13 @@
         });
 
         if (!response.ok) {
-            throw new Error('Failed to fetch download links');
+            throw new Error('Failed to fetch download data');
         }
 
         const data = await response.json();
-        return data.files.map(file => file.downloadUrl);
+        const versionName = data.name || ''; // Extract version name
+        const downloadLinks = data.files.map(file => file.downloadUrl);
+        return { versionName, downloadLinks };
     }
 
     // Main function to format and copy the data
@@ -78,11 +80,14 @@
         }
 
         try {
-            const downloadLinks = await fetchDownloadLinks(versionId, civitaiDownloadToken);
+            const { versionName, downloadLinks } = await fetchDownloadData(versionId, civitaiDownloadToken);
+            const sanitizedVersionName = sanitizeFilename(versionName);
+
             const finalStrings = downloadLinks.map(link => {
                 const isTraining = link.includes('type=Training');
-                let wgetLine = `wget --content-disposition -O "${sanitizedTitle}.safetensors" "${link}?token=${civitaiDownloadToken}"`;
-                if (isTraining){
+                const filename = `${sanitizedTitle}_${sanitizedVersionName}.safetensors`;
+                let wgetLine = `wget --content-disposition -O "${filename}" "${link}?token=${civitaiDownloadToken}"`;
+                if (isTraining) {
                     wgetLine = `wget --content-disposition "${link}?token=${civitaiDownloadToken}"`;
                 }
                 return isTraining ? `# ${wgetLine} # ${title} # ${currentPageUrl}` : `${wgetLine} # ${title} # ${currentPageUrl}`;
@@ -97,8 +102,8 @@
             createSplash('green', 'Links have been extracted, converted, and sorted.');
             console.log('Links have been extracted, converted, and sorted.');
         } catch (error) {
-            console.error('Error fetching download links', error);
-            createSplash('red', 'Failed to fetch download links.');
+            console.error('Error fetching download data', error);
+            createSplash('red', 'Failed to fetch download data.');
         }
     }
 
