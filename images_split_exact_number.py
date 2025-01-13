@@ -13,22 +13,25 @@ RANDOM_CHARS = string.ascii_letters + string.digits
 
 
 def sanitize_filename(filename, source_folder, target_folder):
-    # Remove special characters
-    sanitized_name = re.sub(r'[<>:"/\\|?*]', '', filename)
-    original_sanitized_name = sanitized_name  # Keep track for the caption file
+    # Split the filename into name and extension
+    base_name, ext = os.path.splitext(filename)
+    # Remove special characters from the base name
+    sanitized_base_name = re.sub(r'[<>:"/\\|?*]', '', base_name)
+    original_sanitized_name = sanitized_base_name  # Keep track for the caption file
     count = 0  # Ensure we don't end up in an infinite loop
 
     # Function to check if a file exists in either source or target
     def file_exists_in_source_or_target(name):
         return (
-                os.path.exists(os.path.join(target_folder, name)) or
-                os.path.exists(os.path.join(source_folder, name))
+            os.path.exists(os.path.join(target_folder, name)) or
+            os.path.exists(os.path.join(source_folder, name))
         )
 
     # Append a unique random suffix if the file already exists
+    sanitized_name = f"{sanitized_base_name}{ext}"
     while file_exists_in_source_or_target(sanitized_name) and count < 100:
         suffix = ''.join(random.choices(RANDOM_CHARS, k=4))
-        sanitized_name = f"{original_sanitized_name}_{suffix}"
+        sanitized_name = f"{sanitized_base_name}_{suffix}{ext}"
         count += 1
 
     if count >= 100:
@@ -51,8 +54,7 @@ def split_files(source_folder, target_folder, split_amount, copy_files, exclude_
 
     # Ensure we have enough images
     if len(all_images) < split_amount:
-        print(
-            f"Not enough images to meet the required split_amount of {split_amount}. Available images: {len(all_images)}")
+        print(f"Not enough images to meet the required split_amount of {split_amount}. Available images: {len(all_images)}")
         split_amount = len(all_images)
 
     # Randomly select the required number of images
@@ -77,7 +79,7 @@ def split_files(source_folder, target_folder, split_amount, copy_files, exclude_
             base_name, _ = os.path.splitext(src_image)
             src_caption_file = base_name + ".txt"
             if os.path.exists(src_caption_file):
-                # Sanitize and use the same name as the image
+                # Use the same sanitized base name for the caption file
                 sanitized_caption_filename = os.path.splitext(sanitized_filename)[0] + ".txt"
                 dst_caption_file = os.path.join(dst_dir, sanitized_caption_filename)
                 if copy_files:

@@ -3,20 +3,43 @@ import os
 import argparse
 import concurrent.futures
 import sys
+import json
 
 # Timeout value for server responses
 TIMEOUT = 30  # in seconds
 
+def load_api_key(json_path):
+    if not os.path.exists(json_path):
+        print(f"Error: File not found: {json_path}")
+        exit(1)
+
+    try:
+        with open(json_path, "r") as file:
+            data = json.load(file)
+            api_key = data.get("api_key")
+            if not api_key:
+                print("Error: API key not found in the JSON file.")
+                exit(1)
+            return api_key
+    except json.JSONDecodeError:
+        print("Error: Invalid JSON file.")
+        exit(1)
 
 # Function to fetch image data from Civitai API based on the username
-def fetch_image_data(username):
+def fetch_image_data(username, api_key):
     # The endpoint to get images from the specified user
     endpoint = "https://civitai.com/api/v1/images"
+    counter = 0
 
     # Variables for paging through results
-    limit = 100  # Maximum allowed limit for batch size
+    limit = 200  # Maximum allowed limit for batch size
     cursor = None
     image_data = []
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
 
     while True:
         # Build query parameters
@@ -24,12 +47,13 @@ def fetch_image_data(username):
             "limit": limit,
             "username": username,
             "sort": "Newest",  # Fetching latest images
-            "cursor": cursor,  # Paging system
+            "cursor": cursor,  # Paging system,
+            "nsfw": "X" # (None, Soft, Mature, X)
         }
 
         try:
             # Make API call with timeout
-            response = requests.get(endpoint, params=params, headers={"Content-Type": "application/json"},
+            response = requests.get(endpoint, params=params, headers=headers,
                                     timeout=TIMEOUT)
         except requests.Timeout:
             raise Exception(f"Timeout while fetching data from server after {TIMEOUT} seconds.")
@@ -46,6 +70,8 @@ def fetch_image_data(username):
 
         data = response.json()
         image_data.extend(data["items"])
+        print(f"Fetching[{counter}]:" + str(len(data["items"])))
+        counter += 1
 
         # Check if there's a next cursor to continue paging
         cursor = data.get("metadata", {}).get("nextCursor")
@@ -106,21 +132,25 @@ def download_images(image_data, target_folder):
 def main():
     # Argument parser to get named arguments
     parser = argparse.ArgumentParser(description="Download images from Civitai based on username.")
-    parser.add_argument("username", type=str, help="The username to fetch images for.")
-    parser.add_argument("target_path", type=str, help="The target folder to download images.")
+    parser.add_argument("--username", type=str, help="The username to fetch images for.")
+    parser.add_argument("--target_path", type=str, help="The target folder to download images.")
+    parser.add_argument("--api_key_json", type=str, required=True, help="Path to the JSON file containing the API key.")
 
     # Parse arguments
     args = parser.parse_args()
 
     username = args.username
     target_folder = args.target_path
+    api_key_json = args.api_key_json
+
+    api_key = load_api_key(api_key_json)
 
     # Ensure the target folder exists or create it
     if not os.path.exists(target_folder):
         os.makedirs(target_folder)
 
     # Fetch the image data for the specified user
-    image_data = fetch_image_data(username)
+    image_data = fetch_image_data(username, api_key)
 
     # Save the list of files with the filename of the username
     files_list_filename = os.path.join(target_folder, f"{username}_filelist.txt")
