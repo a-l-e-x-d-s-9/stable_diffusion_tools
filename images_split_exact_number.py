@@ -40,7 +40,20 @@ def sanitize_filename(filename, source_folder, target_folder):
     return sanitized_name
 
 
-def split_files(source_folder, target_folder, split_amount, copy_files, exclude_folder, exclude_files, with_captions):
+def split_files(source_folder, target_folder, split_amount, copy_files, exclude_folder, exclude_files, with_captions, split_by_subfolder):
+    if split_by_subfolder:
+        # Process each subfolder separately
+        subfolders = [os.path.join(source_folder, d) for d in os.listdir(source_folder) if os.path.isdir(os.path.join(source_folder, d))]
+        for subfolder in subfolders:
+            subfolder_name = os.path.basename(subfolder)
+            target_subfolder = os.path.join(target_folder, subfolder_name)
+            process_images(subfolder, target_subfolder, split_amount, copy_files, exclude_folder, exclude_files, with_captions)
+    else:
+        # Process all files in the source folder normally
+        process_images(source_folder, target_folder, split_amount, copy_files, exclude_folder, exclude_files, with_captions)
+
+
+def process_images(source_folder, target_folder, split_amount, copy_files, exclude_folder, exclude_files, with_captions):
     all_images = []
 
     for root, _, files in os.walk(source_folder):
@@ -54,7 +67,7 @@ def split_files(source_folder, target_folder, split_amount, copy_files, exclude_
 
     # Ensure we have enough images
     if len(all_images) < split_amount:
-        print(f"Not enough images to meet the required split_amount of {split_amount}. Available images: {len(all_images)}")
+        print(f"Not enough images in {source_folder} to meet the required split_amount of {split_amount}. Available images: {len(all_images)}")
         split_amount = len(all_images)
 
     # Randomly select the required number of images
@@ -92,15 +105,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Move or copy random images from a source folder to a target folder.')
     parser.add_argument('--source-folder', required=True, help='The source folder to move or copy images from.')
     parser.add_argument('--target-folder', required=True, help='The target folder to move or copy images to.')
-    parser.add_argument('--split-amount', type=int, required=True, help='The number of images to move or copy.')
+    parser.add_argument('--split-amount', type=int, required=True, help='The number of images to move or copy per folder.')
     parser.add_argument('--copy-files', action='store_true', default=False, help='Copy images instead of moving them.')
     parser.add_argument('--exclude-folder', type=str, help='Folder to exclude from the operation.')
     parser.add_argument('--exclude-files', default=[], required=False, type=str, nargs='*',
                         help='Files (without extension) to exclude from the operation.')
     parser.add_argument('--with_captions', action='store_true', default=False,
                         help='Move or copy corresponding TXT files for each image.')
+    parser.add_argument('--split-by-subfolder', action='store_true', default=False,
+                        help='Process each subfolder within the source folder separately.')
 
     args = parser.parse_args()
 
     split_files(args.source_folder, args.target_folder, args.split_amount, args.copy_files, args.exclude_folder,
-                args.exclude_files, args.with_captions)
+                args.exclude_files, args.with_captions, args.split_by_subfolder)
