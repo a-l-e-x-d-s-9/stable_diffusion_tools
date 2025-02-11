@@ -45,10 +45,10 @@ def crop_image(image_path: str, crop_params: ImageCropParams) -> bool:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Crop images by size from each side.')
     parser.add_argument('folder_path', type=str, help='Path to folder containing images.')
-    parser.add_argument('--crop_left_px', type=int, help='Crop pixels from left.')
-    parser.add_argument('--crop_top_px', type=int, help='Crop pixels from top.')
-    parser.add_argument('--crop_right_px', type=int, help='Crop pixels from right.')
-    parser.add_argument('--crop_bottom_px', type=int, help='Crop pixels from bottom.')
+    parser.add_argument('--crop_left_px', type=int, default=0, help='Crop pixels from left.')
+    parser.add_argument('--crop_top_px', type=int, default=0, help='Crop pixels from top.')
+    parser.add_argument('--crop_right_px', type=int, default=0, help='Crop pixels from right.')
+    parser.add_argument('--crop_bottom_px', type=int, default=0, help='Crop pixels from bottom.')
 
     args = parser.parse_args()
 
