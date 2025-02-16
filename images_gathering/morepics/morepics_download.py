@@ -37,7 +37,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, required=True)
     parser.add_argument("--folder", type=str, required=True)
-    parser.add_argument("--additional-tags", type=str, required=True)
+    parser.add_argument("--additional-tags", default="", type=str, required=False)
     args = parser.parse_args()
 
     with open(args.data, 'r') as f:
