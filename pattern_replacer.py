@@ -53,7 +53,7 @@ def replace_rand_int(match):
 def replace_rand_float(match):
     low = float(match.group(1))
     high = float(match.group(2))
-    return str(random.uniform(low, high))
+    return f"{random.uniform(low, high):.3f}"  # Format to 3 decimal places
 
 
 def push_undo_state(text_state):
@@ -69,11 +69,13 @@ def undo():
         input_text.delete(1.0, tk.END)
         input_text.insert(tk.END, undo_stack.pop())
 
+
 def update_window_size():
     base_height = 200
     row_height = 35
     num_rows = len(regex_replacements) + 1
     window.geometry(f"800x{base_height + num_rows * row_height}")
+
 
 def validate_regex(event, entry_widget=None):
     if entry_widget is None:
@@ -84,6 +86,7 @@ def validate_regex(event, entry_widget=None):
         entry_widget.configure(bg="#98FB98")  # Light green
     except re.error:
         entry_widget.configure(bg="#F08080")  # Light coral (a soft red shade)
+
 
 def remove_regex_pair(pattern_entry):
     global regex_replacements
@@ -98,12 +101,11 @@ def remove_regex_pair(pattern_entry):
 
     # Ensure Add Pair button remains visible
     if not regex_replacements:
-        add_pair_button.grid(row=len(regex_replacements) + 3, column=0, padx=5, pady=5)
-
+        add_pair_button.grid(row=len(regex_replacements) + 3, column=5, padx=5, pady=5)
 
 
 def add_regex_pair(pattern="", replacement=""):
-    row_index = len(regex_replacements) + 3
+    row_index = len(regex_replacements) + 5
     pattern_entry = tk.Entry(window)
     replacement_entry = tk.Entry(window)
     remove_pair_button = tk.Button(window, text="Remove", command=lambda: remove_regex_pair(pattern_entry))
@@ -119,6 +121,7 @@ def add_regex_pair(pattern="", replacement=""):
 
     regex_replacements.append((pattern_entry, replacement_entry, remove_pair_button))
     update_window_size()
+
 
 def save_memory():
     memory = {
@@ -168,43 +171,52 @@ def load_from_file():
 def close_window():
     stop_event.set()
     save_memory()
-    window.quit()  # Ensures the Tkinter event loop stops
-    window.destroy()
+    os._exit(0)  # Forcefully stops all threads and exits
 
 
-
+# Create main window
 window = tk.Tk()
 window.title("Pattern Replacer")
 window.geometry("800x400")
 window.minsize(800, 400)
 
-input_text = tk.Text(window, wrap=tk.WORD, height=10)
-input_text.grid(row=0, column=0, columnspan=3, sticky="nsew")
-output_text = tk.Text(window, wrap=tk.WORD, state=tk.DISABLED, height=10)
-output_text.grid(row=1, column=0, columnspan=3, sticky="nsew")
+# Information label placed above the buttons (not hiding input text)
+info_text = tk.Text(window, height=2, wrap=tk.WORD)
+info_text.insert(tk.END, "Use <loop_X>text</loop> for loops.\n"
+                         "Use <rand_int_min_max> or <rand_float_min_max> for random numbers.")
+info_text.config(state=tk.DISABLED)  # Prevent editing
+info_text.grid(row=2, column=0, columnspan=5, padx=5, pady=5, sticky="w")
 
+# Text input and output
+input_text = tk.Text(window, wrap=tk.WORD, height=10, width=70)
+input_text.grid(row=0, column=0, columnspan=5, sticky="nsew")
+
+output_text = tk.Text(window, wrap=tk.WORD, state=tk.DISABLED, height=10, width=70)
+output_text.grid(row=1, column=0, columnspan=5, sticky="nsew")
+
+# Buttons
 replace_button = tk.Button(window, text="Replace All", command=replace_all)
-replace_button.grid(row=2, column=0, padx=5, pady=5)
+replace_button.grid(row=3, column=0, padx=5, pady=5)
+
 undo_button = tk.Button(window, text="Undo", command=undo)
-undo_button.grid(row=2, column=1, padx=5, pady=5)
+undo_button.grid(row=3, column=1, padx=5, pady=5)
+
 save_button = tk.Button(window, text="Save As", command=save_as_file)
-save_button.grid(row=2, column=2, padx=5, pady=5)
+save_button.grid(row=3, column=2, padx=5, pady=5)
+
 load_button = tk.Button(window, text="Load", command=load_from_file)
-load_button.grid(row=2, column=3, padx=5, pady=5)
-
-
+load_button.grid(row=3, column=3, padx=5, pady=5)
 
 window.grid_rowconfigure(0, weight=1)
 window.grid_rowconfigure(1, weight=1)
-window.grid_columnconfigure(0, weight=2)
-window.grid_columnconfigure(1, weight=2)
+window.grid_columnconfigure(0, weight=1)
+window.grid_columnconfigure(1, weight=1)
 window.grid_columnconfigure(2, weight=1)
 window.grid_columnconfigure(3, weight=1)
+window.grid_columnconfigure(4, weight=1)
 
-info_label = tk.Label(window, text="Use <loop_X>text</loop> for loops.\n"
-                                   "Use <rand_int_min_max> or <rand_float_min_max> for random numbers.",
-                      justify="left", fg="blue")
-info_label.grid(row=0, column=0, columnspan=3, padx=5, pady=5, sticky="w")
+add_pair_button = tk.Button(window, text="Add Pair", command=add_regex_pair)
+add_pair_button.grid(row=3, column=5, padx=5, pady=5)
 
 
 load_memory()
