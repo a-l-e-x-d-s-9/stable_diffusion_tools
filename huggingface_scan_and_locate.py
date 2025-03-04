@@ -56,22 +56,20 @@ def sync_with_huggingface(username, token, output_json, resume=False):
 
         # Skip already scanned repositories in resume mode
         if resume and repo_id in repo_hashes:
-            print(f"Skipping ({i}/{total_repos}) - {repo_id} (already scanned)")
+            sys.stdout.write(f"\rSkipping ({i}/{total_repos}) - {repo_id} (already scanned)     ")
+            sys.stdout.flush()
             continue
 
         # Progress update in the same line
         sys.stdout.write(f"\rScanning ({i}/{total_repos}) - {repo_id} [{repo_type}]...     ")
         sys.stdout.flush()
 
-        # Ensure repo is initialized in case of an error
-        if repo_id not in repo_hashes:
-            repo_hashes[repo_id] = {}
-
         try:
             file_metadata = api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token, files_metadata=True)
+            repo_data = {}
             for entry in file_metadata.siblings:
                 if hasattr(entry, "lfs") and isinstance(entry.lfs, dict) and "sha256" in entry.lfs:
-                    repo_hashes[repo_id][entry.rfilename] = entry.lfs["sha256"]
+                    repo_data[entry.rfilename] = entry.lfs["sha256"]
 
             # Save JSON incrementally after each repo
             with open(output_json, "w") as f:
@@ -168,4 +166,3 @@ if __name__ == "__main__":
             print("--local-folder is required for scan_download mode.")
             sys.exit(1)
         scan_and_make_download_script(args.local_folder, args.hash_json, args.remove_found)
-
