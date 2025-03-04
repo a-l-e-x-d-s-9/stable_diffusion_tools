@@ -23,7 +23,7 @@ def compute_file_hash(file_path):
 
     file_mtime = os.path.getmtime(file_path)  # When file was last modified
 
-    # If cached hash file exists, check if the file was modified
+    # Check if cached hash file exists
     if os.path.exists(hash_file):
         hash_mtime = os.path.getmtime(hash_file)  # When hash was last generated
 
@@ -32,7 +32,7 @@ def compute_file_hash(file_path):
             with open(hash_file, "r") as f:
                 return f.read().strip()
 
-    # Compute hash since file was modified
+    # Compute hash since file was modified or no cached hash exists
     hasher = hashlib.sha256()
     with open(file_path, "rb") as f:
         while chunk := f.read(8192):
@@ -48,63 +48,6 @@ def compute_file_hash(file_path):
     os.utime(hash_file, (file_mtime, file_mtime))
 
     return file_hash
-
-
-def sync_with_huggingface(username, token, output_json, resume=False):
-    """Fetch all file hashes from Hugging Face repositories and save incrementally."""
-    api = HfApi()
-    repo_hashes = {}
-
-    # Load existing progress if resume is enabled
-    if resume:
-        if os.path.exists(output_json):
-            with open(output_json, "r") as f:
-                repo_hashes = json.load(f)
-        else:
-            print(f"Resume mode enabled, but {output_json} does not exist. Starting fresh.")
-            repo_hashes = {}
-
-    repos = list(api.list_models(author=username, token=token))
-    repos += list(api.list_datasets(author=username, token=token))
-    repos += list(api.list_spaces(author=username, token=token))
-
-    total_repos = len(repos)
-    print(f"Total repositories to scan: {total_repos}")
-
-    for i, repo in enumerate(repos, start=1):
-        repo_id = repo.id if hasattr(repo, 'id') else repo.modelId  # Handle different repo types
-        repo_type = "dataset" if isinstance(repo, DatasetInfo) else "model"
-        if isinstance(repo, SpaceInfo):
-            repo_type = "space"
-
-        # Skip already scanned repositories in resume mode
-        if resume and repo_id in repo_hashes:
-            sys.stdout.write(f"\rSkipping ({i}/{total_repos}) - {repo_id} (already scanned)     ")
-            sys.stdout.flush()
-            continue
-
-        # Progress update in the same line
-        sys.stdout.write(f"\rScanning ({i}/{total_repos}) - {repo_id} [{repo_type}]...     ")
-        sys.stdout.flush()
-
-        try:
-            file_metadata = api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token, files_metadata=True)
-            repo_data = {}
-            for entry in file_metadata.siblings:
-                if hasattr(entry, "lfs") and isinstance(entry.lfs, dict) and "sha256" in entry.lfs:
-                    repo_data[entry.rfilename] = entry.lfs["sha256"]
-
-            # Save repo data only after a successful scan
-            repo_hashes[repo_id] = repo_data
-
-            # Save JSON incrementally after each repo
-            with open(output_json, "w") as f:
-                json.dump(repo_hashes, f, indent=4)
-
-        except Exception as e:
-            print(f"\nError fetching metadata for {repo_id}: {e}")
-
-    print("\nHashes synchronized successfully!")
 
 
 def scan_and_report(local_folder, hash_json, only_missing):
@@ -125,12 +68,10 @@ def scan_and_report(local_folder, hash_json, only_missing):
                          h == file_hash]
 
             if locations:
-                print(f"{file}: {file_path} - Found in Hugging Face: {locations}")
+                if not only_missing:
+                    print(f"{file}: {file_path} - Found in Hugging Face: {locations[0]}")
             else:
-                if only_missing:
-                    print(f"{RED}{file}: {file_path} - NOT found in Hugging Face!{RESET}")
-                else:
-                    print(f"{file}: {file_path} - {RED}NOT found in Hugging Face!{RESET}")
+                print(f"{RED}{file}: {file_path} - NOT found in Hugging Face!{RESET}")
 
 
 def scan_and_make_download_script(local_folder, hash_json, remove_found):
@@ -142,8 +83,17 @@ def scan_and_make_download_script(local_folder, hash_json, remove_found):
 
     for root, _, files in os.walk(local_folder):
         script_path = os.path.join(root, "download_all.sh")
+        existing_lines = set()
+
+        # Load existing script if present
+        if os.path.exists(script_path):
+            with open(script_path, "r") as script:
+                existing_lines = set(script.readlines())
+
         with open(script_path, "w") as script:
-            script.write("#!/bin/bash\n")
+            script.write("#!/usr/bin/env bash\n")
+            script.write("HF_TOKEN=`cat ~/stable-diffusion-webui/models/Stable-diffusion/hf_token`\n")
+            script.write("HEADER=\"Authorization: Bearer ${HF_TOKEN}\"\n")
 
             for file in files:
                 if not any(file.endswith(ext) for ext in tracked_extensions):
@@ -155,14 +105,18 @@ def scan_and_make_download_script(local_folder, hash_json, remove_found):
                              repo_hashes.items() for filename, h in files.items() if h == file_hash]
 
                 if locations:
-                    for url in locations:
-                        script.write(f"wget -c {url} -P {root}\n")
+                    download_line = f"wget --header=\"$HEADER\" \"{locations[0]}\"\n"
+
+                    if download_line not in existing_lines:
+                        script.write(download_line)
+                        existing_lines.add(download_line)
+
                     if remove_found:
                         os.remove(file_path)
                         print(f"Removed: {file_path}")
 
         os.chmod(script_path, 0o755)
-        print(f"Download script created: {script_path}")
+        print(f"Download script updated: {script_path}")
 
 
 if __name__ == "__main__":
