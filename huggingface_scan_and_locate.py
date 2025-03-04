@@ -52,8 +52,9 @@ def sync_with_huggingface(username, token, output_json):
             # Fetch repository information with file metadata
             file_metadata = api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token, files_metadata=True)
             for entry in file_metadata.siblings:
-                if "lfs" in entry and "sha256" in entry["lfs"]:
-                    repo_hashes[repo_id][entry.rfilename] = entry["lfs"]["sha256"]
+                if hasattr(entry, "lfs") and isinstance(entry.lfs, dict) and "sha256" in entry.lfs:
+                    repo_hashes[repo_id][entry.rfilename] = entry.lfs["sha256"]
+
         except Exception as e:
             print(f"Error fetching metadata for {repo_id}: {e}")
 
