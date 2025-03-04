@@ -18,24 +18,34 @@ def load_config(config_path):
 
 
 def compute_file_hash(file_path):
-    """Compute the SHA256 hash of a file, using a cached hash file if available."""
+    """Compute the SHA256 hash of a file efficiently by checking metadata first."""
     hash_file = file_path + ".hash256"
 
-    # If hash file exists, read the hash from it
-    if os.path.exists(hash_file):
-        with open(hash_file, "r") as f:
-            return f.read().strip()
+    file_mtime = os.path.getmtime(file_path)  # When file was last modified
 
-    # Compute the hash if not cached
+    # If cached hash file exists, check if the file was modified
+    if os.path.exists(hash_file):
+        hash_mtime = os.path.getmtime(hash_file)  # When hash was last generated
+
+        # If file hasn't changed, return the cached hash
+        if file_mtime <= hash_mtime:
+            with open(hash_file, "r") as f:
+                return f.read().strip()
+
+    # Compute hash since file was modified
     hasher = hashlib.sha256()
     with open(file_path, "rb") as f:
         while chunk := f.read(8192):
             hasher.update(chunk)
+
     file_hash = hasher.hexdigest()
 
-    # Save the hash to a file for future use
+    # Save the hash with an updated timestamp
     with open(hash_file, "w") as f:
         f.write(file_hash)
+
+    # Update hash file timestamp to match the scanned file
+    os.utime(hash_file, (file_mtime, file_mtime))
 
     return file_hash
 
