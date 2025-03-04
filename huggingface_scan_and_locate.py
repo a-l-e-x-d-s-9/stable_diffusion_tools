@@ -32,9 +32,9 @@ def sync_with_huggingface(username, token, output_json):
     repo_hashes = {}
 
     # Fetch repositories of all types for the specified user
-    repos = api.list_models(author=username, token=token)
-    repos += api.list_datasets(author=username, token=token)
-    repos += api.list_spaces(author=username, token=token)
+    repos = list(api.list_models(author=username, token=token))
+    repos += list(api.list_datasets(author=username, token=token))
+    repos += list(api.list_spaces(author=username, token=token))
 
     for repo in repos:
         repo_id = repo.modelId  # For models
