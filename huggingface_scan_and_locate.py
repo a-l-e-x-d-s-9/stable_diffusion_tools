@@ -49,6 +49,62 @@ def compute_file_hash(file_path):
 
     return file_hash
 
+def sync_with_huggingface(username, token, output_json, resume=False):
+    """Fetch all file hashes from Hugging Face repositories and save incrementally."""
+    api = HfApi()
+    repo_hashes = {}
+
+    # Load existing progress if resume is enabled
+    if resume:
+        if os.path.exists(output_json):
+            with open(output_json, "r") as f:
+                repo_hashes = json.load(f)
+        else:
+            print(f"Resume mode enabled, but {output_json} does not exist. Starting fresh.")
+            repo_hashes = {}
+
+    repos = list(api.list_models(author=username, token=token))
+    repos += list(api.list_datasets(author=username, token=token))
+    repos += list(api.list_spaces(author=username, token=token))
+
+    total_repos = len(repos)
+    print(f"Total repositories to scan: {total_repos}")
+
+    for i, repo in enumerate(repos, start=1):
+        repo_id = repo.id if hasattr(repo, 'id') else repo.modelId  # Handle different repo types
+        repo_type = "dataset" if isinstance(repo, DatasetInfo) else "model"
+        if isinstance(repo, SpaceInfo):
+            repo_type = "space"
+
+        # Skip already scanned repositories in resume mode
+        if resume and repo_id in repo_hashes:
+            sys.stdout.write(f"\rSkipping ({i}/{total_repos}) - {repo_id} (already scanned)     ")
+            sys.stdout.flush()
+            continue
+
+        # Progress update in the same line
+        sys.stdout.write(f"\rScanning ({i}/{total_repos}) - {repo_id} [{repo_type}]...     ")
+        sys.stdout.flush()
+
+        try:
+            file_metadata = api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token, files_metadata=True)
+            repo_data = {}
+            for entry in file_metadata.siblings:
+                if hasattr(entry, "lfs") and isinstance(entry.lfs, dict) and "sha256" in entry.lfs:
+                    repo_data[entry.rfilename] = entry.lfs["sha256"]
+
+            # Save repo data only after a successful scan
+            repo_hashes[repo_id] = repo_data
+
+            # Save JSON incrementally after each repo
+            with open(output_json, "w") as f:
+                json.dump(repo_hashes, f, indent=4)
+
+        except Exception as e:
+            print(f"\nError fetching metadata for {repo_id}: {e}")
+
+    print("\nHashes synchronized successfully!")
+
 
 def scan_and_report(local_folder, hash_json, only_missing):
     """Scan local files and report their presence on Hugging Face."""
