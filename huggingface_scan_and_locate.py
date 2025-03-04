@@ -3,7 +3,7 @@ import hashlib
 import json
 import os
 import sys
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, DatasetInfo, SpaceInfo
 
 # ANSI color codes for terminal output
 RED = "\033[91m"
@@ -26,43 +26,57 @@ def compute_file_hash(file_path):
     return hasher.hexdigest()
 
 
-def sync_with_huggingface(username, token, output_json):
-    """Synchronize local data with Hugging Face repositories by fetching file hashes."""
+def sync_with_huggingface(username, token, output_json, resume=False):
+    """Fetch all file hashes from Hugging Face repositories and save incrementally."""
+
     api = HfApi()
     repo_hashes = {}
 
-    # Fetch repositories of all types for the specified user
+    # Load existing progress if resume is enabled
+    if resume and os.path.exists(output_json):
+        with open(output_json, "r") as f:
+            repo_hashes = json.load(f)
+
     repos = list(api.list_models(author=username, token=token))
     repos += list(api.list_datasets(author=username, token=token))
     repos += list(api.list_spaces(author=username, token=token))
 
-    for repo in repos:
-        repo_id = repo.modelId  # For models
-        repo_type = "model"
-        if hasattr(repo, 'datasetId'):
-            repo_id = repo.datasetId  # For datasets
-            repo_type = "dataset"
-        elif hasattr(repo, 'spaceId'):
-            repo_id = repo.spaceId  # For spaces
+    total_repos = len(repos)
+    print(f"Total repositories to scan: {total_repos}")
+
+    for i, repo in enumerate(repos, start=1):
+        repo_id = repo.id if hasattr(repo, 'id') else repo.modelId  # Handle different repo types
+        repo_type = "dataset" if isinstance(repo, DatasetInfo) else "model"
+        if isinstance(repo, SpaceInfo):
             repo_type = "space"
 
-        repo_hashes[repo_id] = {}
+        # Skip already scanned repositories in resume mode
+        if resume and repo_id in repo_hashes:
+            print(f"Skipping ({i}/{total_repos}) - {repo_id} (already scanned)")
+            continue
+
+        # Progress update in the same line
+        sys.stdout.write(f"\rScanning ({i}/{total_repos}) - {repo_id} [{repo_type}]...     ")
+        sys.stdout.flush()
+
+        # Ensure repo is initialized in case of an error
+        if repo_id not in repo_hashes:
+            repo_hashes[repo_id] = {}
 
         try:
-            # Fetch repository information with file metadata
             file_metadata = api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token, files_metadata=True)
             for entry in file_metadata.siblings:
                 if hasattr(entry, "lfs") and isinstance(entry.lfs, dict) and "sha256" in entry.lfs:
                     repo_hashes[repo_id][entry.rfilename] = entry.lfs["sha256"]
 
+            # Save JSON incrementally after each repo
+            with open(output_json, "w") as f:
+                json.dump(repo_hashes, f, indent=4)
+
         except Exception as e:
-            print(f"Error fetching metadata for {repo_id}: {e}")
+            print(f"\nError fetching metadata for {repo_id}: {e}")
 
-    # Save the collected hashes to a JSON file
-    with open(output_json, "w") as f:
-        json.dump(repo_hashes, f, indent=4)
-
-    print("Hashes synchronized successfully!")
+    print("\nHashes synchronized successfully!")
 
 
 def scan_and_report(local_folder, hash_json, only_missing):
@@ -132,13 +146,14 @@ if __name__ == "__main__":
     parser.add_argument("--only-missing", action="store_true", help="Only show missing files in scan report")
     parser.add_argument("--remove-found", action="store_true",
                         help="Remove files found in Hugging Face after generating download script")
+    parser.add_argument("--resume", action="store_true", help="Resume scanning from the last checkpoint")
 
     args = parser.parse_args()
 
     username, token = load_config(args.config)
 
     if args.mode == "sync":
-        sync_with_huggingface(username, token, args.hash_json)
+        sync_with_huggingface(username, token, args.hash_json, args.resume)
     elif args.mode == "scan_report":
         if not args.local_folder:
             print("--local-folder is required for scan_report mode.")
