@@ -33,9 +33,13 @@ def sync_with_huggingface(username, token, output_json, resume=False):
     repo_hashes = {}
 
     # Load existing progress if resume is enabled
-    if resume and os.path.exists(output_json):
-        with open(output_json, "r") as f:
-            repo_hashes = json.load(f)
+    if resume:
+        if os.path.exists(output_json):
+            with open(output_json, "r") as f:
+                repo_hashes = json.load(f)
+        else:
+            print(f"Resume mode enabled, but {output_json} does not exist. Starting fresh.")
+            repo_hashes = {}
 
     repos = list(api.list_models(author=username, token=token))
     repos += list(api.list_datasets(author=username, token=token))
