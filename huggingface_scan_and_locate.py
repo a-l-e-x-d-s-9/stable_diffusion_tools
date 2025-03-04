@@ -28,7 +28,7 @@ def compute_file_hash(file_path):
 def sync_with_huggingface(username, token, output_json):
     api = HfApi(token=token)
     repo_hashes = {}
-    repos = api.list_repos_objs(username)
+    repos = api.list_repos()
 
     for repo in repos:
         repo_id = repo.id
