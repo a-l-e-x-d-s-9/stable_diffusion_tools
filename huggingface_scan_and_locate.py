@@ -28,22 +28,29 @@ def compute_file_hash(file_path):
 def sync_with_huggingface(username, token, output_json):
     api = HfApi(token=token)
     repo_hashes = {}
-    repos = api.list_repos()
+
+    # Get repositories of all types
+    repos = api.list_models(author=username)
+    repos += api.list_datasets(author=username)
+    repos += api.list_spaces(author=username)
 
     for repo in repos:
-        repo_id = repo.id
+        repo_id = repo.id  # Get repository ID
         repo_hashes[repo_id] = {}
 
         try:
-            file_info = api.repo_info(repo_id, files_metadata=True)
-            for entry in file_info.siblings:
-                if "lfs" in entry and "sha256" in entry["lfs"]:
-                    repo_hashes[repo_id][entry.rfilename] = entry["lfs"]["sha256"]
+            file_info = api.list_repo_files(repo_id=repo_id)  # List files in repo
+            for file in file_info:
+                file_metadata = api.repo_info(repo_id=repo_id, files_metadata=True)
+                for entry in file_metadata.siblings:
+                    if "lfs" in entry and "sha256" in entry["lfs"]:
+                        repo_hashes[repo_id][entry.rfilename] = entry["lfs"]["sha256"]
         except Exception as e:
             print(f"Error fetching metadata for {repo_id}: {e}")
 
     with open(output_json, "w") as f:
         json.dump(repo_hashes, f, indent=4)
+
     print("Hashes synced successfully!")
 
 
