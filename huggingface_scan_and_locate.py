@@ -66,12 +66,16 @@ def sync_with_huggingface(username, token, output_json, resume=False):
 
         try:
             file_metadata = api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token, files_metadata=True)
-            repo_data = {}
+            repo_data = {}  # Stores hashes for this repo
+
             for entry in file_metadata.siblings:
                 if hasattr(entry, "lfs") and isinstance(entry.lfs, dict) and "sha256" in entry.lfs:
                     repo_data[entry.rfilename] = entry.lfs["sha256"]
 
-            # Save JSON incrementally after each repo
+            # Store the scanned repo inside `repo_hashes`
+            repo_hashes[repo_id] = repo_data
+
+            # Save JSON after scanning each repository
             with open(output_json, "w") as f:
                 json.dump(repo_hashes, f, indent=4)
 
