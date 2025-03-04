@@ -18,17 +18,30 @@ def load_config(config_path):
 
 
 def compute_file_hash(file_path):
-    """Compute the SHA256 hash of a file."""
+    """Compute the SHA256 hash of a file, using a cached hash file if available."""
+    hash_file = file_path + ".hash256"
+
+    # If hash file exists, read the hash from it
+    if os.path.exists(hash_file):
+        with open(hash_file, "r") as f:
+            return f.read().strip()
+
+    # Compute the hash if not cached
     hasher = hashlib.sha256()
     with open(file_path, "rb") as f:
         while chunk := f.read(8192):
             hasher.update(chunk)
-    return hasher.hexdigest()
+    file_hash = hasher.hexdigest()
+
+    # Save the hash to a file for future use
+    with open(hash_file, "w") as f:
+        f.write(file_hash)
+
+    return file_hash
 
 
 def sync_with_huggingface(username, token, output_json, resume=False):
     """Fetch all file hashes from Hugging Face repositories and save incrementally."""
-
     api = HfApi()
     repo_hashes = {}
 
@@ -66,16 +79,15 @@ def sync_with_huggingface(username, token, output_json, resume=False):
 
         try:
             file_metadata = api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token, files_metadata=True)
-            repo_data = {}  # Stores hashes for this repo
-
+            repo_data = {}
             for entry in file_metadata.siblings:
                 if hasattr(entry, "lfs") and isinstance(entry.lfs, dict) and "sha256" in entry.lfs:
                     repo_data[entry.rfilename] = entry.lfs["sha256"]
 
-            # Store the scanned repo inside `repo_hashes`
+            # Save repo data only after a successful scan
             repo_hashes[repo_id] = repo_data
 
-            # Save JSON after scanning each repository
+            # Save JSON incrementally after each repo
             with open(output_json, "w") as f:
                 json.dump(repo_hashes, f, indent=4)
 
