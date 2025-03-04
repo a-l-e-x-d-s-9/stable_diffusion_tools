@@ -2,22 +2,23 @@ import argparse
 import hashlib
 import json
 import os
-import subprocess
 import sys
 from huggingface_hub import HfApi
 
-# ANSI color codes
+# ANSI color codes for terminal output
 RED = "\033[91m"
 RESET = "\033[0m"
 
 
 def load_config(config_path):
+    """Load Hugging Face username and token from a JSON configuration file."""
     with open(config_path, "r") as f:
         config = json.load(f)
     return config.get("username"), config.get("token")
 
 
 def compute_file_hash(file_path):
+    """Compute the SHA256 hash of a file."""
     hasher = hashlib.sha256()
     with open(file_path, "rb") as f:
         while chunk := f.read(8192):
@@ -26,35 +27,45 @@ def compute_file_hash(file_path):
 
 
 def sync_with_huggingface(username, token, output_json):
-    api = HfApi(token=token)
+    """Synchronize local data with Hugging Face repositories by fetching file hashes."""
+    api = HfApi()
     repo_hashes = {}
 
-    # Get repositories of all types
-    repos = api.list_models(author=username)
-    repos += api.list_datasets(author=username)
-    repos += api.list_spaces(author=username)
+    # Fetch repositories of all types for the specified user
+    repos = api.list_models(author=username, token=token)
+    repos += api.list_datasets(author=username, token=token)
+    repos += api.list_spaces(author=username, token=token)
 
     for repo in repos:
-        repo_id = repo.id  # Get repository ID
+        repo_id = repo.modelId  # For models
+        repo_type = "model"
+        if hasattr(repo, 'datasetId'):
+            repo_id = repo.datasetId  # For datasets
+            repo_type = "dataset"
+        elif hasattr(repo, 'spaceId'):
+            repo_id = repo.spaceId  # For spaces
+            repo_type = "space"
+
         repo_hashes[repo_id] = {}
 
         try:
-            file_info = api.list_repo_files(repo_id=repo_id)  # List files in repo
-            for file in file_info:
-                file_metadata = api.repo_info(repo_id=repo_id, files_metadata=True)
-                for entry in file_metadata.siblings:
-                    if "lfs" in entry and "sha256" in entry["lfs"]:
-                        repo_hashes[repo_id][entry.rfilename] = entry["lfs"]["sha256"]
+            # Fetch repository information with file metadata
+            file_metadata = api.repo_info(repo_id=repo_id, repo_type=repo_type, token=token, files_metadata=True)
+            for entry in file_metadata.siblings:
+                if "lfs" in entry and "sha256" in entry["lfs"]:
+                    repo_hashes[repo_id][entry.rfilename] = entry["lfs"]["sha256"]
         except Exception as e:
             print(f"Error fetching metadata for {repo_id}: {e}")
 
+    # Save the collected hashes to a JSON file
     with open(output_json, "w") as f:
         json.dump(repo_hashes, f, indent=4)
 
-    print("Hashes synced successfully!")
+    print("Hashes synchronized successfully!")
 
 
 def scan_and_report(local_folder, hash_json, only_missing):
+    """Scan local files and report their presence on Hugging Face."""
     with open(hash_json, "r") as f:
         repo_hashes = json.load(f)
 
@@ -80,6 +91,7 @@ def scan_and_report(local_folder, hash_json, only_missing):
 
 
 def scan_and_make_download_script(local_folder, hash_json, remove_found):
+    """Generate a download script for files found on Hugging Face and optionally remove local copies."""
     with open(hash_json, "r") as f:
         repo_hashes = json.load(f)
 
@@ -136,3 +148,4 @@ if __name__ == "__main__":
             print("--local-folder is required for scan_download mode.")
             sys.exit(1)
         scan_and_make_download_script(args.local_folder, args.hash_json, args.remove_found)
+
