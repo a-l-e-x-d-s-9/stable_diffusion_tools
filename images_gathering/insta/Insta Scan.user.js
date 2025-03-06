@@ -52,11 +52,11 @@
     window.addEventListener('keydown', (event) => {
         // Ctrl + Shift + S to start
         if (event.ctrlKey && event.shiftKey && event.code === 'KeyS') {
-            startSlideshow = true;
+            download_mode(true);
         }
         // Ctrl + Shift + Z to stop
         else if (event.ctrlKey && event.shiftKey && event.code === 'KeyZ') {
-            startSlideshow = false;
+            download_mode(false);
         }
     });
 
@@ -85,6 +85,10 @@
         document.body.removeChild(a);
     }
 
+    function download_mode(is_download) {
+        startSlideshow = is_download;
+    }
+
     function getFileExtension(url) {
         // Split the URL by '.' and take the last element, which should be the file extension
         const splitUrl = url.split('.');
@@ -101,6 +105,16 @@
         GM_setValue('downloadedImages', JSON.stringify(downloadedImages));
     }
 
+    function download_start(){
+        download_mode(true)
+    }
+
+    function download_stop(){
+        download_mode(false)
+    }
+
+    GM_registerMenuCommand('Start Downloading [CTRL+SHIFT+S]', download_start);
+    GM_registerMenuCommand('Stop Downloading [CTRL+SHIFT+Z]', download_stop);
     GM_registerMenuCommand('Clear Image List', clearList);
 
 
