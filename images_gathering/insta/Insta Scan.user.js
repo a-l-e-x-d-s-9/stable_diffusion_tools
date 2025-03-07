@@ -39,11 +39,11 @@
             clickNextPost();
         }
 
-        let maxWait = Date.now() + 10000;
+        let maxWait = Date.now() + 10;
         while (window.location.href === oldURL && Date.now() < maxWait) {
-            await sleep(300);
+            await sleep(10);
         }
-        await sleep(1000);
+        await sleep(10);
     }
 
     async function downloadCurrentImages() {
@@ -60,11 +60,11 @@
                 downloadTextFile(imageName.replace(/\.[^/.]+$/, ".txt"), caption);
 
                 // Show a GM notification
-                GM_notification({
-                    text: caption,
-                    title: "Caption for " + imageName,
-                    timeout: 5000
-                });
+                //GM_notification({
+                //    text: caption,
+                //    title: "Caption for " + imageName,
+                //    timeout: 5000
+                //});
             }
 
             downloadedImages[img.src] = true;
@@ -128,34 +128,35 @@
         return urlParts[urlParts.length - 1].split("?")[0];
     }
 
+    function debugSelector() {
+        let matches = document.querySelectorAll('h1[dir="auto"]');
+        let count = matches.length;
+        let values = Array.from(matches)
+                          .map(el => el.innerText.trim())
+                          .filter(text => text.length > 0);
+
+        GM_notification({
+            text: `Found ${count} matches:\n${values.join("\n")}`,
+            title: "Selector Debug Info",
+            timeout: 5000
+        });
+    }
+
     function extractPostCaption() {
-        let maybeCaptions = document.querySelectorAll('h1[dir="auto"], div[dir="auto"]');
-        let foundCaption = "";
+        //debugSelector();
+        // Try to locate the container that holds the current post
 
-        for (let el of maybeCaptions) {
-            let text = el.innerText.trim();
-            if (
-                text.includes("See translation") ||
-                text.includes("likes") ||
-                text.includes("comment") ||
-                text.includes("More posts from") ||
-                text.includes("No comments yet") ||
-                text.includes("Start the conversation") ||
-                text.length < 10
-            ) {
-                continue;
-            }
+        // Now select only the h1 elements within this container
+        let captionElement = document.querySelector('h1[dir="auto"]');
+        if (!captionElement) return "Caption not found";
 
-            foundCaption = text;
-            let hashtagLinks = el.querySelectorAll('a[href^="/explore/tags/"]');
-            let hashtags = [...hashtagLinks].map(a => a.innerText.trim()).filter(Boolean).join(" ");
-            if (hashtags) {
-                foundCaption += `\n\n${hashtags}`;
-            }
-            break;
+        let caption = captionElement.innerText.trim();
+        let hashtagLinks = captionElement.querySelectorAll('a[href^="/explore/tags/"]');
+        let hashtags = [...hashtagLinks].map(a => a.innerText.trim()).filter(Boolean).join(" ");
+        if (hashtags) {
+            caption += `\n\n${hashtags}`;
         }
-
-        return foundCaption || "Caption not found";
+        return caption;
     }
 
     function downloadTextFile(fileName, content) {
