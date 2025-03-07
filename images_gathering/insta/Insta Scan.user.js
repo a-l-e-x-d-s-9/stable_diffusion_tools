@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Insta Scan
+// @name         Insta Scan with Full Caption
 // @namespace    http://tampermonkey.net/
-// @version      0.1
-// @description  try to take over the world!
+// @version      0.3
+// @description  Downloads Instagram images with their full caption (including hashtags)
 // @author       You
 // @match        https://www.instagram.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=instagram.com
@@ -11,111 +11,179 @@
 // @grant        GM_registerMenuCommand
 // ==/UserScript==
 
-
 (function() {
     'use strict';
 
-    // Load downloaded images list from GM storage
+    /********************************************************
+     *                 Persistent Data & Flags              *
+     ********************************************************/
     let downloadedImages = JSON.parse(GM_getValue('downloadedImages', '{}'));
+    let startSlideshow = false;     // Controls main loop
+    let stopSlideshow = false;      // Flag to break loop
 
+    /********************************************************
+     *                Main Async Slideshow                  *
+     ********************************************************/
+    async function startAsyncSlideshow() {
+        stopSlideshow = false;
+        while (startSlideshow && !stopSlideshow) {
+            // 1) Download images on current slide
+            await downloadCurrentImages();
 
-    let startSlideshow = false;
-
-    const clickNextImage = () => {
-        let images = document.querySelectorAll('img[style="object-fit: cover;"]');
-
-        for(let i = 0; i < images.length; i++) {
-            if(images[i].style.objectFit === 'cover' && !downloadedImages[images[i].src]) {
-                downloadImage(images[i].src);
-                downloadedImages[images[i].src] = true; // Mark image as downloaded
-                // Save downloaded images list to GM storage
-                GM_setValue('downloadedImages', JSON.stringify(downloadedImages));
+            // 2) Click "Next Image" or "Next Post"
+            const nextImageBtn = document.querySelector('button[aria-label="Next"]');
+            if (nextImageBtn) {
+                nextImageBtn.click();
+            } else {
+                clickNextPost();
             }
-        }
 
-        const nextImageBtn = document.querySelector('button[aria-label="Next"]');
-        if(nextImageBtn) {
-            nextImageBtn.click();
-        } else {
-            clickNextPost(); // If no next image button found, go to next post
+            // 3) Wait for the new slide to load
+            await sleep(3000);
         }
     }
 
-    const clickNextPost = () => {
-        //console.log("GO TO NEXT POST")
+    async function downloadCurrentImages() {
+        let images = document.querySelectorAll('img[style="object-fit: cover;"]');
+        for (let img of images) {
+            // If already downloaded, skip
+            if (downloadedImages[img.src]) continue;
+
+            // Ensure image is loaded
+            await waitForImageLoad(img);
+
+            // Download image
+            const imageName = getFileName(img.src);
+            await downloadImage(img.src, imageName);
+
+            // Extract & save caption
+            const caption = extractPostCaption();
+            if (caption) {
+                downloadTextFile(imageName.replace(/\.[^/.]+$/, ".txt"), caption);
+            }
+
+            // Mark image as downloaded
+            downloadedImages[img.src] = true;
+            GM_setValue('downloadedImages', JSON.stringify(downloadedImages));
+        }
+    }
+
+    function clickNextPost() {
         const nextPostSvg = document.querySelector('svg[aria-label="Next"]');
-        if(nextPostSvg && nextPostSvg.parentNode) {
+        if (nextPostSvg && nextPostSvg.parentNode) {
             nextPostSvg.parentNode.click();
         }
     }
 
+    /********************************************************
+     *               Event Handlers & Flow                  *
+     ********************************************************/
     window.addEventListener('keydown', (event) => {
-        // Ctrl + Shift + S to start
         if (event.ctrlKey && event.shiftKey && event.code === 'KeyS') {
-            download_mode(true);
-        }
-        // Ctrl + Shift + Z to stop
-        else if (event.ctrlKey && event.shiftKey && event.code === 'KeyZ') {
-            download_mode(false);
+            // Start slideshow
+            startSlideshow = true;
+            startAsyncSlideshow();
+        } else if (event.ctrlKey && event.shiftKey && event.code === 'KeyZ') {
+            // Stop slideshow
+            startSlideshow = false;
+            stopSlideshow = true;  // break from loop
         }
     });
 
-    setInterval(() => {
-        if (startSlideshow) {
-            clickNextImage();
-        }
-    }, 80);
+    /********************************************************
+     *                 Helper Functions                     *
+     ********************************************************/
+    async function waitForImageLoad(img) {
+        if (img.complete && img.naturalWidth > 0) return;
+        await new Promise(resolve => {
+            img.addEventListener('load', resolve, { once: true });
+        });
+    }
 
-    const downloadImage = async (url, imageName) => {
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function downloadImage(url, imageName) {
         const response = await fetch(url);
         const blob = await response.blob();
         const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
 
+        const a = document.createElement('a');
         a.style.display = 'none';
         a.href = blobUrl;
-
-        let urlParts = url.split("/");
-        let fileName = urlParts[urlParts.length - 1].split("?")[0];
-
-        a.download = imageName || fileName;
-
+        a.download = imageName;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
     }
 
-    function download_mode(is_download) {
-        startSlideshow = is_download;
+    function getFileName(url) {
+        let urlParts = url.split("/");
+        let fileName = urlParts[urlParts.length - 1].split("?")[0];
+        return fileName;
     }
 
-    function getFileExtension(url) {
-        // Split the URL by '.' and take the last element, which should be the file extension
-        const splitUrl = url.split('.');
-        let extension = splitUrl[splitUrl.length - 1];
-        // If the extension includes a '?', remove the '?' and everything after it
-        extension = extension.split('?')[0];
-        // If the extension includes '&', remove the '&' and everything after it
-        extension = extension.split('&')[0];
-        return extension;
+    // Extract the first comment's text + hashtags
+    function extractPostCaption() {
+        // Find all potential caption blocks by dir="auto"
+        let maybeCaptions = document.querySelectorAll('h1[dir="auto"], div[dir="auto"]');
+        let foundCaption = "";
+
+        for (let el of maybeCaptions) {
+            let text = el.innerText.trim();
+            // Filter out known non-caption text
+            if (
+                text.includes("See translation") ||
+                text.includes("likes") ||
+                text.includes("comment") ||
+                text.includes("More posts from") ||
+                text.includes("No comments yet") ||
+                text.includes("Start the conversation") ||
+                text.length < 10
+            ) {
+                continue;
+            }
+
+            // We consider this our main caption
+            foundCaption = text;
+
+            // Also extract hashtags from links inside this element
+            let hashtagLinks = el.querySelectorAll('a[href^="/explore/tags/"]');
+            let hashtags = [...hashtagLinks].map(a => a.innerText.trim()).filter(Boolean).join(" ");
+            if (hashtags) {
+                foundCaption += `\n\n${hashtags}`;
+            }
+            break; // Stop after first valid caption
+        }
+
+        return foundCaption || "Caption not found";
+    }
+
+    function downloadTextFile(fileName, content) {
+        const blob = new Blob([content], { type: "text/plain" });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
     }
 
     function clearList() {
-        downloadedImages = [];
+        downloadedImages = {};
         GM_setValue('downloadedImages', JSON.stringify(downloadedImages));
     }
 
-    function download_start(){
-        download_mode(true)
-    }
-
-    function download_stop(){
-        download_mode(false)
-    }
-
-    GM_registerMenuCommand('Start Downloading [CTRL+SHIFT+S]', download_start);
-    GM_registerMenuCommand('Stop Downloading [CTRL+SHIFT+Z]', download_stop);
+    // Additional GM menu items if needed
+    GM_registerMenuCommand('Start Downloading [CTRL+SHIFT+S]', () => {
+        startSlideshow = true;
+        startAsyncSlideshow();
+    });
+    GM_registerMenuCommand('Stop Downloading [CTRL+SHIFT+Z]', () => {
+        startSlideshow = false;
+        stopSlideshow = true;
+    });
     GM_registerMenuCommand('Clear Image List', clearList);
-
 
 })();
