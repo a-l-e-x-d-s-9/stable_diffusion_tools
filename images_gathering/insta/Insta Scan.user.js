@@ -9,60 +9,64 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_notification
+// @run-at       document-end  // Ensures script runs late enough
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    /********************************************************
-     *                 Persistent Data & Flags              *
-     ********************************************************/
+    // Persistent data
     let downloadedImages = JSON.parse(GM_getValue('downloadedImages', '{}'));
-    let startSlideshow = false;     // Controls main loop
-    let stopSlideshow = false;      // Flag to break loop
+    let startSlideshow = false;
+    let stopSlideshow = false;
 
-    /********************************************************
-     *                Main Async Slideshow                  *
-     ********************************************************/
+    // Main slideshow loop
     async function startAsyncSlideshow() {
         stopSlideshow = false;
         while (startSlideshow && !stopSlideshow) {
-            // 1) Download images on current slide
             await downloadCurrentImages();
-
-            // 2) Click "Next Image" or "Next Post"
-            const nextImageBtn = document.querySelector('button[aria-label="Next"]');
-            if (nextImageBtn) {
-                nextImageBtn.click();
-            } else {
-                clickNextPost();
-            }
-
-            // 3) Wait for the new slide to load
-            await sleep(3000);
+            await goToNextImageOrPost();
         }
+    }
+
+    async function goToNextImageOrPost() {
+        const oldURL = window.location.href;
+        const nextImageBtn = document.querySelector('button[aria-label="Next"]');
+        if (nextImageBtn) {
+            nextImageBtn.click();
+        } else {
+            clickNextPost();
+        }
+
+        let maxWait = Date.now() + 10000;
+        while (window.location.href === oldURL && Date.now() < maxWait) {
+            await sleep(300);
+        }
+        await sleep(1000);
     }
 
     async function downloadCurrentImages() {
         let images = document.querySelectorAll('img[style="object-fit: cover;"]');
         for (let img of images) {
-            // If already downloaded, skip
             if (downloadedImages[img.src]) continue;
-
-            // Ensure image is loaded
             await waitForImageLoad(img);
 
-            // Download image
             const imageName = getFileName(img.src);
             await downloadImage(img.src, imageName);
 
-            // Extract & save caption
             const caption = extractPostCaption();
-            if (caption) {
+            if (caption && caption !== "Caption not found") {
                 downloadTextFile(imageName.replace(/\.[^/.]+$/, ".txt"), caption);
+
+                // Show a GM notification
+                GM_notification({
+                    text: caption,
+                    title: "Caption for " + imageName,
+                    timeout: 5000
+                });
             }
 
-            // Mark image as downloaded
             downloadedImages[img.src] = true;
             GM_setValue('downloadedImages', JSON.stringify(downloadedImages));
         }
@@ -75,24 +79,25 @@
         }
     }
 
-    /********************************************************
-     *               Event Handlers & Flow                  *
-     ********************************************************/
+    // Re-check that we have a single keydown event
+    // and there's no conflicting code
     window.addEventListener('keydown', (event) => {
-        if (event.ctrlKey && event.shiftKey && event.code === 'KeyS') {
-            // Start slideshow
+        // Make sure the site or other scripts haven't captured keys first
+        if (!event.ctrlKey || !event.shiftKey) return;
+
+        // Keys
+        if (event.code === 'KeyS') {
+            // Ctrl+Shift+S => start
             startSlideshow = true;
             startAsyncSlideshow();
-        } else if (event.ctrlKey && event.shiftKey && event.code === 'KeyZ') {
-            // Stop slideshow
+        } else if (event.code === 'KeyZ') {
+            // Ctrl+Shift+Z => stop
             startSlideshow = false;
-            stopSlideshow = true;  // break from loop
+            stopSlideshow = true;
         }
     });
 
-    /********************************************************
-     *                 Helper Functions                     *
-     ********************************************************/
+    // Helper
     async function waitForImageLoad(img) {
         if (img.complete && img.naturalWidth > 0) return;
         await new Promise(resolve => {
@@ -120,19 +125,15 @@
 
     function getFileName(url) {
         let urlParts = url.split("/");
-        let fileName = urlParts[urlParts.length - 1].split("?")[0];
-        return fileName;
+        return urlParts[urlParts.length - 1].split("?")[0];
     }
 
-    // Extract the first comment's text + hashtags
     function extractPostCaption() {
-        // Find all potential caption blocks by dir="auto"
         let maybeCaptions = document.querySelectorAll('h1[dir="auto"], div[dir="auto"]');
         let foundCaption = "";
 
         for (let el of maybeCaptions) {
             let text = el.innerText.trim();
-            // Filter out known non-caption text
             if (
                 text.includes("See translation") ||
                 text.includes("likes") ||
@@ -145,16 +146,13 @@
                 continue;
             }
 
-            // We consider this our main caption
             foundCaption = text;
-
-            // Also extract hashtags from links inside this element
             let hashtagLinks = el.querySelectorAll('a[href^="/explore/tags/"]');
             let hashtags = [...hashtagLinks].map(a => a.innerText.trim()).filter(Boolean).join(" ");
             if (hashtags) {
                 foundCaption += `\n\n${hashtags}`;
             }
-            break; // Stop after first valid caption
+            break;
         }
 
         return foundCaption || "Caption not found";
