@@ -8,7 +8,8 @@ from random import random
 def flip_image(image_path: str, h_flip_chance: float, v_flip_chance: float, make_copy: bool) -> bool:
     was_flipped = False
     try:
-        img = Image.open(open(image_path, 'rb'))
+        img = Image.open(image_path)
+        img.load()
 
         # Flip image horizontally
         if random() < h_flip_chance:
@@ -53,20 +54,17 @@ if __name__ == '__main__':
 
     flipped_counter = 0
     count = 0
-    total = len(os.listdir(folder_path))
+    total = sum(len(files) for _, _, files in os.walk(folder_path))
 
-    for file_name in os.listdir(folder_path):
-        file_path = os.path.join(folder_path, file_name)
-        if os.path.isfile(file_path):
-            count += 1
-            file_is_image = file_name.lower().endswith(('.png', '.jpg', '.jpeg'))
-            if file_is_image:
+    for root, _, files in os.walk(folder_path):
+        for file_name in files:
+            file_path = os.path.join(root, file_name)
+            if file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')):
+                count += 1
                 was_flipped = flip_image(file_path, args.h_flip_chance, args.v_flip_chance, args.make_copy)
-
                 if was_flipped:
                     flipped_counter += 1
-
-                print(f'\rProcessed {count}/{total} images, flipped: {flipped_counter}.', end='', flush=True)
+                print(f'\rProcessed {count} images, flipped: {flipped_counter}.', end='', flush=True)
 
     print('\nDone.')  # Print a message to indicate when all images have been processed.
 
