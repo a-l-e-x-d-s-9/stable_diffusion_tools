@@ -262,18 +262,43 @@ function runScriptIfMatch() {
         /* ------------------------------------------------------------------ */
         /* 7. parse Stable-Diffusion block                                    */
         /* ------------------------------------------------------------------ */
-        function parseSD(txt){
-            const c = txt.replace(/\u0000/g,"");
-            const g = n => new RegExp(`${n}:\\s*([^,]+)`);
-            return {
-                prompt : (c.match(/^(.*?)\s*Negative prompt:/s)||["",""])[1].trim(),
-                neg    : (c.match(/Negative prompt:\s*(.*?)\s*Steps:/s)||["",""])[1].trim(),
-                steps  : (c.match(g("Steps"))||["",""])[1].trim(),
-                cfg    : (c.match(g("CFG scale"))||c.match(g("Guidance scale"))||["",""])[1].trim(),
-                sampler: [ (c.match(g("Sampler"))||["",""])[1].trim(),
-                          (c.match(g("Schedule type"))||["",""])[1].trim()].filter(Boolean).join(" "),
-                seed   : (c.match(g("Seed"))||["",""])[1].trim(),
+        function parseSD(txt) {
+            // normalise NULs and CR/LF
+            const c = txt.replace(/\u0000/g, '').replace(/\r\n/g, '\n');
+
+            // ---- prompt ------------------------------------------------------
+            let prompt = '';
+            const negIdx = c.indexOf('Negative prompt:');
+            const stepIdx = c.indexOf('Steps:');
+
+            if (negIdx !== -1) {
+                prompt = c.slice(0, negIdx).trim();
+            } else if (stepIdx !== -1) {
+                prompt = c.slice(0, stepIdx).trim();         // no negative prompt tag
+            }
+
+            // clean leading commas / stray punctuation
+            prompt = prompt.replace(/^[,\s]+/, '');
+
+            // ---- negative prompt (may be absent) ----------------------------
+            let neg = '';
+            if (negIdx !== -1 && stepIdx !== -1 && stepIdx > negIdx) {
+                neg = c.slice(negIdx + 16, stepIdx).trim();  // 16 = length of 'Negative prompt:'
+            }
+
+            // convenient helper
+            const grab = n => {
+                const m = c.match(new RegExp(`${n}:\\s*([^,\\n]+)`));
+                return m ? m[1].trim() : '';
             };
+
+            // ---- fields ------------------------------------------------------
+            const steps   = grab('Steps');
+            const cfg     = grab('CFG scale') || grab('Guidance scale');
+            const sampler = grab('Sampler');              // ignore Schedule type completely
+            const seed    = grab('Seed');
+
+            return { prompt, neg, steps, cfg, sampler, seed };
         }
 
         /* ------------------------------------------------------------------ */
@@ -310,6 +335,8 @@ function runScriptIfMatch() {
                 console.debug('[Meta-Fill] Sampler committed with Enter:', value);
             }, 120);       // 100–150 ms covers even a slow browser
         }
+
+
 
 
 
