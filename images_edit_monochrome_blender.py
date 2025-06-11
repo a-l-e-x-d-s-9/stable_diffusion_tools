@@ -108,6 +108,7 @@ def apply_blending(image, blend_color, mode, second_color=None, third_color=None
             )
             gradient.paste(blended_color, (0, y, width, y + 1))
         blended = ImageChops.multiply(image.convert("RGB"), gradient)
+
     elif mode == "tri_color":
         if not (second_color and third_color):
             raise ValueError("tri_color mode requires --second_color and --third_color arguments.")
@@ -120,6 +121,10 @@ def apply_blending(image, blend_color, mode, second_color=None, third_color=None
         blended = ImageChops.multiply(shadow_layer, grayscale.convert("RGB"))
         blended = ImageChops.overlay(blended, mid_layer)
         blended = ImageChops.screen(blended, highlight_layer)
+
+    elif mode == "grayscale":
+        blended = image.convert("L").convert("RGB")
+
     else:
         blended = image
 
@@ -188,7 +193,7 @@ def main():
     parser.add_argument("--second_color", help="Optional second color for complex effects")
     parser.add_argument("--third_color", help="Optional third color for tri-color effect")
     parser.add_argument("--blend_mode", default="multiply",
-                        choices=["multiply", "color_burn", "overlay", "color", "hue", "screen", "soft_light", "hard_light", "luminosity", "difference", "light_multiply_screen", "light_soft_overlay", "light_color_screen", "light_lab_soft", "dual_tone", "gradient_light", "tri_color"],
+                        choices=["multiply", "color_burn", "overlay", "color", "hue", "screen", "soft_light", "hard_light", "luminosity", "difference", "light_multiply_screen", "light_soft_overlay", "light_color_screen", "light_lab_soft", "dual_tone", "gradient_light", "tri_color", "grayscale"],
                         help="Blending mode to use")
     parser.add_argument("--preview", action="store_true", help="Preview first three images before processing")
 
