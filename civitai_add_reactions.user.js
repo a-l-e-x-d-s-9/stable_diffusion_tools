@@ -1,7 +1,8 @@
 // ==UserScript==
-// @name         Civitai Emoji – auto-react 2025-04-29
-// @description  Ctrl+Shift+S → hovered post • Ctrl+Shift+A → every gallery inside that post
-// @version      0.6
+// @name         Civitai Emoji – auto-react 2025-06-20
+// @description  Ctrl + Shift + S → add 👍❤️ to every frame in the post under the cursor
+// @icon         https://civitai.com/favicon.ico
+// @version      0.7
 // @author       You
 // @match        https://civitai.com/*
 // ==/UserScript==
@@ -9,99 +10,81 @@
 (() => {
   'use strict';
 
-  /* ── tweakables ────────────────────────────────────────── */
-  const SLIDE_DELAY = 20;          // ms between ➡️ clicks
+  /* ───── config ───── */
+  const SLIDE_DELAY = 20;        // ms between right-arrow clicks
 
-  /* ── helpers ───────────────────────────────────────────── */
+  /* ───── utilities ───── */
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  /** Outer card element = first ancestor that
-      – has a random `id`,  and
-      – owns at least one reaction-button set. */
+  /* “Has reactions” = node contains a button whose visible text is 👍 or ❤️ */
+  const hasReactions = node =>
+    !![...node.querySelectorAll('button')].find(b => /👍|❤️/.test(b.textContent));
+
+  /* find the post card the cursor is in: first ancestor with an id AND reactions */
   function getCard(node) {
-    while (node &&
-           !(node.id && node.querySelector('button[data-button="true"]')))
-      node = node.parentElement;
+    while (node && !(node.id && hasReactions(node))) node = node.parentElement;
     return node;
   }
 
-  /** Gallery root inside a card = ancestor that owns the right-arrow.
-      If the card has only 1 image (no arrow) return the
-      nearest ancestor that contains the reaction strip. */
+  /* gallery root = element that owns ➡️ ; fallback = first ancestor with reactions */
   function getGallery(node, card) {
-    let withButtons = null;
+    let withReacts = null;
     while (node && node !== card.parentElement) {
-      if (!withButtons && node.querySelector('button[data-button="true"]'))
-        withButtons = node;
-      if (node.querySelector('svg.tabler-icon-chevron-right'))
-        return node;                       // multi-image gallery
+      if (!withReacts && hasReactions(node)) withReacts = node;
+      if (node.querySelector('svg.tabler-icon-chevron-right')) return node;
       node = node.parentElement;
     }
-    return withButtons;                    // single-image fallback
+    return withReacts;   // single-image card
   }
 
-  const getNextBtn     = g =>
+  const getNextBtn = g =>
     g?.querySelector('svg.tabler-icon-chevron-right')?.closest('button') || null;
 
-  const slidesInGallery = g => {
+  const slideCount = g => {
     const strip = g?.querySelector('div.flex.w-full.gap-px');
     return strip ? strip.querySelectorAll('button').length || 1 : 1;
   };
 
-  const getReactBtns   = g =>
-    [...g.querySelectorAll('button[data-button="true"]')]
-      .filter(b => /👍|❤️/.test(b.textContent));
+  const getReactionButtons = g =>
+    [...g.querySelectorAll('button')].filter(b => /👍|❤️/.test(b.textContent));
 
-  const isPressed      = b =>
+  const isPressed = b =>
     window.getComputedStyle(b).backgroundColor !== 'rgba(0, 0, 0, 0)';
 
-  /* ── core: react on ONE gallery ───────────────────────── */
+  /* ───── core: react on ONE gallery ───── */
 
-  async function reactOnGallery(gallery) {
-    if (!gallery) return;
+  async function reactOnGallery(g) {
+    if (!g) return;
 
-    const clickReactions = () =>
-      getReactBtns(gallery).forEach(b => { if (!isPressed(b)) b.click(); });
+    const press = () => getReactionButtons(g).forEach(b => { if (!isPressed(b)) b.click(); });
 
-    clickReactions();                              // current frame
+    press();                                           // current frame first
 
-    const nextBtn = getNextBtn(gallery);
-    if (!nextBtn) return;                          // single-image
+    const next = getNextBtn(g);
+    if (!next) return;                                // single-image
 
-    const total = slidesInGallery(gallery);
-    for (let i = 1; i < total; i++) {              // walk rightward
-      nextBtn.click();
+    for (let i = 1; i < slideCount(g); i++) {
+      next.click();
       await sleep(SLIDE_DELAY);
-      clickReactions();
+      press();
     }
   }
 
-  /* ── mouse tracking ──────────────────────────────────── */
+  /* ───── run on hovered post (Ctrl+Shift+S) ───── */
 
-  let mx = 0, my = 0;
-  document.addEventListener('mousemove', e => { mx = e.clientX; my = e.clientY; });
+  let cx = 0, cy = 0;
+  document.addEventListener('mousemove', e => { cx = e.clientX; cy = e.clientY; });
 
-  /* ── hot-key: hovered post (Ctrl+Shift+S) ────────────── */
-
-  async function runHovered() {
-    const elem  = document.elementsFromPoint(mx, my)[0];
-    const card  = getCard(elem);
-    const gal   = getGallery(elem, card);
-    if (!gal) return console.log('Emoji: move cursor over a post first.');
-    await reactOnGallery(gal);
-  }
-
-  /* ── hot-key: all galleries in the same post (Ctrl+Shift+A) ───── */
-
-  async function runAll() {
-    const elem  = document.elementsFromPoint(mx, my)[0];
-    const card  = getCard(elem);
-    if (!card)  return console.log('Emoji: move cursor over a post first.');
+  async function runAllInPost() {
+    const elem = document.elementsFromPoint(cx, cy)[0];
+    const card = getCard(elem);
+    if (!card) return console.log('Emoji: move cursor over a post first.');
 
     const galleries = new Set(
-      [...card.querySelectorAll('button[data-button="true"]')]
-        .map(btn => getGallery(btn, card))
+      [...card.querySelectorAll('button')]
+        .filter(b => /👍|❤️/.test(b.textContent))
+        .map(b => getGallery(b, card))
         .filter(Boolean)
     );
 
@@ -109,16 +92,16 @@
       await reactOnGallery(g);
       await sleep(20);
     }
-    //console.log(`✅ reacted on ${galleries.size} galleries in this post`);
   }
 
-  /* ── key bindings ────────────────────────────────────── */
+  /* ───── hot-key binding ───── */
 
   window.addEventListener('keydown', e => {
-    if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
-    //if (e.key === 'S') { e.preventDefault(); runHovered(); }
-    if (e.key === 'S') { e.preventDefault(); runAll();     }
+    if (e.key === 'S' && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      runAllInPost();
+    }
   });
 
-  //console.log('✅  Civitai Emoji 0.6 – S = single, A = all, delay =', SLIDE_DELAY, 'ms');
+  console.log('✅  Civitai Emoji 0.7 loaded – Ctrl+Shift+S to react');
 })();
