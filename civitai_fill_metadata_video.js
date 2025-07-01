@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Meta-Fill Video
 // @namespace    https://civitai.com/
-// @version      0.5.3
+// @version      0.6.0
 // @icon         https://civitai.com/favicon.ico
 // @description  Drag a PNG / JPEG / WEBP into the “Image details” modal → auto-fill Prompt etc.
 // @match        https://civitai.com/*
@@ -59,13 +59,19 @@ function runScriptIfMatch() {
         /* ------------------------------------------------------------------ */
         const obs = new MutationObserver(muts => {
             for (const n of muts.flatMap(m => [...m.addedNodes])) {
-                const form = n.nodeType === 1 && n.matches("form") ? n : n.querySelector?.("form");
-                if (form && form.closest(".mantine-Modal-modal") && !form.querySelector("#metaDropZone")) {
-                    injectZone(form);
+                // New Mantine modal structure
+                const modal = n.nodeType === 1 && n.matches('section[data-modal-content="true"]')
+                ? n : n.querySelector?.('section[data-modal-content="true"]');
+
+                if (modal) {
+                    const form = modal.querySelector('form');
+                    if (form && !form.querySelector('#metaDropZone')) {
+                        injectZone(form);
+                    }
                 }
             }
         });
-        obs.observe(document.body, { childList:true, subtree:true });
+        obs.observe(document.body, { childList: true, subtree: true });
 
         function injectZone(form){
             const dz = document.createElement("div");
@@ -312,30 +318,50 @@ function runScriptIfMatch() {
         };
 
         function putSelect(selector, value) {
-            const input = document.querySelector(selector);
+            const input   = document.querySelector(selector);
             if (!input) return;
 
-            // 1 — focus & fill
+            /* 0 — already correct? */
+            const hidden = input
+            .closest('[role="combobox"]')
+            ?.querySelector('input[type="hidden"][name="sampler"]');
+            if (hidden && hidden.value === value) return;
+
+            /* 1 — focus & **clear** the field */
             input.focus();
-            setNativeValue(input, value);
+            setNativeValue(input, '');
             input.dispatchEvent(new Event('input', { bubbles: true }));
 
-            // 2 — Arrow-Down to open the list and pre-select first match
+            /* 2 — Arrow-Down opens the menu */
             input.dispatchEvent(new KeyboardEvent('keydown', {
                 key: 'ArrowDown', code: 'ArrowDown', which: 40, keyCode: 40, bubbles: true,
             }));
 
-            // 3 — small pause so Mantine finishes rendering, then Enter to commit
+            /* 3 — type desired sampler text */
             setTimeout(() => {
-                ['keydown', 'keyup'].forEach(evt =>
-                                             input.dispatchEvent(new KeyboardEvent(evt, {
-                    key: 'Enter', code: 'Enter', which: 13, keyCode: 13, bubbles: true,
-                }))
-                                            );
-                console.debug('[Meta-Fill] Sampler committed with Enter:', value);
-            }, 120);       // 100–150 ms covers even a slow browser
-        }
+                setNativeValue(input, value);
+                input.dispatchEvent(new Event('input', { bubbles: true }));
 
+                /* 4 — poll for the option & click it */
+                let tries = 0;
+                const max = 20;              // 20 × 75 ms ≈ 1.5 s
+                const tryClick = () => {
+                    const opts = [...document.querySelectorAll('div[role="option"]')];
+                    const row  = opts.find(o => o.textContent.trim() === value);
+                    if (row) {
+                        ['pointerdown', 'pointerup', 'click'].forEach(evt =>
+                                                                      row.dispatchEvent(new MouseEvent(evt, { bubbles: true }))
+                                                                     );
+                        console.debug('[Meta-Fill] Sampler selected:', value);
+                    } else if (++tries < max) {
+                        setTimeout(tryClick, 75);
+                    } else {
+                        console.warn('[Meta-Fill] Sampler option not found:', value);
+                    }
+                };
+                tryClick();
+            }, 120);                       // let Mantine mount the menu first
+        }
 
 
 
