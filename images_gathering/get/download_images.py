@@ -175,7 +175,28 @@ def download_image(idx, data_for_entry, download_small, download_large_skip, out
                 print(f"Failed to download preview image for {idx}")
 
     if not download_large_skip:
-        data = {'url': quote(original_url, safe='')}
+
+        #### ADDED START - Get image ID
+        response = requests.post(original_url, headers=headers_sdw, data={})  # headers=headers,
+        image_id = ''
+        print("URL accessed:", response.url)
+        # If the POST request is successful, the status code will be 200
+        if response.status_code == 200:
+            print(f'Request was successful for URL {idx}.')
+            rawdata = str(response.content)
+            #print(f'rawdata {rawdata}.')
+
+            matches = re.findall(r"Image ID<!-- -->:</p>([^<]+)</div>", rawdata)
+
+            # If a match was found
+            if matches:
+                image_id = matches[0]
+                print(f'image_id {image_id}.')
+
+            # Need to find: Image ID<!-- -->:</p>TCAB8J</div>
+        #### ADDED END - Get image ID
+
+        data = {'url': quote(original_url, safe=''), 'id': image_id}
 
         attempts_amount = 8
         success = False  # flag to indicate whether the image download was successful
@@ -184,7 +205,7 @@ def download_image(idx, data_for_entry, download_small, download_large_skip, out
             # Send the POST request
             #response = requests.get(headers_dla, headers=headers_sdw, params=data) # headers=headers,
             response = requests.post(url_sdw, headers=headers_sdw, data=data)  # headers=headers,
-
+            print("data:", data)
             print("URL accessed:", response.url)
             # If the POST request is successful, the status code will be 200
             if response.status_code == 200:
@@ -195,7 +216,7 @@ def download_image(idx, data_for_entry, download_small, download_large_skip, out
                     json_response = response.json()
                     # html_content = rawdata.decode('utf-8')
 
-                    #print(f'json_response {json_response}.')
+                    print(f'json_response {json_response}.')
                     page_with_image_url = json_response["result"]
 
                     # Extract the token from the URL fragment
@@ -204,11 +225,20 @@ def download_image(idx, data_for_entry, download_small, download_large_skip, out
                     # Decode the Base64-encoded string
                     decoded_url = base64.b64decode(token).decode('utf-8')
 
-                    #print("Decoded URL:", decoded_url)
+                    print("Decoded URL:", decoded_url)
 
-                    image_file_url = decoded_url#extract_img_url(html_content, "https://downloader.la/")
+                    #image_file_url = decoded_url#extract_img_url(html_content, "https://downloader.la/")
 
-                image_file_url = extract_img_url(rawdata, extract_url_start, r"src=\"images/steptodown([^\"]+)")
+                # Find: https://anky.cloud/22/alamy/images/7xm.xyz812317.jpg
+                #image_file_url = extract_img_url(rawdata, extract_url_start, r"src=\"images/steptodown([^\"]+)")
+
+                json_response = response.json()
+                # html_content = rawdata.decode('utf-8')
+
+                print(f'json_response {json_response}.')
+                image_file_url = json_response["url"]
+
+                print(f'image_file_url {image_file_url}.')
 
                 # Get the filename from the image_file_url
                 file_name = os.path.join(output_dir, os.path.basename(urllib.parse.urlparse(image_file_url).path))
@@ -217,7 +247,10 @@ def download_image(idx, data_for_entry, download_small, download_large_skip, out
                 MAX_FILE_SIZE = 4 * 1024 * 1024  # 4MB in bytes
 
                 for _ in range(attempts_amount):
+                    print("1")
                     image_response = requests.get(image_file_url, stream=True)
+                    print(f'image_response.status_code {image_response.status_code}.')
+
                     if image_response.status_code == 200:
                         # Check if the content length exceeds the limit
                         content_length = int(image_response.headers.get('Content-Length', 0))
@@ -226,6 +259,8 @@ def download_image(idx, data_for_entry, download_small, download_large_skip, out
                             break  # If the file is too large, break out of the loop
 
                         payload_size = len(image_response.content)
+
+                        print(f'payload_size {payload_size}.')
 
                         if payload_size > 0:
                             with open(file_name, 'wb') as file:
@@ -338,7 +373,7 @@ def main():
         extract_url_start = "https://steptodown.com/getty-images-downloader/images/steptodown"
 
     if 'alamy' == download_site:
-        url_sdw = 'https://steptodown.com/alamy-downloader/get.php'
+        url_sdw = 'https://steptodown.com/alamy-downloader/ajax.php'
         headers_sdw['Referer'] = 'https://steptodown.com/alamy-downloader/'
         extract_url_start = "https://steptodown.com/alamy-downloader/images/steptodown"
 
