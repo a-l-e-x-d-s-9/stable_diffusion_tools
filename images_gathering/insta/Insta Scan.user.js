@@ -2,7 +2,7 @@
 // @name         Insta Scan with Full Caption - hires + lazyload-safe (GraphQL+DOM fixed)
 // @namespace    http://tampermonkey.net/
 // @version      1.6.1
-// @description  Grok+GPT 2025.08.18 16:43 Downloads Instagram images with full caption; prefers true hi-res via GraphQL; safe fallback to DOM; robust carousel handling & instant stop
+// @description  Grok+GPT 2025.08.18 18:14 Downloads Instagram images with full caption; prefers true hi-res via GraphQL; safe fallback to DOM; robust carousel handling & instant stop
 // @author       You
 // @match        https://www.instagram.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=instagram.com
@@ -34,6 +34,8 @@
   const MAX_SLIDES_SAFE = 20;         // cap per post to avoid loops
   const WAIT_IMAGE_MS = 2500;         // wait for lazy-loaded image to appear
   const TARGET_SIZE = 1080;           // target hires dimension (square)
+  const MAX_DL_CONCURRENCY = 4;       // parallel downloads for GraphQL path (drop to 3 if your browser prompts)
+
 
   // learned at runtime (sniffer), persisted between runs
   let IG_APP_ID    = GM_getValue("ig_app_id", null);
@@ -577,6 +579,22 @@
     }
   }
 
+  // Concurrency helper
+    async function runPool(items, limit, worker){
+        let i = 0;
+        const n = Math.min(limit, items.length);
+        const runners = Array.from({ length: n }, async () => {
+            for (;;){
+                const idx = i++;
+                if (idx >= items.length) break;
+                try { await worker(items[idx], idx); }
+                catch (e){ console.warn("[InstaScan] worker error", e); }
+            }
+        });
+        await Promise.all(runners);
+    }
+
+
   // ------ Flow ------
   async function processCurrentPost(){
     const myRun = currentRun();
@@ -586,42 +604,47 @@
 
     log("=== PROCESS POST ===", { shortcode, url: location.pathname });
 
-    // Try GraphQL hi-res first
-    if (shortcode && shortcode !== "feed"){
-      const { urls: highResUrls, caption: graphqlCaption } = await getHighResUrls(shortcode);
-      if (highResUrls.length > 0) {
-        log("Using GraphQL high-res URLs", highResUrls.length);
-        let capSaved = false;
-        for (const url of highResUrls){
-          if (stopSlideshow || activeRunId !== myRun) { log("stop requested mid-post"); return; }
-          const kLocal = keyFor(url);
-          const kGlobal = gkey(shortcode, url);
-          if (seenThisPost.has(kLocal)) continue;
-          seenThisPost.add(kLocal);
+      // Try GraphQL hi-res first
+      if (shortcode && shortcode !== "feed") {
+          const { urls: highResUrls, caption: graphqlCaption } = await getHighResUrls(shortcode);
 
-          if (!store[kGlobal]){
-            const name = getFileName(url);
-            log("download", { name, url: (url||"").replace(/^https?:\/\//,"").slice(0,120), key: kLocal });
-            const ok = await downloadFile(url, name);
-            if (ok){
-              if (!capSaved && graphqlCaption && graphqlCaption !== "Caption not found"){
-                const txtName = name.replace(/\.[^/.]+$/, ".txt");
-                downloadTextFile(txtName, graphqlCaption);
-                capSaved = true;
-              }
-              markDownloaded(shortcode, url);
-            } else {
-              console.warn("Download failed:", url);
-            }
-            await sleep(BETWEEN_ACTION_MS);
-          } else {
-            log("Already downloaded globally:", kGlobal);
+          if (highResUrls.length > 0) {
+              log("Using GraphQL high-res URLs", highResUrls.length);
+              let capSaved = false;
+
+              await runPool(highResUrls, MAX_DL_CONCURRENCY, async (url, idx) => {
+                  if (stopSlideshow || activeRunId !== myRun) return;
+
+                  const kLocal = keyFor(url);
+                  const kGlobal = gkey(shortcode, url);
+                  if (seenThisPost.has(kLocal)) return;
+                  seenThisPost.add(kLocal);
+
+                  if (store[kGlobal]) { log("Already downloaded globally:", kGlobal); return; }
+
+                  const name = getFileName(url);
+                  log("download", { name, url: (url||"").replace(/^https?:\/\//,"").slice(0,120), key: kLocal });
+                  const ok = await downloadFile(url, name);
+                  if (ok){
+                      if (!capSaved && graphqlCaption && graphqlCaption !== "Caption not found"){
+                          capSaved = true; // only once
+                          const txtName = name.replace(/\.[^/.]+$/, ".txt");
+                          downloadTextFile(txtName, graphqlCaption);
+                      }
+                      markDownloaded(shortcode, url);
+                  } else {
+                      console.warn("Download failed:", url);
+                  }
+              });
+
+              return; // done with this post
           }
-        }
-        return; // done with this post
+
+          log("GraphQL gave no URLs; fallback to DOM method");
       }
-      log("GraphQL gave no URLs; fallback to DOM method");
-    }
+
+
+
 
     // Fallback to DOM traversal
     for (let step=0; step<MAX_SLIDES_SAFE; step++){
@@ -722,20 +745,25 @@
   }
 
   async function startAsyncSlideshow(){
-    if (activeRunId) { log("already running; ignoring start"); return; }
-    stopSlideshow = false;
-    activeRunId = Date.now();
-    const runId = activeRunId;
-    log("START run", runId);
+      if (activeRunId) { log("already running; ignoring start"); return; }
+      stopSlideshow = false;
+      activeRunId = Date.now();
+      const runId = activeRunId;
+      log("START run", runId);
 
-    while (!stopSlideshow && activeRunId === runId){
-      await processCurrentPost();
-      if (stopSlideshow || activeRunId !== runId) break;
-      await goToNextImageOrPost();
-    }
+      while (!stopSlideshow && activeRunId === runId){
+          try {
+              await processCurrentPost();
+          } catch (e) {
+              console.error("[InstaScan] processCurrentPost failed", e);
+          }
+          if (stopSlideshow || activeRunId !== runId) break;
+          await goToNextImageOrPost();
+      }
 
-    if (activeRunId === runId) activeRunId = 0;
-    log("END run", runId);
+
+      if (activeRunId === runId) activeRunId = 0;
+      log("END run", runId);
   }
 
   function requestStop(){
