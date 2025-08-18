@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta Scan with Full Caption — FAST (hires DOM, minimal changes)
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.41
 // @description  Old fast loop + reliable hi-res picking + robust dedupe + caption
 // @author       You
 // @match        https://www.instagram.com/*
@@ -26,6 +26,9 @@
   let downloadedImages = JSON.parse(GM_getValue('downloadedImages', '{}'));
   let startSlideshow = false;
   let stopSlideshow  = false;
+
+    // NEW: persist caption .txt toggle (default ON)
+    let SAVE_CAPTIONS = GM_getValue('save_captions', true);
 
   // ====== FAST HELPERS (tiny + reliable) ======
   const log = (...a)=> DEBUG && console.log('[InstaFast]', ...a);
@@ -422,7 +425,7 @@
             const imageName = getFileName(url);
             await downloadImage(url, imageName);
 
-            if (!captionSaved && caption && caption !== "Caption not found"){
+            if (SAVE_CAPTIONS && !captionSaved && caption && caption !== "Caption not found"){
                 captionSaved = true;
                 downloadTextFile(imageName.replace(/\.[^/.]+$/, ".txt"), caption);
             }
@@ -486,5 +489,19 @@
     startSlideshow = false;
     stopSlideshow = true;
   });
-  GM_registerMenuCommand('Clear Image List', clearList);
+  GM_registerMenuCommand(
+      `Toggle caption .txt downloads (currently ${SAVE_CAPTIONS ? 'ON' : 'OFF'})`,
+      () => {
+          SAVE_CAPTIONS = !SAVE_CAPTIONS;
+          GM_setValue('save_captions', SAVE_CAPTIONS);
+          GM_notification({
+              text: `Caption .txt downloads ${SAVE_CAPTIONS ? 'ENABLED' : 'DISABLED'} at start(refresh to update)`,
+              title: 'InstaFast',
+              timeout: 2500
+          });
+      }
+  );
+
+    GM_registerMenuCommand('Clear Image List', clearList);
+
 })();
