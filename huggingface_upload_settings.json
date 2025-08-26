@@ -1,9 +1,53 @@
 {
-    "repository": "user/Repository",
-    "path_in_repository": "path/in/repository",
-    "token_file": "path/to/token_file",
-    "files": [
-        "/path/to/base/directory/subdirectory1/file1.txt",
-        "/path/to/base/directory/subdirectory2/file2.txt"
-    ]
+  "repository": "owner/main-repo",
+  "token_file": "/home/alex/.hf_token_main",
+  "threads": 4,
+  "remove": false,
+  "dry_run": true,
+  "default_exists": "skip",
+  "default_commit_message": "batch upload {timestamp}",
+  "use_checksum": false,
+  "progress_colour": "yellow",
+  "max_inflight_per_repo": 2,
+  "sources": [
+    {
+      "source_base": "/data/setA",
+      "path_in_repository": "SetA",
+      "include": [
+        "**/*.safetensors",
+        "**/*.json",
+        "**/*.txt"
+      ],
+      "exclude": [
+        "**/*.tmp",
+        "**/~*"
+      ],
+      "preserve_tree": true,
+      "destinations": [
+        {
+          "repository": "owner/main-repo"
+        },
+        {
+          "repository": "partnerOrg/mirror-repo",
+          "token_file": "/home/alex/.hf_token_partner",
+          "create_pr": false,
+          "exists": "skip",
+          "commit_message": "mirror: {timestamp}"
+        }
+      ]
+    },
+    {
+      "source_base": "/data/setB",
+      "path_in_repository": "FlatB",
+      "include": [
+        "/absolute/path/to/some/file.safetensors",
+        "**/*.safetensors"
+      ],
+      "exclude": [],
+      "preserve_tree": false,
+      "destinations": {
+        "repository": "owner/main-repo"
+      }
+    }
+  ]
 }
