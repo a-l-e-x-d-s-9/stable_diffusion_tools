@@ -371,27 +371,28 @@ def write_to_png(target: Path, meta: dict, debug: bool = False) -> None:
 
 
 def write_to_jpg(target: Path, meta: Dict[str, str], debug: bool = False) -> None:
-    if piexif is None:
-        raise RuntimeError("piexif is required for writing JPEG EXIF. pip install piexif")
-
-    im = Image.open(target)
+    import piexif
+    exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
     try:
-        exif_dict = piexif.load(im.info.get("exif", b""))
+        # load existing EXIF if present
+        exif_dict = piexif.load(str(target))
     except Exception:
-        exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
+        pass
 
     if "parameters" in meta:
         s = _normalize_to_str(meta["parameters"]) or ""
         exif_dict.setdefault("Exif", {})[piexif.ExifIFD.UserComment] = _encode_user_comment(s)
-        if debug:
-            print(f"[debug] JPEG:{target.name} wrote EXIF UserComment length={len(s)}")
 
     if "Software" in meta:
         sw = _normalize_to_str(meta["Software"]) or ""
         exif_dict.setdefault("0th", {})[piexif.ImageIFD.Software] = sw.encode("utf-8", "ignore")
 
     exif_bytes = piexif.dump(exif_dict)
-    im.save(target, exif=exif_bytes, quality="keep")
+    # Insert EXIF without recompressing image data
+    piexif.insert(exif_bytes, str(target))
+    if debug:
+        print(f"[debug] JPEG:{target.name} EXIF inserted (no re-encode)")
+
 
 
 def copy_metadata(src: Path, dst: Path, debug: bool = False) -> None:
