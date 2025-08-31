@@ -1,14 +1,13 @@
 import argparse
 import os
 import sys
-from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
+from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QPushButton, QSpinBox, QFrame, QTextEdit,
                              QScrollArea, QMessageBox, QSizePolicy, QAbstractItemView, QListView,
                              QStyledItemDelegate, QCheckBox)
-from PyQt5.QtGui import QPixmap, QColor, QPalette, QImage, QTextCharFormat, QTextCursor, QDrag
-from PyQt5.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, QRect
-from PyQt5.QtWidgets import QMainWindow, QAction, QMenu, QMenuBar, QDialog
-from PyQt5.QtWidgets import QListWidget, QListWidgetItem
+from PyQt6.QtGui import QPixmap, QColor, QPalette, QAction, QImage, QTextCharFormat, QTextCursor, QDrag
+from PyQt6.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, QRect
+from PyQt6.QtWidgets import QMainWindow, QMenu, QMenuBar, QDialog, QListWidget, QListWidgetItem
 from PIL import Image, UnidentifiedImageError, ImageOps
 import piexif
 import json
@@ -33,17 +32,17 @@ class ItemDelegate(QStyledItemDelegate):
 class CustomListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
-        self.setDefaultDropAction(Qt.MoveAction)
-        self.setDragDropMode(QAbstractItemView.InternalMove)
-        self.setViewMode(QListView.IconMode)
-        self.setResizeMode(QListView.Adjust)
-        self.setFlow(QListView.LeftToRight)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setViewMode(QListView.ViewMode.IconMode)
+        self.setResizeMode(QListView.ResizeMode.Adjust)
+        self.setFlow(QListView.Flow.LeftToRight)
         self.setWrapping(True)
-        self.setSizePolicy(QSizePolicy.MinimumExpanding , QSizePolicy.MinimumExpanding)
+        self.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.MinimumExpanding)
         #self.setFixedSize(400, 300)
         #self.setLayoutMode(QListView.Flow)
         self.setStyleSheet("""
@@ -66,7 +65,7 @@ class CustomListWidget(QListWidget):
         self.spacing = 7
         self.setSpacing(self.spacing)  # Added padding between labels
         self.setItemDelegate(ItemDelegate(self))
-        self.setLayoutMode(QListView.SinglePass)  # Update layout mode to fix drag issue
+        self.setLayoutMode(QListView.LayoutMode.SinglePass)  # Update layout mode to fix drag issue
 
         self.changed_callback = None
         self.tags_counter = 0
@@ -160,7 +159,7 @@ class CustomListWidget(QListWidget):
 
 
     def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             item = self.itemAt(event.pos())
             if item:
                 self.editItem(item)
@@ -170,7 +169,7 @@ class CustomListWidget(QListWidget):
     def mousePressEvent(self, event):
         changed = False
 
-        if event.button() == Qt.MiddleButton: # Item delete
+        if event.button() == Qt.MouseButton.MiddleButton: # Item delete
             item = self.itemAt(event.pos())
             if item:
                 row = self.row(item)
@@ -180,15 +179,15 @@ class CustomListWidget(QListWidget):
 
             changed = True
 
-        elif event.button() == Qt.RightButton: # Add new at end
+        elif event.button() == Qt.MouseButton.RightButton: # Add new at end
             item = QListWidgetItem(f"Edit me #{self.tags_counter:03d}")
             self.tags_counter += 1
-            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             self.addItem(item)
             self.tag_states[self.row(item)] = False
             changed = True
 
-        elif event.button() == Qt.LeftButton: # Toggle enabled
+        elif event.button() == Qt.MouseButton.LeftButton: # Toggle enabled
             item = self.itemAt(event.pos())
             if item:
                 row = self.row(item)
@@ -200,11 +199,10 @@ class CustomListWidget(QListWidget):
             if self.changed_callback:
                 self.changed_callback()
 
-
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event):
-        if event.key() in [Qt.Key_Backspace, Qt.Key_Delete]:
+        if event.key() in [Qt.Key.Key_Backspace, Qt.Key.Key_Delete]:
             for item in self.selectedItems():
                 row = self.row(item)
                 self.takeItem(row)
@@ -220,7 +218,7 @@ class CustomListWidget(QListWidget):
         drag = QDrag(self)
         mimeData = self.mimeData(self.selectedItems())
         drag.setMimeData(mimeData)
-        result = drag.exec_(supportedActions)
+        result = drag.exec(supportedActions)
 
     def get_labels(self):
         labels = []
@@ -235,7 +233,7 @@ class CustomListWidget(QListWidget):
         self.tag_states.clear()
         for i, (label, enabled) in enumerate(labels):
             item = QListWidgetItem(label)
-            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             self.addItem(item)
             self.tag_states[i] = enabled
 
@@ -264,17 +262,17 @@ class ImageLabel(QLabel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.path = None
-        self.setFrameShape(QFrame.Panel)
+        self.setFrameShape(QFrame.Shape.Panel)
         self.setLineWidth(3)
         self.__set_default_frame_color()
         self.__is_selected = False
         self.__is_highlighted = False
 
     def __palette_roles(self):
-        # Works on PyQt5 now and PyQt6 later
-        Window = getattr(QPalette, "Window", getattr(QPalette.ColorRole, "Window"))
-        WindowText = getattr(QPalette, "WindowText", getattr(QPalette.ColorRole, "WindowText"))
-        return Window, WindowText
+        # Works on PyQt6 now and PyQt6 later
+        window = getattr(QPalette, "Window", getattr(QPalette.ColorRole, "Window"))
+        window_text = getattr(QPalette, "WindowText", getattr(QPalette.ColorRole, "WindowText"))
+        return window, window_text
 
     def __set_default_frame_color(self):
         palette = self.palette()
@@ -322,10 +320,10 @@ class ImageLabel(QLabel):
 
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self.parent().parent().parent().parent().on_image_clicked(self)
 
-        if event.button() == Qt.RightButton:
+        if event.button() == Qt.MouseButton.RightButton:
             # Right button was pressed, copy image to clipboard
             clipboard = QApplication.clipboard()
             pixmap = self.pixmap()
@@ -378,7 +376,7 @@ class ImageDropWidget(QWidget):
         # Grid layout
         self.grid_layout = QGridLayout()
         self.grid_layout.setSpacing(self.grid_spacing)
-        self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
         # Grid Widget
         self.grid_widget = QWidget()
@@ -389,14 +387,14 @@ class ImageDropWidget(QWidget):
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setWidget(self.grid_widget)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         self.main_layout.addWidget(self.scroll_area, stretch=10)
 
         # Bottom layout
         self.bottom_layout = QHBoxLayout()
-        self.bottom_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.bottom_layout.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         self.main_layout.addLayout(self.bottom_layout)
 
         # Add caption label
@@ -422,9 +420,8 @@ class ImageDropWidget(QWidget):
 
         # Bottom layout for Labels
         self.bottom_layout_labels = QHBoxLayout()
-        self.bottom_layout_labels.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.bottom_layout_labels.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         self.main_layout.addLayout(self.bottom_layout_labels)
-
 
         self.labels_labels = QLabel("Labels:", self)
         self.bottom_layout_labels.addWidget(self.labels_labels)
@@ -434,7 +431,7 @@ class ImageDropWidget(QWidget):
         self.bottom_layout_labels.addWidget(self.labels_list_widget)
 
         self.checkboxes_layout = QVBoxLayout()
-        self.checkboxes_layout.setAlignment(Qt.AlignTop | Qt.AlignRight)
+        self.checkboxes_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         self.bottom_layout_labels.addLayout(self.checkboxes_layout)
 
         self.add_labels_checkbox = QCheckBox("Add labels on load", self)
@@ -454,13 +451,13 @@ class ImageDropWidget(QWidget):
 
         # Horizontal line
         self.line = QFrame(self)
-        self.line.setFrameShape(QFrame.HLine)
-        self.line.setFrameShadow(QFrame.Sunken)
+        self.line.setFrameShape(QFrame.Shape.HLine)
+        self.line.setFrameShadow(QFrame.Shadow.Sunken)
         self.main_layout.addWidget(self.line)
 
         # Bottom layout for remove
         self.bottom_layout_remove = QHBoxLayout()
-        self.bottom_layout_remove.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.bottom_layout_remove.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         self.main_layout.addLayout(self.bottom_layout_remove)
 
         # Remove caption label
@@ -479,13 +476,13 @@ class ImageDropWidget(QWidget):
 
         # Horizontal line
         self.line = QFrame(self)
-        self.line.setFrameShape(QFrame.HLine)
-        self.line.setFrameShadow(QFrame.Sunken)
+        self.line.setFrameShape(QFrame.Shape.HLine)
+        self.line.setFrameShadow(QFrame.Shadow.Sunken)
         self.main_layout.addWidget(self.line)
 
         # Bottom layout for search and replace
         self.search_and_replace_layout = QHBoxLayout()
-        self.search_and_replace_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.search_and_replace_layout.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         self.main_layout.addLayout(self.search_and_replace_layout)
 
         # Search field label
@@ -522,13 +519,13 @@ class ImageDropWidget(QWidget):
 
         # Horizontal line
         self.line = QFrame(self)
-        self.line.setFrameShape(QFrame.HLine)
-        self.line.setFrameShadow(QFrame.Sunken)
+        self.line.setFrameShape(QFrame.Shape.HLine)
+        self.line.setFrameShadow(QFrame.Shadow.Sunken)
         self.main_layout.addWidget(self.line)
 
         # Captions layout
         self.captions_layout = QHBoxLayout()
-        self.captions_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.captions_layout.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         self.main_layout.addLayout(self.captions_layout)
 
         # Add captions text input/output
@@ -538,7 +535,7 @@ class ImageDropWidget(QWidget):
 
         self.captions_io = QTextEdit(self)
         self.captions_io.setPlaceholderText("Select image to edit captions")
-        self.captions_io.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.captions_io.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.captions_io.textChanged.connect(self.adjust_text_height)
         self.captions_layout.addWidget(self.captions_io)
 
@@ -553,7 +550,7 @@ class ImageDropWidget(QWidget):
 
         # Search layout
         self.search_layout = QHBoxLayout()
-        self.search_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.search_layout.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         self.main_layout.addLayout(self.search_layout)
 
         # Add search label
@@ -578,7 +575,7 @@ class ImageDropWidget(QWidget):
         # Search in all caption, indicate with yellow grid
         # Search all layout
         self.search_all_layout = QHBoxLayout()
-        self.search_all_layout.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
+        self.search_all_layout.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         self.main_layout.addLayout(self.search_all_layout)
 
         # Add search all label
@@ -601,13 +598,13 @@ class ImageDropWidget(QWidget):
 
         # Horizontal line
         self.line = QFrame(self)
-        self.line.setFrameShape(QFrame.HLine)
-        self.line.setFrameShadow(QFrame.Sunken)
+        self.line.setFrameShape(QFrame.Shape.HLine)
+        self.line.setFrameShadow(QFrame.Shadow.Sunken)
         self.main_layout.addWidget(self.line)
 
         # Clear Images
         self.clear_button = QPushButton("Clear Images", self)
-        self.clear_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.clear_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.clear_button.setStyleSheet("QPushButton { color: red; }")
         self.clear_button.setStyleSheet("QPushButton { background-color: red; }")
         self.main_layout.addWidget(self.clear_button)
@@ -622,10 +619,10 @@ class ImageDropWidget(QWidget):
 
         # Preview label
         self.preview_label = QLabel(self)
-        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setMinimumSize(int(self.min_width // 3), int(self.min_height - 20))
-        self.preview_label.setFrameShape(QFrame.Box)
-        self.preview_label.setFrameShadow(QFrame.Sunken)
+        self.preview_label.setFrameShape(QFrame.Shape.Box)
+        self.preview_label.setFrameShadow(QFrame.Shadow.Sunken)
         self.preview_label.setStyleSheet("background-color: #ffffff;")
         self.preview_layout.addWidget(self.preview_label, stretch=2)
 
@@ -758,18 +755,18 @@ class ImageDropWidget(QWidget):
             print(f"Loading file '{filepath}' error: {e}.")
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_A:  # 'a' key for left
+        if event.key() == Qt.Key.Key_A:  # 'a' key for left
             self.navigate_to_previous_image()
-        elif event.key() == Qt.Key_D:  # 'd' key for right
+        elif event.key() == Qt.Key.Key_D:  # 'd' key for right
             self.navigate_to_next_image()
-        elif event.key() == Qt.Key_W:  # 'w' key for up
+        elif event.key() == Qt.Key.Key_W:  # 'w' key for up
             self.navigate_to_previous_row_image()
-        elif event.key() == Qt.Key_S:  # 's' key for down
+        elif event.key() == Qt.Key.Key_S:  # 's' key for down
             self.navigate_to_next_row_image()
-        elif event.key() in {Qt.Key_Backspace, Qt.Key_Delete}:
+        elif event.key() in {Qt.Key.Key_Backspace, Qt.Key.Key_Delete}:
             if self.current_label is not None:
                 self.remove_item(self.current_label)
-        elif event.key() == Qt.Key_F:
+        elif event.key() == Qt.Key.Key_F:
             self.flip_current_image()
 
 
@@ -793,7 +790,7 @@ class ImageDropWidget(QWidget):
                 pixmap = QPixmap(self.current_label.path)
 
                 # Scale the image to the appropriate size for the grid
-                pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height, aspectRatioMode=Qt.KeepAspectRatio)
+                pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height, aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio)
 
                 # Update the label's pixmap and refresh the label
                 self.current_label.setPixmap(pixmap)
@@ -864,11 +861,11 @@ class ImageDropWidget(QWidget):
             #         pixmap = image_basic.load_image_with_exif(path)
             #
             #         # Check and flip the QPixmap image if it's not already flipped
-            #         if pixmap.transformed(QTransform().scale(-1, 1), Qt.SmoothTransformation) == pixmap:
-            #             pixmap = pixmap.transformed(QTransform().scale(-1, 1), Qt.SmoothTransformation)
+            #         if pixmap.transformed(QTransform().scale(-1, 1), Qt.TransformationMode.SmoothTransformation) == pixmap:
+            #             pixmap = pixmap.transformed(QTransform().scale(-1, 1), Qt.TransformationMode.SmoothTransformation)
             #
             #         pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
-            #                                aspectRatioMode=Qt.KeepAspectRatio)
+            #                                aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio)
             #         label = ImageLabel(self)
             #         label.path = path
             #         label.setPixmap(pixmap)
@@ -915,7 +912,7 @@ class ImageDropWidget(QWidget):
             if self.is_supported_image_format(path):
                 pixmap = image_basic.load_image_with_exif(path)
                 pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
-                                       aspectRatioMode=Qt.KeepAspectRatio)
+                                       aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio)
                 label = ImageLabel(self)
                 label.path = path
                 label.setPixmap(pixmap)
@@ -1094,7 +1091,7 @@ class ImageDropWidget(QWidget):
             close_button = label.findChild(QPushButton)
             close_button.move(QPoint(0, 0))
 
-        self.grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
     def minimumSizeHint(self):
         """Override minimumSizeHint to return a minimum size of 800x400 pixels."""
@@ -1174,15 +1171,15 @@ class ImageDropWidget(QWidget):
             new_width = int(new_height * image_aspect_ratio)
 
         return pixmap.scaled(new_width, new_height,
-                             aspectRatioMode=Qt.KeepAspectRatio,
-                             transformMode=Qt.SmoothTransformation)
+                             aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio,
+                             transformMode=Qt.TransformationMode.SmoothTransformation)
 
     def update_preview_with_image_resize(self, label):
         pixmap = image_basic.load_image_with_exif(label.path)
 
-        # pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio,
-        #                                            transformMode=Qt.SmoothTransformation)
-        # pixmap = pixmap.scaledToHeight(self.preview_label.height(), Qt.SmoothTransformation)
+        # pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio,
+        #                                            transformMode=Qt.TransformationMode.SmoothTransformation)
+        # pixmap = pixmap.scaledToHeight(self.preview_label.height(), Qt.TransformationMode.SmoothTransformation)
         self.last_preview = label
 
         pixmap = self.update_preview_image_size(pixmap)
@@ -1191,9 +1188,9 @@ class ImageDropWidget(QWidget):
 
     def update_preview_simple(self):
         if (None != self.last_preview) and (None != self.last_preview.pixmap()):
-            pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.KeepAspectRatio,
-                                                       transformMode=Qt.SmoothTransformation)
-            # pixmap = pixmap.scaledToHeight(int(self.preview_label.height()), Qt.SmoothTransformation)
+            pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio,
+                                                       transformMode=Qt.TransformationMode.SmoothTransformation)
+            # pixmap = pixmap.scaledToHeight(int(self.preview_label.height()), Qt.TransformationMode.SmoothTransformation)
 
             pixmap = self.update_preview_image_size(pixmap)
 
@@ -1216,12 +1213,12 @@ class ImageDropWidget(QWidget):
         if self.current_label is not None and self.captions_io.property("text_modified"):
             reply = QMessageBox.question(
                 self, "Save changes", "Do you want to save changes to the current caption?",
-                QMessageBox.Save | QMessageBox.Ignore | QMessageBox.Cancel
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Ignore | QMessageBox.StandardButton.Cancel
             )
 
-            if reply == QMessageBox.Save:
+            if reply == QMessageBox.StandardButton.Save:
                 self.save_captions()
-            elif reply == QMessageBox.Cancel:
+            elif reply == QMessageBox.StandardButton.Cancel:
                 return
 
         self.current_label = label
@@ -1284,7 +1281,7 @@ class ImageDropWidget(QWidget):
 
         # Clear existing formatting
         cursor = self.captions_io.textCursor()
-        cursor.select(QTextCursor.Document)
+        cursor.select(QTextCursor.SelectionType.Document)
         cursor.setCharFormat(QTextCharFormat())
         cursor.clearSelection()
         self.captions_io.setTextCursor(cursor)
@@ -1315,7 +1312,7 @@ class ImageDropWidget(QWidget):
 
             # Highlight the match
             cursor.setPosition(start)
-            cursor.setPosition(end, QTextCursor.KeepAnchor)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
             cursor.setCharFormat(highlight_format)
 
             # Look for the next match
@@ -1395,7 +1392,7 @@ class image_basic():
         if image.mode != "RGBA":
             image = image.convert("RGBA")
         data = image.tobytes("raw", "RGBA")
-        qimage = QImage(data, image.size[0], image.size[1], QImage.Format_RGBA8888)
+        qimage = QImage(data, image.size[0], image.size[1], QImage.Format.Format_RGBA8888)
         return QPixmap.fromImage(qimage)
 
 
@@ -1420,7 +1417,7 @@ class MainWindow(QMainWindow):
 
     def open_list_input_dialog(self):
         self.input_dialog = ListInputDialog(self)
-        self.input_dialog.exec_()
+        self.input_dialog.exec()
 
     def process_list_input(self, text):
         lines = text.split("\n")
@@ -1464,4 +1461,4 @@ if __name__ == '__main__':
     main_window = MainWindow()
     main_window.load_args(args)
     main_window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())

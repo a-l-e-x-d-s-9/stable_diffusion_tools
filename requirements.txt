@@ -13,8 +13,8 @@ piexif
 Pillow
 plotly
 psutil
-PyQt5
-PyQt5_sip
+PyQt6
+PyQt6_sip
 Requests
 scikit-image
 tiktoken
