@@ -2,18 +2,19 @@ import argparse
 import os
 import sys
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
-                             QLineEdit, QPushButton, QSpinBox, QGraphicsDropShadowEffect, QFrame, QTextEdit,
-                             QScrollArea, QMessageBox, QSizePolicy, QAbstractItemView, QListView, QAbstractScrollArea,
+                             QLineEdit, QPushButton, QSpinBox, QFrame, QTextEdit,
+                             QScrollArea, QMessageBox, QSizePolicy, QAbstractItemView, QListView,
                              QStyledItemDelegate, QCheckBox)
-from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette, QTransform, QImage, QTextCharFormat, QTextCursor, QDrag, \
-    QBrush
+from PyQt5.QtGui import QPixmap, QColor, QPalette, QImage, QTextCharFormat, QTextCursor, QDrag
 from PyQt5.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, QRect
 from PyQt5.QtWidgets import QMainWindow, QAction, QMenu, QMenuBar, QDialog
 from PyQt5.QtWidgets import QListWidget, QListWidgetItem
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError, ImageOps
 import piexif
 import json
 import re
+
+DEBUG = False
 
 class ItemDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
@@ -39,8 +40,6 @@ class CustomListWidget(QListWidget):
         self.setDefaultDropAction(Qt.MoveAction)
         self.setDragDropMode(QAbstractItemView.InternalMove)
         self.setViewMode(QListView.IconMode)
-        self.setFlow(QListView.LeftToRight)
-        self.setWrapping(True)
         self.setResizeMode(QListView.Adjust)
         self.setFlow(QListView.LeftToRight)
         self.setWrapping(True)
@@ -69,15 +68,16 @@ class CustomListWidget(QListWidget):
         self.setItemDelegate(ItemDelegate(self))
         self.setLayoutMode(QListView.SinglePass)  # Update layout mode to fix drag issue
 
-    def calculateHeight(self):
-        return # self.setMinimumHeight(self.sizeHintForRow(0) * self.count())
+        self.changed_callback = None
+        self.tags_counter = 0
+
 
     def changed_add_callback(self, changed_callback_new):
-        print("changed")
+        if DEBUG:
+            print("changed")
         self.changed_callback = changed_callback_new
 
-    changed_callback = None
-    tags_counter = 0
+
 
     def dropEvent(self, event):
         if event.source() == self:
@@ -109,7 +109,6 @@ class CustomListWidget(QListWidget):
             tag_states = {i: state for i, state in enumerate(self.tag_states.values())}
             self.tag_states = tag_states
 
-            self.calculateHeight()
 
         # super().dropEvent(event)
         self.clearSelection()  # Clear selection after drag and drop
@@ -200,7 +199,7 @@ class CustomListWidget(QListWidget):
         if changed:
             if self.changed_callback:
                 self.changed_callback()
-            self.calculateHeight()
+
 
         super().mousePressEvent(event)
 
@@ -221,7 +220,7 @@ class CustomListWidget(QListWidget):
         drag = QDrag(self)
         mimeData = self.mimeData(self.selectedItems())
         drag.setMimeData(mimeData)
-        result = drag.exec_(supportedActions, Qt.MoveAction)
+        result = drag.exec_(supportedActions)
 
     def get_labels(self):
         labels = []
@@ -237,7 +236,6 @@ class CustomListWidget(QListWidget):
         for i, (label, enabled) in enumerate(labels):
             item = QListWidgetItem(label)
             item.setFlags(item.flags() | Qt.ItemIsEditable)
-            item.setData(Qt.UserRole, QPalette())
             self.addItem(item)
             self.tag_states[i] = enabled
 
@@ -272,22 +270,30 @@ class ImageLabel(QLabel):
         self.__is_selected = False
         self.__is_highlighted = False
 
+    def __palette_roles(self):
+        # Works on PyQt5 now and PyQt6 later
+        Window = getattr(QPalette, "Window", getattr(QPalette.ColorRole, "Window"))
+        WindowText = getattr(QPalette, "WindowText", getattr(QPalette.ColorRole, "WindowText"))
+        return Window, WindowText
+
     def __set_default_frame_color(self):
-        # Set the default frame color to the background color
         palette = self.palette()
-        palette.setColor(QPalette.WindowText, palette.color(QPalette.Background))
+        window, window_text = self.__palette_roles()
+        palette.setColor(window_text, palette.color(window))
         self.setPalette(palette)
 
     def __set_selected_frame_color(self):
         # Set the frame color to red
         palette = self.palette()
-        palette.setColor(QPalette.WindowText, QColor(Qt.red))
+        _, window_text = self.__palette_roles()
+        palette.setColor(window_text, QColor("red"))
         self.setPalette(palette)
 
     def __set_highlighted_frame_color(self):
         # Set the frame color to yellow
         palette = self.palette()
-        palette.setColor(QPalette.WindowText, QColor(Qt.yellow))
+        _, window_text = self.__palette_roles()
+        palette.setColor(window_text, QColor("yellow"))
         self.setPalette(palette)
 
     def set_selected(self, is_selected):
@@ -652,11 +658,13 @@ class ImageDropWidget(QWidget):
 
     change_counter = 0
     def labels_changed_callback(self):
-        print(f"labels_changed_callback, {self.change_counter}")
+        if DEBUG:
+            print(f"labels_changed_callback, {self.change_counter}")
         self.change_counter += 1
 
         if self.sync_labels_checkbox.isChecked():
-            print("sync_labels_checkbox_changed")
+            if DEBUG:
+                print("sync_labels_checkbox_changed")
             self.sync_labels_on_change()
 
         else:
@@ -673,7 +681,8 @@ class ImageDropWidget(QWidget):
         disabled_tags = []
 
         for (label, status) in label_and_state:
-            print(f"{label}, {status}")
+            if DEBUG:
+                print(f"{label}, {status}")
             tags = self.caption_to_tag_list(label)
 
             is_add = (False == only_changes) or \
@@ -708,7 +717,7 @@ class ImageDropWidget(QWidget):
         self.args = args
         self.load_settings(self.args.configurations_file)
 
-    def clossing_app(self):
+    def closing_app(self):
         self.save_settings(self.args.configurations_file)
 
     def save_settings(self, filepath):
@@ -763,7 +772,6 @@ class ImageDropWidget(QWidget):
         elif event.key() == Qt.Key_F:
             self.flip_current_image()
 
-    import piexif
 
     def flip_current_image(self):
         if self.current_label is not None:
@@ -884,7 +892,8 @@ class ImageDropWidget(QWidget):
 
 
     def dropEvent(self, event):
-        print(f"dropEvent, urls len: {len(event.mimeData().urls())}")
+        if DEBUG:
+            print(f"dropEvent, urls len: {len(event.mimeData().urls())}")
         for url in event.mimeData().urls():
             path = url.toLocalFile()
 
@@ -997,7 +1006,8 @@ class ImageDropWidget(QWidget):
         is_re = self.search_and_replace_use_re.isChecked()
 
         # Add your search and replace logic here
-        print(f"search_and_replace, search: \"{search_text}\", replace: \"{replace_text}\".")
+        if DEBUG:
+            print(f"search_and_replace, search: \"{search_text}\", replace: \"{replace_text}\".")
         for label in self.images:
             path = label.path
             self.search_and_replace_in_path(is_search_all_text, is_re, search_text, search_tags, replace_text, replace_tags, path)
@@ -1137,7 +1147,7 @@ class ImageDropWidget(QWidget):
         self.last_preview = None
         self.preview_label.setPixmap(QPixmap())
 
-    def  reserved_for_preview_size(self) -> QPoint:
+    def reserved_for_preview_size(self) -> QPoint:
         window_size = self.size()
         return QPoint(int(window_size.width() // 3), int(window_size.height() - 20))
 
@@ -1163,7 +1173,9 @@ class ImageDropWidget(QWidget):
             new_height = reserved_for_preview.y()
             new_width = int(new_height * image_aspect_ratio)
 
-        return pixmap.scaledToHeight(int(new_height), Qt.SmoothTransformation)  # self.preview_label.height()
+        return pixmap.scaled(new_width, new_height,
+                             aspectRatioMode=Qt.KeepAspectRatio,
+                             transformMode=Qt.SmoothTransformation)
 
     def update_preview_with_image_resize(self, label):
         pixmap = image_basic.load_image_with_exif(label.path)
@@ -1359,77 +1371,33 @@ class ImageDropWidget(QWidget):
 
     def search_for_all_captions(self):
         found_images = []
-        search_re = QRegularExpression(self.search_for_all_captions())
-
-        for image, caption in self.image_captions.items():
-            match = search_re.match(caption)
-            if match.hasMatch():
-                found_images.append(image)
-
+        search_text = self.search_all_input.text()
+        regex = QRegularExpression(search_text)
+        if (not search_text) or (not regex.isValid()):
+            return found_images
+        for image_path, caption in self.image_captions.items():
+            if regex.match(caption).hasMatch():
+                found_images.append(image_path)
         return found_images
 
 class image_basic():
 
     skip_rotation = False
-    def load_image_with_exif(path):
 
-        skip_rotation = False
+    @staticmethod
+    def load_image_with_exif(path):
         try:
-            # Open the image file with PIL and get the EXIF data
             image = Image.open(path)
+            image = ImageOps.exif_transpose(image)  # auto-fixes orientation
         except (FileNotFoundError, UnidentifiedImageError):
             print(f"Failed to open the image file at {path}.")
             return QPixmap()
-
-        exif = image._getexif()
-        if not exif:
-            #print(f"No EXIF data found for the image at {path}.")
-            # You could return a default QPixmap here if you want
-            #return QPixmap()
-            skip_rotation = True
-
-        if False == skip_rotation:
-            # Get the orientation tag (if it exists)
-            orientation = exif.get(0x0112)
-
-            # Rotate or flip the image based on the orientation
-            try:
-                if orientation == 2:
-                    # Flipped horizontally
-                    image = image.transpose(Image.FLIP_LEFT_RIGHT)
-                elif orientation == 3:
-                    # Rotated 180 degrees
-                    image = image.rotate(180)
-                elif orientation == 4:
-                    # Flipped vertically
-                    image = image.transpose(Image.FLIP_TOP_BOTTOM)
-                elif orientation == 5:
-                    # Flipped along the left-top to right-bottom axis
-                    image = image.transpose(Image.FLIP_LEFT_RIGHT).rotate(270)
-                elif orientation == 6:
-                    # Rotated 90 degrees
-                    image = image.rotate(270)
-                elif orientation == 7:
-                    # Flipped along the left-bottom to right-top axis
-                    image = image.transpose(Image.FLIP_LEFT_RIGHT).rotate(90)
-                elif orientation == 8:
-                    # Rotated 270 degrees
-                    image = image.rotate(90)
-            except ValueError:
-                #print(f"Invalid EXIF orientation value {orientation} for the image at {path}.")
-                # You could return a default QPixmap here if you want
-                #return QPixmap()
-                skip_rotation = True
-
-        if image.mode != 'RGBA':
-            image = image.convert('RGBA')
-
-        # Convert the PIL image to QPixmap
+        if image.mode != "RGBA":
+            image = image.convert("RGBA")
         data = image.tobytes("raw", "RGBA")
         qimage = QImage(data, image.size[0], image.size[1], QImage.Format_RGBA8888)
-        pixmap = QPixmap.fromImage(qimage)
+        return QPixmap.fromImage(qimage)
 
-        return pixmap
 
 class MainWindow(QMainWindow):
     def __init__(self, parent=None):
@@ -1465,7 +1433,7 @@ class MainWindow(QMainWindow):
                     # Check if there is a corresponding image file
                     dir_path, file_name = os.path.split(path)
                     base_name, _ = os.path.splitext(file_name)
-                    for img_ext in self.supported_formats_list:
+                    for img_ext in self.image_drop_widget.supported_formats_list:
                         img_path = os.path.join(dir_path, base_name + '.' + img_ext)
                         if os.path.isfile(img_path):
                             paths.append(img_path)
@@ -1482,7 +1450,7 @@ class MainWindow(QMainWindow):
         self.image_drop_widget.load_args(args)
 
     def closeEvent(self, event):
-        self.image_drop_widget.clossing_app()
+        self.image_drop_widget.closing_app()
         event.accept()  # let the window close
 
 if __name__ == '__main__':
