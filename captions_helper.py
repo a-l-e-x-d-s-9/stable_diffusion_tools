@@ -55,6 +55,17 @@ class CustomListWidget(QListWidget):
             color: yellow;
         }
         """)
+        self.spacing = 4
+        self.setSpacing(self.spacing)
+
+        # constrain height to about one row
+        row_h = self.fontMetrics().height() + 10  # text height + padding
+        self.setMaximumHeight(2 * row_h + self.spacing * 3 + 2)
+
+        # scrollbars if overflow
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
         self.setToolTip("Left click to toggle enable/disable.\n"
                         "Middle click to delete.\n"
                         "Right click to add new.\n"
@@ -62,7 +73,7 @@ class CustomListWidget(QListWidget):
         self.tag_states = {}
 
         self.itemChanged.connect(self.handleItemChanged)
-        self.spacing = 7
+        self.spacing = 3
         self.setSpacing(self.spacing)  # Added padding between labels
         self.setItemDelegate(ItemDelegate(self))
         self.setLayoutMode(QListView.LayoutMode.SinglePass)  # Update layout mode to fix drag issue
@@ -378,7 +389,6 @@ class ImageDropWidget(QWidget):
         # Grid Widget
         self.grid_widget = QWidget()
         self.grid_widget.setLayout(self.grid_layout)
-        self.grid_widget.setStyleSheet("background-color: #dddddd;")  # Set the background color of the grid
 
         # Scroll Area
         self.scroll_area = QScrollArea(self)
@@ -620,7 +630,6 @@ class ImageDropWidget(QWidget):
         self.preview_label.setMinimumSize(int(self.min_width // 3), int(self.min_height - 20))
         self.preview_label.setFrameShape(QFrame.Shape.Box)
         self.preview_label.setFrameShadow(QFrame.Shadow.Sunken)
-        self.preview_label.setStyleSheet("background-color: #ffffff;")
         self.preview_layout.addWidget(self.preview_label, stretch=2)
 
         self.images = []
