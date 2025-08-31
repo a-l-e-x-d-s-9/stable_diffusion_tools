@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLa
                              QScrollArea, QMessageBox, QSizePolicy, QAbstractItemView, QListView,
                              QStyledItemDelegate, QCheckBox)
 from PyQt6.QtGui import QPixmap, QColor, QPalette, QAction, QImage, QTextCharFormat, QTextCursor, QDrag
-from PyQt6.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, QRect
+from PyQt6.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, pyqtSignal
 from PyQt6.QtWidgets import QMainWindow, QMenu, QMenuBar, QDialog, QListWidget, QListWidgetItem
 from PIL import Image, UnidentifiedImageError, ImageOps
 import piexif
@@ -18,10 +18,10 @@ DEBUG = False
 class ItemDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.parent = parent
+        self.owner = parent
 
     def paint(self, painter, option, index):
-        enabled = self.parent.tag_states.get(index.row(), False)  # Return False if key does not exist
+        enabled = self.owner.tag_states.get(index.row(), False)  # Return False if key does not exist
         if enabled:
             painter.fillRect(option.rect, QColor('lime'))
         else:
@@ -83,12 +83,13 @@ class CustomListWidget(QListWidget):
             # Get the original source index and item
             source_item = self.currentItem()
             source_index = self.row(source_item)
-            source_status = self.tag_states[source_index]
+            source_status = self.tag_states.get(source_index, False)
 
             # Calculate the target index
             pos = event.pos()
             target_index = self.drop_on(pos)
-            print(f"Target Index: {target_index}")  # Debugging print statement
+            if DEBUG:
+                print(f"Target Index: {target_index}")  # Debugging print statement
 
             # Handle the items
             self.blockSignals(True)
@@ -253,12 +254,12 @@ class ListInputDialog(QDialog):
         self.add_button.clicked.connect(self.on_add_button_clicked)
 
     def on_add_button_clicked(self):
-        text = self.text_box.toPlainText()
-        self.parent().process_list_input(text)
-        self.close()
+        self.parent().process_list_input(self.text_box.toPlainText())
+        self.accept()
 
 
 class ImageLabel(QLabel):
+    clicked = pyqtSignal(object)
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.path = None
@@ -321,15 +322,11 @@ class ImageLabel(QLabel):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.parent().parent().parent().parent().on_image_clicked(self)
-
-        if event.button() == Qt.MouseButton.RightButton:
-            # Right button was pressed, copy image to clipboard
+            self.clicked.emit(self)
+        elif event.button() == Qt.MouseButton.RightButton:
             clipboard = QApplication.clipboard()
-            pixmap = self.pixmap()
-            if pixmap:
-                clipboard.setPixmap(pixmap)
-
+            if self.pixmap():
+                clipboard.setPixmap(self.pixmap())
         super().mousePressEvent(event)
 
 
@@ -349,7 +346,7 @@ class ImageDropWidget(QWidget):
     def __init__(self, args, parent=None):
         super().__init__(parent)
 
-
+        self.change_counter = 0
         self.current_image_index = 0
 
         self.grid_item_width = 128
@@ -653,7 +650,7 @@ class ImageDropWidget(QWidget):
             #print("sync_labels_checkbox_changed")
             self.sync_labels_on_change()
 
-    change_counter = 0
+
     def labels_changed_callback(self):
         if DEBUG:
             print(f"labels_changed_callback, {self.change_counter}")
@@ -907,6 +904,8 @@ class ImageDropWidget(QWidget):
             else:
                 event.ignore()
 
+        event.acceptProposedAction()
+
     def process_image(self, path):
         if path not in [label.path for label in self.images]:
             if self.is_supported_image_format(path):
@@ -914,6 +913,7 @@ class ImageDropWidget(QWidget):
                 pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
                                        aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio)
                 label = ImageLabel(self)
+                label.clicked.connect(self.on_image_clicked)
                 label.path = path
                 label.setPixmap(pixmap)
 
@@ -1187,12 +1187,11 @@ class ImageDropWidget(QWidget):
         self.preview_label.setPixmap(pixmap)
 
     def update_preview_simple(self):
-        if (None != self.last_preview) and (None != self.last_preview.pixmap()):
-            pixmap = self.last_preview.pixmap().scaled(self.preview_label.size(), aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio,
-                                                       transformMode=Qt.TransformationMode.SmoothTransformation)
+        if self.last_preview and self.last_preview.pixmap():
+            pixmap = self.update_preview_image_size(self.last_preview.pixmap())
             # pixmap = pixmap.scaledToHeight(int(self.preview_label.height()), Qt.TransformationMode.SmoothTransformation)
 
-            pixmap = self.update_preview_image_size(pixmap)
+            #pixmap = self.update_preview_image_size(pixmap)
 
             self.preview_label.setPixmap(pixmap)
             self.preview_label.setMinimumSize(int(self.window().size().width() // 3),
@@ -1435,7 +1434,7 @@ class MainWindow(QMainWindow):
                         if os.path.isfile(img_path):
                             paths.append(img_path)
                             break
-                elif self.is_supported_image_format(path):
+                elif self.image_drop_widget.is_supported_image_format(path):
                     paths.append(path)
 
         # Now, `paths` contains all the image paths that need to be added to the preview area
