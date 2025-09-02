@@ -162,8 +162,8 @@
     GM_addStyle(`
       #civitai-emoji-button {
         position: fixed;
-        bottom: 10px;
-        right: 10px;
+        bottom: 12px;
+        right: 100px;
         z-index: 9999;
         background-color: #1a1b1e;
         color: #c1c2c5;
@@ -171,7 +171,7 @@
         border-radius: 50%;
         width: 20px;
         height: 20px;
-        font-size: 20px;
+        font-size: 15px;
         cursor: pointer;
         display: flex;
         align-items: center;
@@ -183,6 +183,14 @@
         transform: scale(1.1);
         background-color: #2c2e33;
       }
+      #civitai-help {
+        position: fixed; right: 76px; bottom: 76px; z-index: 10000;
+        background: #1a1b1e; color: #c1c2c5; border: 1px solid #373a40;
+        border-radius: 12px; padding: 14px 16px; width: 360px;
+        white-space: pre-line; line-height: 1.3;
+        box-shadow: 0 8px 24px rgba(0,0,0,.35);
+      }
+      #civitai-help .close { position: absolute; top: 6px; right: 8px; cursor: pointer; opacity: .7; }
     `);
 
     const button = document.createElement('button');
@@ -190,19 +198,29 @@
     button.textContent = '👍';
     button.title = 'Civitai Auto-React Shortcuts';
 
-    button.addEventListener('click', () => {
-      alert(
-        'Civitai Auto-React Shortcuts:\n\n' +
-        '► React to Hovered Post\n' +
-        '   Add:    Ctrl + Shift + S\n' +
-        '   Remove: Ctrl + Shift + Win + S\n\n' +
-        '► React to All Visible Posts\n' +
-        '   Add:    Ctrl + Shift + A\n' +
-        '   Remove: Ctrl + Shift + Win + A'
-      );
-    });
-
     document.body.appendChild(button);
+
+     function showHelp() {
+        let panel = document.querySelector('#civitai-help');
+        if (panel) { panel.remove(); return; } // toggle
+
+        panel = document.createElement('div');
+        panel.id = 'civitai-help';
+        panel.innerHTML =
+            '<div class="close">✕</div>' +
+            'Civitai Auto-React Shortcuts\n\n' +
+            '► Hovered post\n' +
+            '   Add:    Ctrl + Shift + S\n' +
+            '   Remove: Ctrl + Shift + Win + S\n\n' +
+            '► All visible posts\n' +
+            '   Add:    Ctrl + Shift + A\n' +
+            '   Remove: Ctrl + Shift + Win + A';
+        panel.querySelector('.close').onclick = () => panel.remove();
+        document.body.appendChild(panel);
+    }
+
+    // replace the old alert(...) with:
+    button.addEventListener('click', showHelp);
   }
 
   // Hotkeys:
@@ -226,6 +244,7 @@
     }
   });
 
-  createShortcutButton();
-  console.log('✅ Civitai Auto-React Helper 1.1 loaded (👍❤️).');
+
+    createShortcutButton();
+    console.log('✅ Civitai Auto-React Helper 1.1 loaded (👍❤️).');
 })();
