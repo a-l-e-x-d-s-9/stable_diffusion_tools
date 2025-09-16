@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 from __future__ import annotations
 
 import os
@@ -6,6 +8,8 @@ import json
 import argparse
 import logging
 import hashlib
+import zipfile
+import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import List, Dict, Any, Optional, Tuple, Set
@@ -60,10 +64,50 @@ def to_posix(*parts: str) -> str:
 def now_timestamp() -> str:
     return datetime.utcnow().strftime("%Y%m%d-%H%M%S")
 
+def strip_components(path_str: str, n: int) -> str:
+    """Strip first n components from a posix path string."""
+    parts = [p for p in path_str.split("/") if p not in ("", ".")]
+    if n <= 0 or n >= len(parts):
+        return "/".join(parts) if n <= 0 else parts[-1] if parts else ""
+    return "/".join(parts[n:])
+
 # ------------- Config Normalization -------------
 
 class ConfigError(ValueError):
     pass
+
+DEFAULT_ARCHIVE = {
+    "mode": "none",  # none | zip_per_file | zip_source | zip_folders
+    "name_template": "{source_basename}_{timestamp}.zip",
+    "preserve_tree_inside": True,
+    "strip_components": 0,
+    "remove_archives_after_upload": False,
+    "remove_originals_after_archive": False,
+    "level": 6,
+    # only for zip_folders
+    "folders": [],
+    # add to DEFAULT_ARCHIVE
+    "folders_glob": None,       # e.g. "**/sample"
+    "preserve_repo_tree": False # if True, zip lands under the folder's relative path in the repo
+
+}
+
+def merge_archive(top: Dict[str, Any], src: Optional[Dict[str, Any]], dst: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge archive configs with precedence: dst > src > top > defaults."""
+    out = dict(DEFAULT_ARCHIVE)
+    for d in (top or {}, src or {}, dst or {}):
+        for k, v in d.items():
+            out[k] = v
+    return out
+
+def discover_folders_by_glob(base: Path, glob_pat: str) -> List[str]:
+    import glob as _glob
+    out = []
+    for p in _glob.glob(str(base / glob_pat), recursive=True):
+        pp = Path(p)
+        if pp.is_dir():
+            out.append(str(pp))
+    return out
 
 def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     # Top-level defaults and options
@@ -71,7 +115,7 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     top_repo_type = cfg.get("repo_type", "model")
     top_token_file = cfg.get("token_file")
     top_token_env = cfg.get("token_env")
-    top_source_base = cfg.get("source_base")  # optional new feature
+    top_source_base = cfg.get("source_base")  # optional shared base
     if top_source_base is not None:
         top_source_base = os.path.expanduser(top_source_base)
 
@@ -83,6 +127,8 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     use_checksum = bool(cfg.get("use_checksum", False))
     progress_colour = cfg.get("progress_colour", "yellow")
     max_inflight_per_repo = int(cfg.get("max_inflight_per_repo", 2))
+
+    archive_defaults = cfg.get("archive_defaults", {})
 
     sources = cfg.get("sources")
     if not sources or not isinstance(sources, list):
@@ -127,6 +173,9 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         elif not isinstance(destinations, list):
             raise ConfigError("destinations must be an object or a list")
 
+        # Source-level archive config
+        source_archive = src.get("archive")
+
         norm_dests = []
         for d in destinations:
             repo_id = d.get("repository", top_repo)
@@ -141,6 +190,12 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 raise ConfigError("exists must be one of skip|overwrite|fail")
             commit_message = d.get("commit_message", default_commit_message)
 
+            effective_archive = merge_archive(archive_defaults, source_archive, d.get("archive"))
+            # Validate zip_folders
+            if effective_archive["mode"] == "zip_folders":
+                if not effective_archive.get("folders") and not effective_archive.get("folders_glob"):
+                    raise ConfigError("archive.mode=zip_folders requires 'folders' or 'folders_glob'")
+
             norm_dests.append({
                 "repository": repo_id,
                 "repo_type": repo_type,
@@ -149,6 +204,7 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "create_pr": create_pr,
                 "exists": exists_policy,
                 "commit_message": commit_message,
+                "archive": effective_archive,
             })
 
         normalized_sources.append({
@@ -158,6 +214,7 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "include": include,
             "exclude": exclude,
             "destinations": norm_dests,
+            "source_archive": source_archive or {},
         })
 
     return {
@@ -167,6 +224,7 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "use_checksum": use_checksum,
         "progress_colour": progress_colour,
         "max_inflight_per_repo": max_inflight_per_repo,
+        "archive_defaults": merge_archive({}, cfg.get("archive_defaults", {}), None),
         "sources": normalized_sources,
     }
 
@@ -177,14 +235,12 @@ def resolve_globs(base: str, patterns: List[str]) -> Set[Path]:
     base_path = Path(base)
     for pat in patterns:
         if os.path.isabs(pat):
-            # Absolute pattern: use glob module to be safe across platforms
             import glob as _glob
             for p in _glob.glob(pat, recursive=True):
                 pth = Path(p)
                 if pth.is_file():
                     matches.add(pth.resolve())
             continue
-        # Relative pattern anchored at base
         import glob as _glob
         for p in _glob.glob(str(base_path / pat), recursive=True):
             pth = Path(p)
@@ -220,7 +276,7 @@ def apply_excludes(files: Set[Path], base: str, exclude_patterns: List[str]) -> 
             out.append(f)
     return sorted(set(out))
 
-# ------------- Planning and Existence Checks -------------
+# ------------- Planning with Archive Support -------------
 
 class HFClient:
     def __init__(self, token: str):
@@ -264,6 +320,88 @@ def build_repo_path(path_in_repository: str, preserve_tree: bool, source_base: s
     else:
         return to_posix(path_in_repository, local_file.name)
 
+def render_name_template(tpl: str, file: Optional[Path], source_base: Path, folder_name: Optional[str]) -> str:
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    d = {
+        "timestamp": timestamp,
+        "source_basename": source_base.name,
+        "folder_name": folder_name or "",
+        "filename": file.name if file else "",
+        "stem": file.stem if file else "",
+        "ext": (file.suffix[1:] if file and file.suffix.startswith(".") else (file.suffix if file else "")),
+    }
+    return tpl.format(**d)
+
+def build_zip_per_file(files: List[Path], source_base: Path, tmpdir: Path, name_tpl: str, preserve_tree_inside: bool, strip_n: int, level: int) -> Dict[str, Path]:
+    out: Dict[str, Path] = {}
+    for f in files:
+        name = render_name_template(name_tpl, f, source_base, None)
+        zpath = tmpdir / name
+        # Make sure parent exists
+        zpath.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=level) as zf:
+            if preserve_tree_inside:
+                try:
+                    rel = f.relative_to(source_base)
+                    arc = str(PurePosixPath(str(rel).replace("\\\\", "/").replace("\\", "/")))
+                except Exception:
+                    arc = f.name
+            else:
+                arc = f.name
+            arc = strip_components(arc, strip_n) if strip_n else arc
+            zf.write(f, arcname=arc)
+        out[str(f)] = zpath
+    return out
+
+def build_zip_source(files: List[Path], source_base: Path, tmpdir: Path, name_tpl: str, preserve_tree_inside: bool, strip_n: int, level: int) -> Path:
+    name = render_name_template(name_tpl, None, source_base, None)
+    zpath = tmpdir / name
+    zpath.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=level) as zf:
+        for f in files:
+            if preserve_tree_inside:
+                try:
+                    rel = f.relative_to(source_base)
+                    arc = str(PurePosixPath(str(rel).replace("\\\\", "/").replace("\\", "/")))
+                except Exception:
+                    arc = f.name
+            else:
+                arc = f.name
+            arc = strip_components(arc, strip_n) if strip_n else arc
+            zf.write(f, arcname=arc)
+    return zpath
+
+def build_zip_folders(folders: List[str], source_base: Path, tmpdir: Path, name_tpl: str, preserve_tree_inside: bool, strip_n: int, level: int) -> Dict[str, Path]:
+    out: Dict[str, Path] = {}
+    for folder in folders:
+        folder_path = Path(folder)
+        if not folder_path.is_absolute():
+            folder_path = source_base / folder_path
+        if not folder_path.exists() or not folder_path.is_dir():
+            logging.warning(f"zip_folders: folder not found or not a dir: {folder_path}")
+            continue
+        name = render_name_template(name_tpl, None, source_base, folder_path.name)
+        zpath = tmpdir / name
+        zpath.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=level) as zf:
+            for root, dirs, files in os.walk(folder_path):
+                for fn in files:
+                    fp = Path(root) / fn
+                    if preserve_tree_inside:
+                        try:
+                            rel = fp.relative_to(source_base)
+                            arc = str(PurePosixPath(str(rel).replace("\\\\", "/").replace("\\", "/")))
+                        except Exception:
+                            rel2 = fp.relative_to(folder_path)
+                            arc = str(PurePosixPath(str(rel2).replace("\\\\", "/").replace("\\", "/")))
+                    else:
+                        rel2 = fp.relative_to(folder_path)
+                        arc = str(PurePosixPath(str(rel2).replace("\\\\", "/").replace("\\", "/")))
+                    arc = strip_components(arc, strip_n) if strip_n else arc
+                    zf.write(fp, arcname=arc)
+        out[str(folder_path)] = zpath
+    return out
+
 def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     dry_run = cfg["dry_run"]
     use_checksum = cfg["use_checksum"]
@@ -271,15 +409,22 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
     plans: List[Dict[str, Any]] = []
     delete_tracker: Dict[str, Dict[str, int]] = defaultdict(lambda: {"planned": 0, "succeeded": 0})
 
-    # Per-destination caches
-    dest_cache_key_map: Dict[Tuple[str, str, str], int] = {}  # (repo_id, repo_type, token) -> plan idx
+    dest_cache_key_map: Dict[Tuple[str, str, str], int] = {}
     dest_state_files: Dict[int, Set[str]] = {}
     dest_clients: Dict[int, Optional[HFClient]] = {}
 
     skipped_count = 0
     exists_fail_hits = 0
 
-    for src in cfg["sources"]:
+    # For removing originals after archive: track per-source archive destination success
+    source_archive_plan_counts: Dict[int, int] = defaultdict(int)  # index of source -> number of destinations using archive
+    source_archive_succeed_counts: Dict[int, int] = defaultdict(int)
+    source_originals: Dict[int, List[str]] = {}
+
+    # Temp dir to store archives
+    tmpdir = Path(tempfile.mkdtemp(prefix="_hf_tmp_")) if not dry_run else None
+
+    for s_idx, src in enumerate(cfg["sources"]):
         base = src["source_base"]
         include = src["include"]
         exclude = src["exclude"]
@@ -293,6 +438,68 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
             logging.warning(f"No files matched for base={base}")
             continue
 
+        source_originals[s_idx] = [str(p) for p in files]
+
+        # Prepare archives once per source as needed
+        per_file_zip_cache: Dict[str, Path] = {}
+        source_zip_path: Optional[Path] = None
+        folder_zip_cache: Dict[str, Path] = {}
+
+        # Check if any destination wants archive
+        any_archive_needed = any(d["archive"]["mode"] != "none" for d in src["destinations"])
+
+        if any_archive_needed and not dry_run:
+            # Determine highest level across dests that want archives, and shared settings by merging per dest? We build per mode separately.
+            # Build zip_per_file if any destination requests it
+            if any(d["archive"]["mode"] == "zip_per_file" for d in src["destinations"]):
+                # Use source-level or first dest config for naming/inside structure (per-dest differences in name will be handled via repo_path, not archive filename)
+                # We will use source-level effective defaults from archive_defaults merged with source_archive.
+                # However, zips are stored locally; their names do not need to vary per destination. We pick the source-level(defaults) naming.
+                base_archive = merge_archive(cfg.get("archive_defaults", {}), src.get("source_archive", {}), None)
+                per_file_zip_cache = build_zip_per_file(
+                    files=list(files),
+                    source_base=Path(base),
+                    tmpdir=tmpdir,
+                    name_tpl=base_archive.get("name_template", "{stem}.zip") if base_archive["mode"] == "zip_per_file" else "{stem}.zip",
+                    preserve_tree_inside=base_archive.get("preserve_tree_inside", True),
+                    strip_n=int(base_archive.get("strip_components", 0)),
+                    level=int(base_archive.get("level", 6)),
+                )
+
+            if any(d["archive"]["mode"] == "zip_source" for d in src["destinations"]):
+                base_archive = merge_archive(cfg.get("archive_defaults", {}), src.get("source_archive", {}), None)
+                source_zip_path = build_zip_source(
+                    files=list(files),
+                    source_base=Path(base),
+                    tmpdir=tmpdir,
+                    name_tpl=base_archive.get("name_template", "{source_basename}_{timestamp}.zip"),
+                    preserve_tree_inside=base_archive.get("preserve_tree_inside", True),
+                    strip_n=int(base_archive.get("strip_components", 0)),
+                    level=int(base_archive.get("level", 6)),
+                )
+
+            if any(d["archive"]["mode"] == "zip_folders" for d in src["destinations"]):
+                base_archive = merge_archive(cfg.get("archive_defaults", {}), src.get("source_archive", {}), None)
+
+                # Collect explicit folders + folders_glob hits (once per source)
+                folder_candidates: List[str] = list(base_archive.get("folders", []) or [])
+                if base_archive.get("folders_glob"):
+                    folder_candidates.extend(discover_folders_by_glob(Path(base), base_archive["folders_glob"]))
+
+                # Deduplicate while preserving order
+                seen = set()
+                folder_candidates = [f for f in folder_candidates if not (f in seen or seen.add(f))]
+
+                folder_zip_cache = build_zip_folders(
+                    folders=folder_candidates,
+                    source_base=Path(base),
+                    tmpdir=tmpdir,
+                    name_tpl=base_archive.get("name_template", "{folder_name}.zip"),
+                    preserve_tree_inside=base_archive.get("preserve_tree_inside", True),
+                    strip_n=int(base_archive.get("strip_components", 0)),
+                    level=int(base_archive.get("level", 6)),
+                )
+
         for dest in src["destinations"]:
             repo_id = dest["repository"]
             repo_type = dest.get("repo_type", "model")
@@ -305,6 +512,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
             create_pr = bool(dest["create_pr"])
             exists_policy = dest["exists"]
             commit_message_tpl = dest["commit_message"]
+            arch = dest["archive"]
 
             key = (repo_id, repo_type, token)
             plan_idx = dest_cache_key_map.get(key)
@@ -318,6 +526,8 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                     "files": [],
                     "exists_policy": exists_policy,
                     "preserve_tree": preserve_tree,
+                    "archive_remove_local": bool(arch.get("remove_archives_after_upload", False)),
+                    "source_index": s_idx,  # for originals removal by archive success
                 })
                 plan_idx = len(plans) - 1
                 dest_cache_key_map[key] = plan_idx
@@ -332,37 +542,121 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
             existing_paths = dest_state_files[plan_idx]
             client = dest_clients[plan_idx]
 
-            for f in files:
-                repo_path = build_repo_path(path_prefix, preserve_tree, base, f)
-                size = f.stat().st_size
-                sha256 = None
+            # Select artifacts to upload according to archive mode
+            artifacts: List[Tuple[str, str, int, Optional[str]]] = []  # (local_path, repo_path, size, sha)
+            if arch["mode"] == "none":
+                for f in files:
+                    repo_path = build_repo_path(path_prefix, preserve_tree, base, f)
+                    size = f.stat().st_size if not dry_run else 0
+                    artifacts.append((str(f), repo_path, size, None))
+            elif arch["mode"] == "zip_per_file":
+                # reuse prepared zips if available; in dry_run, synthesize names
+                for f in files:
+                    if not dry_run and per_file_zip_cache:
+                        zpath = per_file_zip_cache[str(f)]
+                        size = zpath.stat().st_size
+                        repo_name = Path(zpath).name  # upload zip name
+                    else:
+                        # dry-run approximations
+                        repo_name = render_name_template(dest["archive"]["name_template"] or "{stem}.zip", f, Path(base), None)
+                        size = f.stat().st_size if f.exists() else 0
+                        zpath = Path("/tmp") / repo_name  # placeholder path, not used
+                    repo_path = to_posix(path_prefix, repo_name)
+                    artifacts.append((str(zpath), repo_path, size, None))
+                source_archive_plan_counts[s_idx] += 1
+            elif arch["mode"] == "zip_source":
+                if not dry_run and source_zip_path is not None:
+                    zpath = source_zip_path
+                    size = zpath.stat().st_size
+                else:
+                    zpath = Path("/tmp") / render_name_template(dest["archive"]["name_template"] or "{source_basename}_{timestamp}.zip", None, Path(base), None)
+                    size = sum(fp.stat().st_size for fp in files if fp.exists())
+                repo_name = Path(zpath).name
+                repo_path = to_posix(path_prefix, repo_name)
+                artifacts.append((str(zpath), repo_path, size, None))
+                source_archive_plan_counts[s_idx] += 1
+            elif arch["mode"] == "zip_folders":
+                # Determine which folders we're zipping for this source
+                # Prefer prebuilt cache in non-dry-run; otherwise compute names for dry-run
+                preserve_repo_tree = bool(arch.get("preserve_repo_tree", False))
+                base_arch = dest["archive"]
 
+                if not dry_run and folder_zip_cache:
+                    for fpath, zpath in folder_zip_cache.items():
+                        zip_name = Path(zpath).name
+                        if preserve_repo_tree:
+                            # put the zip under the folder's relative path
+                            try:
+                                rel_folder = Path(fpath).relative_to(base)  # relative to source_base
+                                repo_path = to_posix(path_prefix, str(PurePosixPath(str(rel_folder))), zip_name)
+                            except Exception:
+                                # fallback to flat
+                                repo_path = to_posix(path_prefix, zip_name)
+                        else:
+                            repo_path = to_posix(path_prefix, zip_name)
+                        artifacts.append((str(zpath), repo_path, zpath.stat().st_size, None))
+                else:
+                    # dry-run estimation: expand folders from folders and folders_glob
+                    folder_candidates: List[str] = list(base_arch.get("folders", []) or [])
+                    if base_arch.get("folders_glob"):
+                        folder_candidates.extend(discover_folders_by_glob(Path(base), base_arch["folders_glob"]))
+                    # dedupe
+                    seen = set()
+                    folder_candidates = [f for f in folder_candidates if not (f in seen or seen.add(f))]
+
+                    for folder in folder_candidates:
+                        folder_p = Path(folder)
+                        zip_name = render_name_template(base_arch.get("name_template", "{folder_name}.zip"),
+                                                        None, Path(base), folder_p.name)
+                        if preserve_repo_tree:
+                            try:
+                                rel_folder = folder_p.relative_to(base)
+                                repo_path = to_posix(path_prefix, str(PurePosixPath(str(rel_folder))), zip_name)
+                            except Exception:
+                                repo_path = to_posix(path_prefix, zip_name)
+                        else:
+                            repo_path = to_posix(path_prefix, zip_name)
+                        artifacts.append((str(Path("/tmp") / zip_name), repo_path, 0, None))
+
+                source_archive_plan_counts[s_idx] += 1
+
+            else:
+                raise ConfigError(f"Unknown archive mode: {arch['mode']}")
+
+            # Existence policy checks and checksum
+            for local_path, repo_path, size, sha in artifacts:
                 exists_remote = repo_path in existing_paths
-
                 take_action = True
                 if exists_remote:
-                    if exists_policy == "skip":
+                    if dest["exists"] == "skip":
                         take_action = False
                         skipped_count += 1
-                    elif exists_policy == "fail":
+                    elif dest["exists"] == "fail":
                         logging.error(f"Exists policy fail: {repo_id}:{repo_path} already exists")
                         exists_fail_hits += 1
                         take_action = False
-                    elif exists_policy == "overwrite":
+                    elif dest["exists"] == "overwrite":
                         take_action = True
                     else:
                         take_action = False
 
-                    if take_action and use_checksum and not dry_run and client is not None:
-                        sha256 = compute_sha256(str(f))
-                        if remote_blob_matches(client, repo_id, repo_type, repo_path, sha256):
-                            take_action = False
-                            skipped_count += 1
-                            logging.info(f"Identical content, skipping: {repo_id}:{repo_path}")
+                    if take_action and cfg["use_checksum"] and not dry_run and client is not None:
+                        try:
+                            sha = compute_sha256(local_path)
+                            if remote_blob_matches(client, repo_id, repo_type, repo_path, sha):
+                                take_action = False
+                                skipped_count += 1
+                                logging.info(f"Identical content, skipping: {repo_id}:{repo_path}")
+                        except Exception as e:
+                            logging.debug(f"checksum failed for {local_path}: {e}")
 
                 if take_action:
-                    plans[plan_idx]["files"].append((str(f), repo_path, size, sha256))
-                    delete_tracker[str(f)]["planned"] += 1
+                    plans[plan_idx]["files"].append((local_path, repo_path, size, sha))
+                    delete_tracker[local_path]["planned"] += 1  # track archives for removal
+                    # track originals for raw uploads
+                    if arch["mode"] == "none":
+                        # increment planned for original if we want to honor remove flag for raw files
+                        delete_tracker.get(local_path, {"planned": 0, "succeeded": 0})
 
     totals = {
         "bytes_planned": sum(sz for p in plans for (_, _, sz, _) in p["files"]),
@@ -370,13 +664,16 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
         "destinations": len(plans),
         "skipped_planned": skipped_count,
         "exists_fail_hits": exists_fail_hits,
+        "tmpdir": str(tmpdir) if tmpdir else "",
+        "source_archive_plan_counts": dict(source_archive_plan_counts),
+        "source_originals": source_originals,
     }
 
     return plans, {"delete_tracker": delete_tracker, "totals": totals}
 
 # ------------- Execution -------------
 
-def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict[str, Any]:
+def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any], totals: Dict[str, Any]) -> Dict[str, Any]:
     threads = cfg["threads"]
     remove_after = cfg["remove"]
     progress_colour = cfg["progress_colour"]
@@ -412,6 +709,10 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict[str,
     delete_tracker: Dict[str, Dict[str, int]] = cfg["__delete_tracker__"]
     failed_files: Set[str] = set()
 
+    # Track per-source archive destination success for original deletion
+    source_archive_plan_counts = totals.get("source_archive_plan_counts", {})
+    source_archive_succeed_counts: Dict[int, int] = defaultdict(int)
+
     def _commit_for_plan(plan: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         repo_id = plan["repo_id"]
         repo_type = plan["repo_type"]
@@ -419,6 +720,8 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict[str,
         create_pr = plan["create_pr"]
         commit_tpl = plan["commit_message_tpl"]
         files = plan["files"]
+        src_index = plan.get("source_index", -1)
+        remove_archives_local = plan.get("archive_remove_local", False)
         key = (repo_id, token)
 
         sem = semaphores[key]
@@ -451,6 +754,21 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict[str,
                 pbar.update(bytes_in_commit)
                 for lp, rp, sz, sh in files:
                     delete_tracker[lp]["succeeded"] += 1
+                # Success for this destination, count toward source archive success
+                if src_index in source_archive_plan_counts:
+                    source_archive_succeed_counts[src_index] += 1
+                # Optionally remove local archives for this destination if all succeeded for those archive files
+                if remove_archives_local:
+                    for lp, rp, sz, sh in files:
+                        # If planned == succeeded for this temp archive, remove it now
+                        counters = delete_tracker.get(lp)
+                        if counters and counters["planned"] == counters["succeeded"]:
+                            try:
+                                if os.path.exists(lp):
+                                    os.remove(lp)
+                                    logging.info(f"Removed local archive: {lp}")
+                            except Exception as e:
+                                logging.warning(f"Failed to remove archive {lp}: {e}")
                 return True, {"repo_id": repo_id, "bytes": bytes_in_commit, "files": len(files)}
             except Exception as e:
                 logging.error(f"Commit failed for {repo_id}: {e}")
@@ -475,26 +793,56 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict[str,
 
     pbar.close()
 
+    # Removal rules
+    # 1) Remove originals that were uploaded raw when cfg.remove is True
     if remove_after:
-        for local_path, counters in delete_tracker.items():
-            if counters["planned"] > 0 and counters["succeeded"] == counters["planned"] and local_path not in failed_files:
+        for local_path, counters in list(delete_tracker.items()):
+            if counters["planned"] > 0 and counters["succeeded"] == counters["planned"] and os.path.isfile(local_path):
                 try:
                     os.remove(local_path)
                     logging.info(f"Removed local file: {local_path}")
+                    del delete_tracker[local_path]
                 except Exception as e:
                     logging.warning(f"Failed to remove {local_path}: {e}")
+
+    # 2) Remove originals after archive uploads if requested by archive_defaults or source/destination overrides
+    # We use top-level default remove_originals_after_archive if any destination for the source used archives and all such destinations succeeded
+    ao = cfg.get("archive_defaults", {})
+    remove_originals_after_archive = bool(ao.get("remove_originals_after_archive", False))
+    if remove_originals_after_archive and source_archive_plan_counts:
+        for s_idx, planned_dests in source_archive_plan_counts.items():
+            succeeded = source_archive_succeed_counts.get(s_idx, 0)
+            if planned_dests > 0 and succeeded >= planned_dests:
+                # safe to remove originals for this source
+                for fp in totals.get("source_originals", {}).get(s_idx, []):
+                    try:
+                        if os.path.isfile(fp):
+                            os.remove(fp)
+                            logging.info(f"Removed original after archive success: {fp}")
+                    except Exception as e:
+                        logging.warning(f"Failed to remove original {fp}: {e}")
+
+    # Cleanup tmpdir
+    tmpdir = totals.get("tmpdir")
+    if tmpdir and os.path.isdir(tmpdir):
+        try:
+            # Remove only empty dirs; archives might have been removed already; if anything left, remove the folder anyway
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception as e:
+            logging.debug(f"tmpdir cleanup warning: {e}")
 
     return results
 
 # ------------- CLI -------------
 
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="Batch upload files to Hugging Face repos with multi-destination support.")
+    ap = argparse.ArgumentParser(description="Batch upload files to Hugging Face repos with multi-destination and optional ZIP archiving.")
     ap.add_argument("--configurations", required=True, help="Path to configuration JSON")
     ap.add_argument("--repository", default=None, help="Override top-level repository")
     ap.add_argument("--token_file", default=None, help="Override top-level token_file")
     ap.add_argument("--token_env", default=None, help="Override top-level token_env")
-    ap.add_argument("--source_base", default=None, help="Override top-level source_base (new)")
+    ap.add_argument("--source_base", default=None, help="Override top-level source_base")
     ap.add_argument("--threads", type=int, default=None, help="Override threads")
     ap.add_argument("--remove", action="store_true", help="Remove local files after successful uploads to all destinations")
     ap.add_argument("--dry_run", action="store_true", help="Do not perform network operations")
@@ -522,6 +870,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.dry_run:
         raw_cfg["dry_run"] = True
 
+    # Normalize and validate
     try:
         cfg = normalize_config(raw_cfg)
     except ConfigError as e:
@@ -536,7 +885,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     logging.info(f"Planned: destinations={totals['destinations']}, files={totals['files_planned']}, bytes={totals['bytes_planned']:,}, skipped={totals.get('skipped_planned', 0)}")
 
-    # exists=fail guard
     if totals.get("exists_fail_hits", 0) > 0:
         logging.error(f"Aborting due to exists=fail policy: {totals['exists_fail_hits']} conflicting paths found.")
         return 3
@@ -554,7 +902,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     # Execute
-    results = execute_plans(plans, cfg)
+    results = execute_plans(plans, cfg, totals)
 
     # Summary
     summary = {

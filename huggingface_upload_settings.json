@@ -9,18 +9,30 @@
   "use_checksum": false,
   "progress_colour": "yellow",
   "max_inflight_per_repo": 2,
+
+  "archive_defaults": {
+    "mode": "none",
+    "name_template": "{source_basename}_{timestamp}.zip",
+    "preserve_tree_inside": true,
+    "strip_components": 0,
+    "remove_archives_after_upload": false,
+    "remove_originals_after_archive": false,
+    "level": 6
+  },
+
+  "source_base": "/data",
+
   "sources": [
     {
-      "source_base": "/data/setA",
       "path_in_repository": "SetA",
       "include": [
-        "**/*.safetensors",
-        "**/*.json",
-        "**/*.txt"
+        "setA/**/*.safetensors",
+        "setA/**/*.json",
+        "setA/**/*.txt"
       ],
       "exclude": [
-        "**/*.tmp",
-        "**/~*"
+        "setA/**/*.tmp",
+        "setA/**/~*"
       ],
       "preserve_tree": true,
       "destinations": [
@@ -30,24 +42,60 @@
         {
           "repository": "partnerOrg/mirror-repo",
           "token_file": "/home/alex/.hf_token_partner",
-          "create_pr": false,
           "exists": "skip",
-          "commit_message": "mirror: {timestamp}"
+          "commit_message": "mirror: {timestamp}",
+          "archive": {
+            "mode": "zip_per_file",
+            "name_template": "{stem}.zip"
+          }
         }
       ]
     },
+
     {
-      "source_base": "/data/setB",
       "path_in_repository": "FlatB",
       "include": [
         "/absolute/path/to/some/file.safetensors",
-        "**/*.safetensors"
+        "setB/**/*.safetensors"
       ],
       "exclude": [],
       "preserve_tree": false,
       "destinations": {
         "repository": "owner/main-repo"
       }
+    },
+
+    {
+      "path_in_repository": "Bundles",
+      "include": [
+        "setA/**/*.safetensors"
+      ],
+      "archive": {
+        "mode": "zip_source",
+        "name_template": "setA_{timestamp}.zip",
+        "preserve_tree_inside": true
+      },
+      "destinations": [
+        { "repository": "owner/main-repo" }
+      ]
+    },
+
+    {
+      "path_in_repository": "SetA",
+      "include": [
+        "setA/**/*"
+      ],
+      "archive": {
+        "mode": "zip_folders",
+        "folders_glob": "setA/**/sample",
+        "name_template": "{folder_name}.zip",
+        "preserve_repo_tree": true,
+        "preserve_tree_inside": true,
+        "strip_components": 0
+      },
+      "destinations": [
+        { "repository": "owner/main-repo" }
+      ]
     }
   ]
 }
