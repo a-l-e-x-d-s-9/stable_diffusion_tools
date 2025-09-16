@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 # Robust, tolerant image decode
 from PIL import Image, ImageOps, ImageFile, ImageQt
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+import argparse
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", ".gif", ".heic", ".heif"}
 CONFIG_PATH = os.path.expanduser("~/.config/image_mover_config.json")
@@ -492,14 +493,53 @@ class MainWindow(QMainWindow):
             save_config(self.config)
             self.status.showMessage("Saved destination folders", 3000)
 
+def parse_cli():
+    """
+    Parse optional named args without colliding with Qt's own args.
+    --root-folder /path
+    --1 /dest/for/key1  ... --9 /dest/for/key9
+    --image /path/to/file.jpg  (overrides --root-folder)
+    --save-mapping  (persist the mapping overrides to config)
+    """
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--root-folder", dest="root_folder", help="Start with this folder.")
+    p.add_argument("--image", dest="image", help="Start with this image (overrides --root-folder).")
+    for i in range(1, 10):
+        p.add_argument(f"--{i}", dest=f"slot{i}", help=f"Destination folder for key {i}.")
+    p.add_argument("--save-mapping", action="store_true",
+                   help="Persist CLI slot folders into config.")
+    args, _ = p.parse_known_args()  # don't consume Qt args
+    return args
+
 
 def main():
+    # Parse CLI first (so we can apply mapping/root before showing)
+    args = parse_cli()
+
     app = QApplication(sys.argv)
     win = MainWindow()
+
+    # Apply slot overrides
+    updated = False
+    for i in range(1, 10):
+        val = getattr(args, f"slot{i}", None)
+        if val:
+            key = str(i)
+            win.mapping[key] = val
+            win.config[key] = val
+            updated = True
+    if updated and args.save_mapping:
+        save_config(win.config)
+
     win.show()
 
-    # CLI takes precedence
-    if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
+    # Startup location precedence:
+    # 1) --image  2) --root-folder  3) legacy positional arg  4) last_path
+    if args.image and os.path.exists(args.image):
+        win.open_path(args.image)
+    elif args.root_folder and os.path.isdir(args.root_folder):
+        win.open_path(args.root_folder)
+    elif len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
         win.open_path(sys.argv[1])
     else:
         lp = win.config.get("last_path")
@@ -507,6 +547,7 @@ def main():
             win.open_path(lp)
 
     sys.exit(app.exec())
+
 
 
 
