@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image Downloader
 // @namespace    alexds9.scripts
-// @version      1.8
-// @description  Auto-download final images; skip previews via Grok EXIF; map each image to the nearest prompt chip (gen or viewer); write prompt to JPEG EXIF; dedupe; toggle Ctrl+Shift+S
+// @version      1.9
+// @description  Auto-download finals; skip previews via Grok EXIF; bind nearest prompt chip; write Signature to XP Comment and Prompt+info to User Comment; dedupe; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
 // @grant        GM_download
@@ -17,7 +17,7 @@
 (function () {
   "use strict";
 
-  // Prompt chip selectors
+  // Prompt chip selectors (generator and viewer chips)
   const PROMPT_SELECTOR_GEN  = "div.border.border-border-l2.bg-surface-l1.rounded-3xl";
   const PROMPT_SELECTOR_VIEW = "div.border.border-border-l2.bg-surface-l1.truncate.rounded-full";
   const PROMPT_SELECTOR = `${PROMPT_SELECTOR_GEN}, ${PROMPT_SELECTOR_VIEW}`;
@@ -28,18 +28,16 @@
   const MAX_WAIT_MS = 20000;
   const SCAN_INTERVAL_MS = 1500;
 
-  // Prompt capture
+  // Filename prompt slug
   const INCLUDE_PROMPT_IN_NAME = true;
   const PROMPT_SLUG_MAX = 50;
-  const SAVE_SIDECAR = false; // we write EXIF; keep false unless you want .txt too
 
   let autoOn = GM_getValue(STATE_KEY, false);
   let seenArr = GM_getValue(SEEN_BYTES_KEY, []);
   let seen = new Set(seenArr);
-
   let lastSeenPrompt = "";
 
-  // UI
+  // UI badge
   GM_addStyle(`#grok-auto-indicator{position:fixed;top:10px;right:10px;z-index:999999;background:rgba(20,20,24,.9);color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 system-ui,Segoe UI,Roboto,Ubuntu,Arial;box-shadow:0 2px 10px rgba(0,0,0,.25);pointer-events:none;user-select:none}`);
   const indicator = document.createElement("div");
   indicator.id = "grok-auto-indicator";
@@ -112,7 +110,7 @@
 
     const mime = m[1].toLowerCase();
     const b64 = m[2];
-    if (b64.length < 80000) return; // skip tiny placeholders fast
+    if (b64.length < 80000) return; // quick skip tiny placeholders
 
     const bytes = b64ToUint8Array(b64);
 
@@ -138,10 +136,21 @@
 
     seen.add(sha1); persistSeen();
 
+    // Inject: XP Comment = Signature, User Comment = Prompt + Size + Artist + Page + SHA1
     let outUrl = src;
     if (mime === "jpeg" || mime === "jpg") {
-      try { outUrl = injectPromptIntoJpegEXIF(src, prompt); }
-      catch (e) { console.warn("EXIF inject failed, downloading original:", e); }
+      try {
+        outUrl = injectMetaIntoJpeg(src, {
+          signature: sig || "",
+          prompt: prompt || "",
+          dims: dims || "",
+          artist: artist || "",
+          pageUrl: location.href,
+          sha1: sha1
+        });
+      } catch (e) {
+        console.warn("EXIF inject failed, downloading original:", e);
+      }
     }
 
     await new Promise((resolve, reject) => {
@@ -149,53 +158,34 @@
     });
     imgEl.dataset.grokDone = "1";
     console.log("[Grok downloader] saved", filename);
-
-    if (SAVE_SIDECAR) {
-      await savePromptSidecar(filename, {
-        signature_b64: sig || "",
-        artist_uuid: artist,
-        page_url: location.href,
-        dims: dims || "",
-        sha1: sha1,
-        prompt: prompt
-      });
-    }
   }
 
   // Prefer nearest chip by geometry, bias to chips above the image
   function getPromptNearestToImage(imgEl) {
     const chips = collectNearbyChips(imgEl, 6);
     if (!chips.length) return "";
-
     const irect = safeRect(imgEl);
-    // rank: smaller distance is better; chips above get small bias
     chips.sort((a, b) => {
       const ra = safeRect(a), rb = safeRect(b);
       const da = Math.abs((ra.top + ra.bottom) / 2 - (irect.top + irect.bottom) / 2);
       const db = Math.abs((rb.top + rb.bottom) / 2 - (irect.top + irect.bottom) / 2);
-      const biasA = ra.bottom <= irect.top ? 0 : 20; // 0 if above, +20 if not
+      const biasA = ra.bottom <= irect.top ? 0 : 20;
       const biasB = rb.bottom <= irect.top ? 0 : 20;
       return (da + biasA) - (db + biasB);
     });
-
-    const best = chips[0];
-    return normText(best.textContent || "");
+    return normText(chips[0].textContent || "");
   }
-
   function collectNearbyChips(node, maxAncestorHops) {
     const arr = [];
     let cur = node, hops = 0;
     while (cur && hops < maxAncestorHops) {
-      // chips anywhere inside current ancestor
       cur.querySelectorAll?.(PROMPT_SELECTOR)?.forEach(el => { if (isVisible(el)) arr.push(el); });
-      // previous siblings and their descendants
       let sib = cur.previousElementSibling;
       while (sib) {
         if (sib.matches?.(PROMPT_SELECTOR) && isVisible(sib)) arr.push(sib);
         sib.querySelectorAll?.(PROMPT_SELECTOR)?.forEach(el => { if (isVisible(el)) arr.push(el); });
         sib = sib.previousElementSibling;
       }
-      // next siblings too, in case viewer chip is after image
       sib = cur.nextElementSibling;
       while (sib) {
         if (sib.matches?.(PROMPT_SELECTOR) && isVisible(sib)) arr.push(sib);
@@ -204,25 +194,16 @@
       }
       cur = cur.parentElement; hops++;
     }
-
-    if (!arr.length) {
-      // as a last resort, scan the whole doc but keep only visible ones
-      document.querySelectorAll(PROMPT_SELECTOR).forEach(el => { if (isVisible(el)) arr.push(el); });
-    }
-
-    // de-dup
+    if (!arr.length) document.querySelectorAll(PROMPT_SELECTOR).forEach(el => { if (isVisible(el)) arr.push(el); });
     return Array.from(new Set(arr));
   }
-
   function isVisible(el) {
     const cs = getComputedStyle(el);
     if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") return false;
     const r = el.getBoundingClientRect();
     return r.width > 1 && r.height > 1;
   }
-  function safeRect(el) {
-    try { return el.getBoundingClientRect(); } catch { return { top: 0, bottom: 0 }; }
-  }
+  function safeRect(el) { try { return el.getBoundingClientRect(); } catch { return { top: 0, bottom: 0 }; } }
 
   // Final vs preview: require Grok EXIF
   function isGrokFinal(meta) {
@@ -242,30 +223,39 @@
     return m ? m[1] : null;
   }
 
-  // EXIF inject for JPEG
-  function injectPromptIntoJpegEXIF(dataUrl, promptText) {
+  // Inject EXIF: XP Comment = Signature (UCS-2 LE), User Comment = Prompt + info (ASCII header)
+  function injectMetaIntoJpeg(dataUrl, info) {
     if (!window.piexif) throw new Error("piexifjs not loaded");
     const exifObj = piexif.load(dataUrl);
     exifObj["0th"] = exifObj["0th"] || {};
+    exifObj["Exif"] = exifObj["Exif"] || {};
 
-    // Append Prompt: ... to ImageDescription, preserving existing Signature line(s)
-    const descTag = piexif.ImageIFD.ImageDescription;
-    const prevDesc = typeof exifObj["0th"][descTag] === "string" ? exifObj["0th"][descTag] : "";
-    const hasPrompt = /(^|\n)Prompt:/.test(prevDesc);
-    const newDesc = promptText
-      ? (hasPrompt ? prevDesc : (prevDesc ? `${prevDesc}\nPrompt: ${promptText}` : `Prompt: ${promptText}`))
-      : prevDesc;
-    if (newDesc) exifObj["0th"][descTag] = newDesc;
+    // 1) XP Comment holds the Signature
+    if (info.signature) {
+      const XPComment = 0x9C9C; // 40092
+      exifObj["0th"][XPComment] = toUcs2Bytes(`Signature: ${info.signature}`);
+    }
 
-    // Optional: also mirror prompt into XPComment for Windows
-    const XPComment = 0x9C9C; // 40092
-    exifObj["0th"][XPComment] = toUcs2Bytes(promptText || "");
+    // 2) User Comment holds Prompt + Size + Artist + Page + SHA1
+    const parts = [];
+    if (info.prompt) parts.push(`${info.prompt}`);
+    if (info.dims) parts.push(`Size: ${info.dims}`);
+    if (info.artist) parts.push(`Artist: ${info.artist}`);
+    if (info.pageUrl) parts.push(`Page: ${info.pageUrl}`);
+    if (info.sha1) parts.push(`SHA1: ${String(info.sha1).slice(0, 16)}`);
+
+    const ucText = parts.join(", ");
+    if (ucText) {
+      const tag = piexif.ExifIFD.UserComment; // 0x9286
+      // ASCII header as per EXIF spec: "ASCII\0\0\0" + text
+      exifObj["Exif"][tag] = "ASCII\0\0\0" + ucText;
+    }
 
     const exifBytes = piexif.dump(exifObj);
     return piexif.insert(exifBytes, dataUrl);
   }
 
-  // Encode UCS-2 LE for XP* tags
+  // Encode UCS-2 LE with NUL terminator for XP* fields
   function toUcs2Bytes(str) {
     const s = String(str || "");
     const arr = [];
@@ -277,29 +267,12 @@
     return arr;
   }
 
-  // Text, sidecar, and utils
+  // Text and utils
   function normText(s) { return String(s).replace(/\s+/g, " ").trim(); }
   function safeSlug(s, max = 50) {
     const norm = normText(s).slice(0, max);
     return norm.replace(/[^a-zA-Z0-9 _.-]/g, "").trim().replace(/\s+/g, "_");
   }
-  async function savePromptSidecar(jpgName, extra) {
-    const base = jpgName.replace(/\.jpg$/i, "");
-    const sidecar = base + ".txt";
-    const content =
-`file: ${jpgName}
-signature_b64: ${extra.signature_b64}
-artist_uuid: ${extra.artist_uuid}
-sha1: ${extra.sha1}
-dims: ${extra.dims}
-page_url: ${extra.page_url}
-prompt:
-${extra.prompt || ""}
-`;
-    const url = "data:text/plain;charset=utf-8," + encodeURIComponent(content);
-    await new Promise((res, rej) => GM_download({ url, name: sidecar, saveAs: false, onload: res, onerror: e => rej(e?.error || "dl error") }));
-  }
-
   function dimString(imgEl, meta) {
     const w = imgEl?.naturalWidth || meta?.ExifImageWidth || meta?.ImageWidth;
     const h = imgEl?.naturalHeight || meta?.ExifImageHeight || meta?.ImageHeight;
