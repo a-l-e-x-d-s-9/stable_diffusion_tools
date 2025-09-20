@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image Downloader
 // @namespace    alexds9.scripts
-// @version      1.2
-// @description  Auto-download new generated images on grok.com/imagine; dedupe; toggle with Ctrl+Shift+S; avoid blurred placeholders
+// @version      1.4
+// @description  Auto-download final images on grok.com/imagine; skip blurred previews by requiring Grok EXIF metadata; toggle with Ctrl+Shift+S
 // @author       Alex
 // @match        https://grok.com/imagine*
 // @grant        GM_download
@@ -13,31 +13,21 @@
 // @grant        GM_addStyle
 // @require      https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/lite.umd.js
 // ==/UserScript==
-
 (function () {
   "use strict";
 
-  // Tunables
-  const STABLE_MS = 2200;        // require this much time with no data-length change
-  const MAX_WAIT_MS = 20000;     // stop waiting after this and take best seen
-  const MIN_BYTES = 220000;      // treat smaller data-urls as likely blurred placeholders
-  const SCAN_INTERVAL_MS = 1500; // light periodic sweep
-  const ANCESTOR_BLUR_DEPTH = 6; // how many parents to check for blur filters
-
+  // Settings
   const STATE_KEY = "grok_auto_on";
-  const SEEN_KEY = "grok_seen_hashes_v1";
-  const MAX_SEEN = 2000;
+  const SEEN_BYTES_KEY = "grok_seen_sha1_v1";
+  const MAX_WAIT_MS = 20000;    // stop watching an <img> after this
+  const SCAN_INTERVAL_MS = 1500;
 
   let autoOn = GM_getValue(STATE_KEY, false);
-  let seenArr = GM_getValue(SEEN_KEY, []);
+  let seenArr = GM_getValue(SEEN_BYTES_KEY, []);
   let seen = new Set(seenArr);
 
-  GM_addStyle(`
-    #grok-auto-indicator{
-      position:fixed;top:10px;right:10px;z-index:999999;background:rgba(20,20,24,.9);
-      color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 system-ui,Segoe UI,Roboto,Ubuntu,Arial;
-      box-shadow:0 2px 10px rgba(0,0,0,.25);pointer-events:none;user-select:none
-    }`);
+  // UI badge
+  GM_addStyle(`#grok-auto-indicator{position:fixed;top:10px;right:10px;z-index:999999;background:rgba(20,20,24,.9);color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 system-ui,Segoe UI,Roboto,Ubuntu,Arial;box-shadow:0 2px 10px rgba(0,0,0,.25);pointer-events:none;user-select:none}`);
   const indicator = document.createElement("div");
   indicator.id = "grok-auto-indicator";
   document.documentElement.appendChild(indicator);
@@ -45,166 +35,115 @@
 
   GM_registerMenuCommand("Toggle auto-download (Ctrl+Shift+S)", toggleAuto);
   document.addEventListener("keydown", (e) => {
-    if (e.ctrlKey && e.shiftKey && e.code === "KeyS") {
-      e.preventDefault(); toggleAuto();
-    }
+    if (e.ctrlKey && e.shiftKey && e.code === "KeyS") { e.preventDefault(); toggleAuto(); }
   });
 
   const mo = new MutationObserver(() => { if (autoOn) scanImages(); });
   mo.observe(document.documentElement, { childList: true, subtree: true });
   setInterval(() => autoOn && scanImages(), SCAN_INTERVAL_MS);
+  if (autoOn) scanImages();
 
   function toggleAuto() {
     autoOn = !autoOn;
     GM_setValue(STATE_KEY, autoOn);
-    notify(`Grok auto-download ${autoOn ? "ON" : "OFF"}`);
+    try { GM_notification({ title: "Grok downloader", text: `Auto-download ${autoOn ? "ON" : "OFF"}`, timeout: 1200 }); } catch {}
     updateIndicator();
     if (autoOn) scanImages();
   }
-  function updateIndicator() {
-    indicator.textContent = `Grok auto-download: ${autoOn ? "ON" : "OFF"}`;
-  }
-  function notify(text) {
-    try { GM_notification({ title: "Grok downloader", text, timeout: 1500 }); } catch {}
-    console.log("[Grok downloader]", text);
-  }
+  function updateIndicator() { indicator.textContent = `Grok auto-download: ${autoOn ? "ON" : "OFF"}`; }
 
   function scanImages() {
-    const q = 'img[alt="Generated image"][src^="data:image/"], img[src^="data:image/"]';
+    const q = 'img[alt="Generated image"], img[src^="data:image/"]';
     document.querySelectorAll(q).forEach(img => {
-      if (img.dataset.grokWatching === "1") return;
+      if (img.dataset.grokWatching === "1" || img.dataset.grokDone === "1") return;
       img.dataset.grokWatching = "1";
-      waitForFinal(img).catch(err => {
-        console.warn("waitForFinal error:", err);
-        delete img.dataset.grokWatching;
-      });
+      watchImg(img).catch(err => { console.warn("watchImg error:", err); delete img.dataset.grokWatching; });
     });
   }
 
-  async function waitForFinal(imgEl) {
-    // We watch both src and class changes; Grok may drop blur via classes on ancestors
-    const record = {
-      lastLen: -1,
-      lastStableAt: 0,
-      bestSrc: null,
-      bestLen: 0
-    };
-
-    const attrObs = new MutationObserver(() => {
-      // any attribute change resets stability timer if data length changed
-      const src = imgEl.getAttribute("src") || "";
-      if (!/^data:image\/(jpeg|jpg|png);base64,/.test(src)) return;
-      const len = estimateBytesFromB64(src.slice(src.indexOf("base64,") + 7));
-      if (len !== record.lastLen) {
-        record.lastLen = len;
-        record.lastStableAt = Date.now();
-      }
-      if (len > record.bestLen) { record.bestLen = len; record.bestSrc = src; }
-    });
-    attrObs.observe(imgEl, { attributes: true, attributeFilter: ["src", "class", "style"] });
-
-    // seed values
-    const initSrc = imgEl.getAttribute("src") || "";
-    if (/^data:image\/(jpeg|jpg|png);base64,/.test(initSrc)) {
-      record.lastLen = estimateBytesFromB64(initSrc.slice(initSrc.indexOf("base64,") + 7));
-      record.bestLen = record.lastLen; record.bestSrc = initSrc; record.lastStableAt = Date.now();
-    }
-
+  async function watchImg(imgEl) {
     const start = Date.now();
-    while (Date.now() - start < MAX_WAIT_MS) {
-      if (!autoOn) { await sleep(250); continue; }
-
-      const src = imgEl.getAttribute("src") || "";
-      if (!/^data:image\/(jpeg|jpg|png);base64,/.test(src)) { await sleep(120); continue; }
-
-      // if ancestor blur exists, keep waiting
-      if (hasAncestorBlur(imgEl, ANCESTOR_BLUR_DEPTH)) { await sleep(120); continue; }
-
-      // stable enough and large enough
-      const stableFor = Date.now() - record.lastStableAt;
-      const currentLen = estimateBytesFromB64(src.slice(src.indexOf("base64,") + 7));
-      const bigEnough = currentLen >= MIN_BYTES;
-
-      if (stableFor >= STABLE_MS && bigEnough) {
-        attrObs.disconnect();
-        await handleImage(src, imgEl);
-        return;
+    // Observe src changes so we can re-check when preview swaps to final
+    const obs = new MutationObserver(async (muts) => {
+      for (const m of muts) {
+        if (m.type === "attributes" && m.attributeName === "src") {
+          try { await tryDownloadIfFinal(imgEl); } catch (e) { console.warn("check final failed:", e); }
+        }
       }
+    });
+    obs.observe(imgEl, { attributes: true, attributeFilter: ["src"] });
 
-      // track best seen src in case we timeout
-      if (currentLen > record.bestLen) { record.bestLen = currentLen; record.bestSrc = src; }
-      await sleep(120);
-    }
+    // Immediate check in case final is already present
+    await tryDownloadIfFinal(imgEl);
 
-    // timeout - use the best we saw that clears blur, but still respect dedupe
-    try { attrObs.disconnect(); } catch {}
-    const finalSrc = !hasAncestorBlur(imgEl, ANCESTOR_BLUR_DEPTH) && record.bestSrc ? record.bestSrc : imgEl.getAttribute("src");
-    if (finalSrc && /^data:image\//.test(finalSrc)) {
-      await handleImage(finalSrc, imgEl);
-    }
+    // Stop watching after timeout or after success
+    const timer = setInterval(async () => {
+      if (imgEl.dataset.grokDone === "1" || Date.now() - start > MAX_WAIT_MS) {
+        obs.disconnect();
+        clearInterval(timer);
+        delete imgEl.dataset.grokWatching;
+      } else if (autoOn) {
+        await tryDownloadIfFinal(imgEl);
+      }
+    }, 600);
   }
 
-  function hasAncestorBlur(el, depth) {
-    let n = 0, cur = el;
-    while (cur && n < depth) {
-      const cs = getComputedStyle(cur);
-      if ((cs.filter && cs.filter.includes("blur(")) || (cs.backdropFilter && cs.backdropFilter.includes("blur("))) return true;
-      cur = cur.parentElement; n++;
-    }
-    return false;
-  }
+  async function tryDownloadIfFinal(imgEl) {
+    if (!autoOn || imgEl.dataset.grokDone === "1") return;
 
-  async function handleImage(dataUrl, imgEl) {
-    if (imgEl.dataset.grokDownloaded === "1") return;
-    imgEl.dataset.grokDownloaded = "1";
+    const src = imgEl.getAttribute("src") || "";
+    if (!/^data:image\/(jpeg|jpg|png);base64,/.test(src)) return;
 
-    const b64 = dataUrl.slice(dataUrl.indexOf("base64,") + 7);
+    const b64 = src.slice(src.indexOf("base64,") + 7);
+    // Quick reject of tiny placeholders without parsing EXIF
+    if (b64.length < 80000) return;
+
     const bytes = b64ToUint8Array(b64);
-    const hash = await sha1Hex(bytes);
-    if (seen.has(hash)) return;
 
-    // Parse EXIF for signature if present
+    // Parse EXIF and accept only if Grok metadata is present
     let meta = {};
     try { meta = await exifr.parse(bytes.buffer, { userComment: true }); } catch {}
-    const sig = extractSignature(meta);
+    if (!isGrokFinal(meta)) return;   // hard filter: skip blurred previews
 
+    // Deduplicate by content hash
+    const sha1 = await sha1Hex(bytes);
+    if (seen.has(sha1)) { imgEl.dataset.grokDone = "1"; return; }
+
+    const sig = extractSignature(meta);
     const stamp = isoStamp(new Date());
     const dims = dimString(imgEl, meta);
-    const short = (sig ? "sig" + sig.slice(0, 10) : "h" + hash.slice(0, 10));
+    const short = sig ? "sig" + sig.slice(0, 10) : "h" + sha1.slice(0, 10);
     const filename = ["grok", stamp, short, dims].filter(Boolean).join("_") + ".jpg";
 
-    seen.add(hash);
-    if (seen.size > MAX_SEEN) {
-      const trimmed = Array.from(seen).slice(-MAX_SEEN);
-      seen = new Set(trimmed);
-      GM_setValue(SEEN_KEY, trimmed);
-    } else {
-      GM_setValue(SEEN_KEY, Array.from(seen));
-    }
+    seen.add(sha1);
+    persistSeen();
 
     await new Promise((resolve, reject) => {
-      GM_download({
-        url: dataUrl,
-        name: filename,
-        saveAs: false,
-        onload: resolve,
-        onerror: (e) => reject(e && (e.error || "unknown error")),
-        ontimeout: () => reject("timeout")
-      });
+      GM_download({ url: src, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
     });
+
+    imgEl.dataset.grokDone = "1";
     console.log("[Grok downloader] saved", filename);
   }
 
+  // Final vs preview decision: require Grok metadata fields
+  function isGrokFinal(meta) {
+    if (!meta || typeof meta !== "object") return false;
+    const id = meta.ImageDescription || "";
+    const uc = meta.UserComment || "";
+    const art = meta.Artist || "";
+    const hasSig = /Signature:\s*[A-Za-z0-9+/=]+/.test(id) || /Signature:\s*[A-Za-z0-9+/=]+/.test(uc);
+    const hasArtist = typeof art === "string" && art.trim().length > 0;
+    // You said finals always have these, previews have none
+    return hasSig || hasArtist;
+  }
+
   function extractSignature(meta) {
-    if (!meta) return null;
-    for (const key of ["ImageDescription", "UserComment", "Artist"]) {
-      const val = meta[key];
-      if (typeof val === "string" && val) {
-        const m = val.match(/Signature:\s*([A-Za-z0-9+/=]+)/);
-        if (m && m[1]) return m[1];
-      }
-    }
-    return null;
+    const id = meta?.ImageDescription;
+    const uc = meta?.UserComment;
+    const match = (typeof id === "string" && id.match(/Signature:\s*([A-Za-z0-9+/=]+)/)) ||
+                  (typeof uc === "string" && uc.match(/Signature:\s*([A-Za-z0-9+/=]+)/));
+    return match ? match[1] : null;
   }
 
   function dimString(imgEl, meta) {
@@ -214,22 +153,28 @@
   }
 
   function isoStamp(d) {
-    const pad = n => String(n).padStart(2, "0");
-    return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    const p = n => String(n).padStart(2, "0");
+    return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}T${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
   }
 
-  function estimateBytesFromB64(b64) {
-    const pad = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
-    return Math.floor(b64.length * 3 / 4) - pad;
-  }
   function b64ToUint8Array(b64) {
     const bin = atob(b64), len = bin.length, out = new Uint8Array(len);
     for (let i = 0; i < len; i++) out[i] = bin.charCodeAt(i);
     return out;
   }
+
   async function sha1Hex(uint8) {
     const buf = await crypto.subtle.digest("SHA-1", uint8);
     return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
   }
-  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function persistSeen() {
+    if (seen.size > 2000) {
+      const trimmed = Array.from(seen).slice(-2000);
+      seen = new Set(trimmed);
+      GM_setValue(SEEN_BYTES_KEY, trimmed);
+    } else {
+      GM_setValue(SEEN_BYTES_KEY, Array.from(seen));
+    }
+  }
 })();
