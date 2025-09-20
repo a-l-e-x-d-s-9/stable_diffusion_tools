@@ -239,6 +239,7 @@
     // 2) User Comment holds Prompt + Size + Artist + Page + SHA1
     const parts = [];
     if (info.prompt) parts.push(`${info.prompt}`);
+    parts.push(`\nNegative prompt: bad quality, poor quality, disfigured, jpg, toy, bad anatomy, missing limbs, missing fingers, ugly, scary, watermark\n`);
     if (info.dims) parts.push(`Size: ${info.dims}`);
     if (info.artist) parts.push(`Artist: ${info.artist}`);
     if (info.pageUrl) parts.push(`Page: ${info.pageUrl}`);
