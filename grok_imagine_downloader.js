@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image Downloader
 // @namespace    alexds9.scripts
-// @version      1.4
-// @description  Auto-download final images on grok.com/imagine; skip blurred previews by requiring Grok EXIF metadata; toggle with Ctrl+Shift+S
+// @version      1.8
+// @description  Auto-download final images; skip previews via Grok EXIF; map each image to the nearest prompt chip (gen or viewer); write prompt to JPEG EXIF; dedupe; toggle Ctrl+Shift+S
 // @author       Alex
 // @match        https://grok.com/imagine*
 // @grant        GM_download
@@ -12,21 +12,34 @@
 // @grant        GM_notification
 // @grant        GM_addStyle
 // @require      https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/lite.umd.js
+// @require      https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.js
 // ==/UserScript==
 (function () {
   "use strict";
 
-  // Settings
+  // Prompt chip selectors
+  const PROMPT_SELECTOR_GEN  = "div.border.border-border-l2.bg-surface-l1.rounded-3xl";
+  const PROMPT_SELECTOR_VIEW = "div.border.border-border-l2.bg-surface-l1.truncate.rounded-full";
+  const PROMPT_SELECTOR = `${PROMPT_SELECTOR_GEN}, ${PROMPT_SELECTOR_VIEW}`;
+
+  // Behavior
   const STATE_KEY = "grok_auto_on";
   const SEEN_BYTES_KEY = "grok_seen_sha1_v1";
-  const MAX_WAIT_MS = 20000;    // stop watching an <img> after this
+  const MAX_WAIT_MS = 20000;
   const SCAN_INTERVAL_MS = 1500;
+
+  // Prompt capture
+  const INCLUDE_PROMPT_IN_NAME = true;
+  const PROMPT_SLUG_MAX = 50;
+  const SAVE_SIDECAR = false; // we write EXIF; keep false unless you want .txt too
 
   let autoOn = GM_getValue(STATE_KEY, false);
   let seenArr = GM_getValue(SEEN_BYTES_KEY, []);
   let seen = new Set(seenArr);
 
-  // UI badge
+  let lastSeenPrompt = "";
+
+  // UI
   GM_addStyle(`#grok-auto-indicator{position:fixed;top:10px;right:10px;z-index:999999;background:rgba(20,20,24,.9);color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 system-ui,Segoe UI,Roboto,Ubuntu,Arial;box-shadow:0 2px 10px rgba(0,0,0,.25);pointer-events:none;user-select:none}`);
   const indicator = document.createElement("div");
   indicator.id = "grok-auto-indicator";
@@ -38,8 +51,13 @@
     if (e.ctrlKey && e.shiftKey && e.code === "KeyS") { e.preventDefault(); toggleAuto(); }
   });
 
-  const mo = new MutationObserver(() => { if (autoOn) scanImages(); });
-  mo.observe(document.documentElement, { childList: true, subtree: true });
+  const mo = new MutationObserver(() => {
+    const chips = document.querySelectorAll(PROMPT_SELECTOR);
+    if (chips.length) lastSeenPrompt = normText(chips[chips.length - 1].textContent || "");
+    if (autoOn) scanImages();
+  });
+  mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+
   setInterval(() => autoOn && scanImages(), SCAN_INTERVAL_MS);
   if (autoOn) scanImages();
 
@@ -63,7 +81,6 @@
 
   async function watchImg(imgEl) {
     const start = Date.now();
-    // Observe src changes so we can re-check when preview swaps to final
     const obs = new MutationObserver(async (muts) => {
       for (const m of muts) {
         if (m.type === "attributes" && m.attributeName === "src") {
@@ -73,10 +90,8 @@
     });
     obs.observe(imgEl, { attributes: true, attributeFilter: ["src"] });
 
-    // Immediate check in case final is already present
     await tryDownloadIfFinal(imgEl);
 
-    // Stop watching after timeout or after success
     const timer = setInterval(async () => {
       if (imgEl.dataset.grokDone === "1" || Date.now() - start > MAX_WAIT_MS) {
         obs.disconnect();
@@ -92,41 +107,124 @@
     if (!autoOn || imgEl.dataset.grokDone === "1") return;
 
     const src = imgEl.getAttribute("src") || "";
-    if (!/^data:image\/(jpeg|jpg|png);base64,/.test(src)) return;
+    const m = src.match(/^data:image\/(jpeg|jpg|png);base64,(.*)$/i);
+    if (!m) return;
 
-    const b64 = src.slice(src.indexOf("base64,") + 7);
-    // Quick reject of tiny placeholders without parsing EXIF
-    if (b64.length < 80000) return;
+    const mime = m[1].toLowerCase();
+    const b64 = m[2];
+    if (b64.length < 80000) return; // skip tiny placeholders fast
 
     const bytes = b64ToUint8Array(b64);
 
-    // Parse EXIF and accept only if Grok metadata is present
+    // Require Grok EXIF so we do not grab blurred previews
     let meta = {};
     try { meta = await exifr.parse(bytes.buffer, { userComment: true }); } catch {}
-    if (!isGrokFinal(meta)) return;   // hard filter: skip blurred previews
+    if (!isGrokFinal(meta)) return;
 
-    // Deduplicate by content hash
     const sha1 = await sha1Hex(bytes);
     if (seen.has(sha1)) { imgEl.dataset.grokDone = "1"; return; }
 
+    // Prompt: nearest visible chip around this image
+    const prompt = getPromptNearestToImage(imgEl) || lastSeenPrompt || "";
+
+    // Filename
     const sig = extractSignature(meta);
+    const artist = typeof meta?.Artist === "string" ? meta.Artist.trim() : "";
     const stamp = isoStamp(new Date());
     const dims = dimString(imgEl, meta);
     const short = sig ? "sig" + sig.slice(0, 10) : "h" + sha1.slice(0, 10);
-    const filename = ["grok", stamp, short, dims].filter(Boolean).join("_") + ".jpg";
+    const slug = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
+    const filename = ["grok", stamp, short, dims, slug].filter(Boolean).join("_") + ".jpg";
 
-    seen.add(sha1);
-    persistSeen();
+    seen.add(sha1); persistSeen();
+
+    let outUrl = src;
+    if (mime === "jpeg" || mime === "jpg") {
+      try { outUrl = injectPromptIntoJpegEXIF(src, prompt); }
+      catch (e) { console.warn("EXIF inject failed, downloading original:", e); }
+    }
 
     await new Promise((resolve, reject) => {
-      GM_download({ url: src, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
+      GM_download({ url: outUrl, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
     });
-
     imgEl.dataset.grokDone = "1";
     console.log("[Grok downloader] saved", filename);
+
+    if (SAVE_SIDECAR) {
+      await savePromptSidecar(filename, {
+        signature_b64: sig || "",
+        artist_uuid: artist,
+        page_url: location.href,
+        dims: dims || "",
+        sha1: sha1,
+        prompt: prompt
+      });
+    }
   }
 
-  // Final vs preview decision: require Grok metadata fields
+  // Prefer nearest chip by geometry, bias to chips above the image
+  function getPromptNearestToImage(imgEl) {
+    const chips = collectNearbyChips(imgEl, 6);
+    if (!chips.length) return "";
+
+    const irect = safeRect(imgEl);
+    // rank: smaller distance is better; chips above get small bias
+    chips.sort((a, b) => {
+      const ra = safeRect(a), rb = safeRect(b);
+      const da = Math.abs((ra.top + ra.bottom) / 2 - (irect.top + irect.bottom) / 2);
+      const db = Math.abs((rb.top + rb.bottom) / 2 - (irect.top + irect.bottom) / 2);
+      const biasA = ra.bottom <= irect.top ? 0 : 20; // 0 if above, +20 if not
+      const biasB = rb.bottom <= irect.top ? 0 : 20;
+      return (da + biasA) - (db + biasB);
+    });
+
+    const best = chips[0];
+    return normText(best.textContent || "");
+  }
+
+  function collectNearbyChips(node, maxAncestorHops) {
+    const arr = [];
+    let cur = node, hops = 0;
+    while (cur && hops < maxAncestorHops) {
+      // chips anywhere inside current ancestor
+      cur.querySelectorAll?.(PROMPT_SELECTOR)?.forEach(el => { if (isVisible(el)) arr.push(el); });
+      // previous siblings and their descendants
+      let sib = cur.previousElementSibling;
+      while (sib) {
+        if (sib.matches?.(PROMPT_SELECTOR) && isVisible(sib)) arr.push(sib);
+        sib.querySelectorAll?.(PROMPT_SELECTOR)?.forEach(el => { if (isVisible(el)) arr.push(el); });
+        sib = sib.previousElementSibling;
+      }
+      // next siblings too, in case viewer chip is after image
+      sib = cur.nextElementSibling;
+      while (sib) {
+        if (sib.matches?.(PROMPT_SELECTOR) && isVisible(sib)) arr.push(sib);
+        sib.querySelectorAll?.(PROMPT_SELECTOR)?.forEach(el => { if (isVisible(el)) arr.push(el); });
+        sib = sib.nextElementSibling;
+      }
+      cur = cur.parentElement; hops++;
+    }
+
+    if (!arr.length) {
+      // as a last resort, scan the whole doc but keep only visible ones
+      document.querySelectorAll(PROMPT_SELECTOR).forEach(el => { if (isVisible(el)) arr.push(el); });
+    }
+
+    // de-dup
+    return Array.from(new Set(arr));
+  }
+
+  function isVisible(el) {
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 1 && r.height > 1;
+  }
+  function safeRect(el) {
+    try { return el.getBoundingClientRect(); } catch { return { top: 0, bottom: 0 }; }
+  }
+
+  // Final vs preview: require Grok EXIF
   function isGrokFinal(meta) {
     if (!meta || typeof meta !== "object") return false;
     const id = meta.ImageDescription || "";
@@ -134,16 +232,72 @@
     const art = meta.Artist || "";
     const hasSig = /Signature:\s*[A-Za-z0-9+/=]+/.test(id) || /Signature:\s*[A-Za-z0-9+/=]+/.test(uc);
     const hasArtist = typeof art === "string" && art.trim().length > 0;
-    // You said finals always have these, previews have none
     return hasSig || hasArtist;
   }
-
   function extractSignature(meta) {
     const id = meta?.ImageDescription;
     const uc = meta?.UserComment;
-    const match = (typeof id === "string" && id.match(/Signature:\s*([A-Za-z0-9+/=]+)/)) ||
-                  (typeof uc === "string" && uc.match(/Signature:\s*([A-Za-z0-9+/=]+)/));
-    return match ? match[1] : null;
+    const m = (typeof id === "string" && id.match(/Signature:\s*([A-Za-z0-9+/=]+)/)) ||
+              (typeof uc === "string" && uc.match(/Signature:\s*([A-Za-z0-9+/=]+)/));
+    return m ? m[1] : null;
+  }
+
+  // EXIF inject for JPEG
+  function injectPromptIntoJpegEXIF(dataUrl, promptText) {
+    if (!window.piexif) throw new Error("piexifjs not loaded");
+    const exifObj = piexif.load(dataUrl);
+    exifObj["0th"] = exifObj["0th"] || {};
+
+    // Append Prompt: ... to ImageDescription, preserving existing Signature line(s)
+    const descTag = piexif.ImageIFD.ImageDescription;
+    const prevDesc = typeof exifObj["0th"][descTag] === "string" ? exifObj["0th"][descTag] : "";
+    const hasPrompt = /(^|\n)Prompt:/.test(prevDesc);
+    const newDesc = promptText
+      ? (hasPrompt ? prevDesc : (prevDesc ? `${prevDesc}\nPrompt: ${promptText}` : `Prompt: ${promptText}`))
+      : prevDesc;
+    if (newDesc) exifObj["0th"][descTag] = newDesc;
+
+    // Optional: also mirror prompt into XPComment for Windows
+    const XPComment = 0x9C9C; // 40092
+    exifObj["0th"][XPComment] = toUcs2Bytes(promptText || "");
+
+    const exifBytes = piexif.dump(exifObj);
+    return piexif.insert(exifBytes, dataUrl);
+  }
+
+  // Encode UCS-2 LE for XP* tags
+  function toUcs2Bytes(str) {
+    const s = String(str || "");
+    const arr = [];
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      arr.push(c & 0xFF, (c >> 8) & 0xFF);
+    }
+    arr.push(0x00, 0x00);
+    return arr;
+  }
+
+  // Text, sidecar, and utils
+  function normText(s) { return String(s).replace(/\s+/g, " ").trim(); }
+  function safeSlug(s, max = 50) {
+    const norm = normText(s).slice(0, max);
+    return norm.replace(/[^a-zA-Z0-9 _.-]/g, "").trim().replace(/\s+/g, "_");
+  }
+  async function savePromptSidecar(jpgName, extra) {
+    const base = jpgName.replace(/\.jpg$/i, "");
+    const sidecar = base + ".txt";
+    const content =
+`file: ${jpgName}
+signature_b64: ${extra.signature_b64}
+artist_uuid: ${extra.artist_uuid}
+sha1: ${extra.sha1}
+dims: ${extra.dims}
+page_url: ${extra.page_url}
+prompt:
+${extra.prompt || ""}
+`;
+    const url = "data:text/plain;charset=utf-8," + encodeURIComponent(content);
+    await new Promise((res, rej) => GM_download({ url, name: sidecar, saveAs: false, onload: res, onerror: e => rej(e?.error || "dl error") }));
   }
 
   function dimString(imgEl, meta) {
@@ -151,23 +305,19 @@
     const h = imgEl?.naturalHeight || meta?.ExifImageHeight || meta?.ImageHeight;
     return (w && h) ? `${w}x${h}` : null;
   }
-
   function isoStamp(d) {
     const p = n => String(n).padStart(2, "0");
     return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}T${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
   }
-
   function b64ToUint8Array(b64) {
     const bin = atob(b64), len = bin.length, out = new Uint8Array(len);
     for (let i = 0; i < len; i++) out[i] = bin.charCodeAt(i);
     return out;
   }
-
   async function sha1Hex(uint8) {
     const buf = await crypto.subtle.digest("SHA-1", uint8);
     return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
   }
-
   function persistSeen() {
     if (seen.size > 2000) {
       const trimmed = Array.from(seen).slice(-2000);
