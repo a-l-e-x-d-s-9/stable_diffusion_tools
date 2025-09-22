@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLa
 from PyQt6.QtGui import QPixmap, QColor, QPalette, QAction, QImage, QTextCharFormat, QTextCursor, QDrag
 from PyQt6.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, pyqtSignal
 from PyQt6.QtWidgets import QMainWindow, QMenu, QMenuBar, QDialog, QListWidget, QListWidgetItem
-from PIL import Image, UnidentifiedImageError, ImageOps
+from PIL import Image, UnidentifiedImageError, ImageOps, ImageFile
 import piexif
 import json
 import re
@@ -919,36 +919,39 @@ class ImageDropWidget(QWidget):
         if path not in [label.path for label in self.images]:
             if self.is_supported_image_format(path):
                 pixmap = image_basic.load_image_with_exif(path)
-                pixmap = pixmap.scaled(self.grid_item_width, self.grid_item_height,
-                                       aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio)
+                if pixmap.isNull():
+                    print(f"Skipping {path}: could not load image.")
+                    return  # do not proceed with UI setup for a bad image
+
+                pixmap = pixmap.scaled(
+                    self.grid_item_width, self.grid_item_height,
+                    aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio
+                )
                 label = ImageLabel(self)
                 label.clicked.connect(self.on_image_clicked)
                 label.path = path
                 label.setPixmap(pixmap)
 
-                # Add close button to the label
                 close_button = QPushButton("X", label)
                 close_button.setStyleSheet("QPushButton { color: red; }")
                 close_button.setFlat(True)
                 close_button.setFixedSize(QSize(16, 16))
                 close_button.clicked.connect(lambda checked, lbl=label: self.remove_item(lbl))
 
-                # Read captions from text file at this stage
                 txt_path = os.path.splitext(path)[0] + '.txt'
                 self.ensure_txt_file_exists(txt_path)
                 with open(txt_path, 'r') as txt_file:
                     content = txt_file.read()
-                    # Store the caption in the map
                     self.image_captions[path] = content
 
                 self.images.append(label)
                 self.update_grid_layout()
 
             if self.add_labels_checkbox.isChecked():
-                # print("add_labels_checkbox_changed")
                 self.sync_labels_on_change()
         else:
             print(f"{path} already exists in the widget!")
+
 
     def caption_to_tag_list(self, captions: str) -> list[str]:
         tags_list = [caption.strip() for caption in captions.split(',') if caption.strip()]
@@ -1391,15 +1394,44 @@ class image_basic():
 
     @staticmethod
     def load_image_with_exif(path):
+        def _open_with_optional_exif(img_path):
+            img = Image.open(img_path)
+            # Apply EXIF transpose if available and not explicitly skipped
+            if not image_basic.skip_rotation:
+                try:
+                    img = ImageOps.exif_transpose(img)
+                except Exception:
+                    # If EXIF is corrupted, continue without transpose
+                    pass
+            return img
+
         try:
-            image = Image.open(path)
-            image = ImageOps.exif_transpose(image)  # auto-fixes orientation
-        except (FileNotFoundError, UnidentifiedImageError):
-            print(f"Failed to open the image file at {path}.")
+            image = _open_with_optional_exif(path)
+        except (FileNotFoundError, UnidentifiedImageError) as e:
+            print(f"Failed to open the image file at {path}: {e}")
             return QPixmap()
-        if image.mode != "RGBA":
-            image = image.convert("RGBA")
-        data = image.tobytes("raw", "RGBA")
+        except OSError as e:
+            # Typical for broken JPEGs: "Truncated File Read"
+            print(f"Warning: {path} could not be read normally ({e}). Trying truncated read fallback...")
+            prev = ImageFile.LOAD_TRUNCATED_IMAGES
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            try:
+                image = _open_with_optional_exif(path)
+            except Exception as e2:
+                print(f"Failed again to open image {path}: {e2}")
+                ImageFile.LOAD_TRUNCATED_IMAGES = prev
+                return QPixmap()
+            finally:
+                ImageFile.LOAD_TRUNCATED_IMAGES = prev
+
+        try:
+            if image.mode != "RGBA":
+                image = image.convert("RGBA")
+            data = image.tobytes("raw", "RGBA")
+        except Exception as e:
+            print(f"Error converting image to RGBA for {path}: {e}")
+            return QPixmap()
+
         qimage = QImage(data, image.size[0], image.size[1], QImage.Format.Format_RGBA8888)
         return QPixmap.fromImage(qimage)
 
