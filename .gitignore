@@ -2,3 +2,4 @@
 /venv/
 /downloads.db
 /.idea/*
+/.models/
