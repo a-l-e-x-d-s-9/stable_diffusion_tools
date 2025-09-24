@@ -88,7 +88,8 @@ DEFAULT_ARCHIVE = {
     "folders": [],
     # add to DEFAULT_ARCHIVE
     "folders_glob": None,       # e.g. "**/sample"
-    "preserve_repo_tree": False # if True, zip lands under the folder's relative path in the repo
+    "preserve_repo_tree": False, # if True, zip lands under the folder's relative path in the repo
+    "exclude_globs": []
 
 }
 
@@ -371,7 +372,9 @@ def build_zip_source(files: List[Path], source_base: Path, tmpdir: Path, name_tp
             zf.write(f, arcname=arc)
     return zpath
 
-def build_zip_folders(folders: List[str], source_base: Path, tmpdir: Path, name_tpl: str, preserve_tree_inside: bool, strip_n: int, level: int) -> Dict[str, Path]:
+def build_zip_folders(folders, source_base, tmpdir, name_tpl, preserve_tree_inside, strip_n, level, exclude_globs=None):
+    import fnmatch
+    exclude_globs = exclude_globs or []
     out: Dict[str, Path] = {}
     for folder in folders:
         folder_path = Path(folder)
@@ -387,6 +390,10 @@ def build_zip_folders(folders: List[str], source_base: Path, tmpdir: Path, name_
             for root, dirs, files in os.walk(folder_path):
                 for fn in files:
                     fp = Path(root) / fn
+                    # Skip excluded files (match against basename and folder-relative path)
+                    rel_to_folder = str((fp.relative_to(folder_path)).as_posix())
+                    if any(fnmatch.fnmatch(fn, pat) or fnmatch.fnmatch(rel_to_folder, pat) for pat in exclude_globs):
+                        continue
                     if preserve_tree_inside:
                         try:
                             rel = fp.relative_to(source_base)
@@ -489,6 +496,8 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                 # Deduplicate while preserving order
                 seen = set()
                 folder_candidates = [f for f in folder_candidates if not (f in seen or seen.add(f))]
+                base_archive = merge_archive(cfg.get("archive_defaults", {}), src.get("source_archive", {}), None)
+                exclude_globs = base_archive.get("exclude_globs", []) or []
 
                 folder_zip_cache = build_zip_folders(
                     folders=folder_candidates,
@@ -498,6 +507,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                     preserve_tree_inside=base_archive.get("preserve_tree_inside", True),
                     strip_n=int(base_archive.get("strip_components", 0)),
                     level=int(base_archive.get("level", 6)),
+                    exclude_globs=exclude_globs,
                 )
 
         for dest in src["destinations"]:
