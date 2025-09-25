@@ -259,21 +259,33 @@ class MainWindow(QMainWindow):
         self.act_fit  = QAction("Fit", self)
         self.act_settings = QAction("Settings…", self)
 
+        self.act_undo = QAction("Undo", self)
+        try:
+            # Nice-to-have shortcut (Ctrl+Z / Cmd+Z)
+            self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        except Exception:
+            pass
+        self.act_undo.setEnabled(False)
+
+
         self.act_prev.setShortcut(QKeySequence(Qt.Key.Key_Left))
         self.act_next.setShortcut(QKeySequence(Qt.Key.Key_Right))
         self.act_fit.setShortcut(QKeySequence("/"))  # also '-' handled in keyPressEvent
 
-        for a in (self.act_open, self.act_prev, self.act_next, self.act_fit, self.act_settings):
+        for a in (self.act_open, self.act_prev, self.act_next, self.act_fit, self.act_undo, self.act_settings):
             tb.addAction(a)
         self.act_open.triggered.connect(self.open_folder)
         self.act_prev.triggered.connect(lambda: self.goto_rel(-1))
         self.act_next.triggered.connect(lambda: self.goto_rel(+1))
         self.act_fit.triggered.connect(self.view.key_reset_zoom)
+        self.act_undo.triggered.connect(self.undo_last_move)
         self.act_settings.triggered.connect(self.edit_settings)
 
         self.folder: Optional[str] = None
         self.files: List[str] = []
         self.index: int = -1
+
+        self._undo_stack: List[dict] = []
 
         # Thread pool + wiring
         self.pool = QThreadPool.globalInstance()
@@ -289,8 +301,62 @@ class MainWindow(QMainWindow):
         # mapping = only digit keys 1..9 from config
         self.mapping = {k: v for k, v in self.config.items() if k.isdigit() and 1 <= int(k) <= 9}
 
-        self.view.requestOpenPath.connect(self.open_path)
 
+    def undo_last_move(self):
+        """Undo the last successful move_to_slot. Safe if file went missing."""
+        if not self._undo_stack:
+            return
+
+        op = self._undo_stack.pop()
+        src_path = op.get("src")        # original location
+        dest_path = op.get("dest")      # where we moved it
+        orig_index = int(op.get("src_index", 0))
+
+        # If the moved file is gone (deleted or moved externally), just report & disable if empty.
+        if not dest_path or not os.path.exists(dest_path):
+            self.status.showMessage("Undo skipped: moved file is missing at destination", 4000)
+            if not self._undo_stack:
+                self.act_undo.setEnabled(False)
+            return
+
+        # Compute a restore path, avoiding collisions in the original folder
+        src_dir  = os.path.dirname(src_path) if src_path else self.folder or os.path.dirname(dest_path)
+        base     = os.path.basename(src_path) if src_path else os.path.basename(dest_path)
+        restore  = os.path.join(src_dir, base)
+
+        if os.path.exists(restore):
+            stem, ext = os.path.splitext(base)
+            k = 1
+            while True:
+                alt = os.path.join(src_dir, f"{stem}_restored_{k}{ext}")
+                if not os.path.exists(alt):
+                    restore = alt
+                    break
+                k += 1
+
+        try:
+            shutil.move(dest_path, restore)
+        except Exception as e:
+            QMessageBox.warning(self, "Undo failed", str(e))
+            if not self._undo_stack:
+                self.act_undo.setEnabled(False)
+            return
+
+        # If this window is still on the same folder, put the file back into the list
+        if self.folder and os.path.dirname(restore) == self.folder:
+            # Insert near the original index if possible; clamp to current list size
+            ins = min(max(0, orig_index), len(self.files))
+            self.files.insert(ins, restore)
+            self.index = ins
+        else:
+            # Fallback: just append and show it
+            self.files.append(restore)
+            self.index = len(self.files) - 1
+
+        self._show_current()
+
+        if not self._undo_stack:
+            self.act_undo.setEnabled(False)
 
 
     def open_file(self):
@@ -469,13 +535,17 @@ class MainWindow(QMainWindow):
                 alt = os.path.join(dest_root, f"{stem}_{k}{ext}")
                 if not os.path.exists(alt): dest = alt; break
                 k += 1
+
         try:
             shutil.move(src, dest)
+            # NEW: record for undo
+            self._undo_stack.append({"src": src, "dest": dest, "src_index": self.index})
+            self.act_undo.setEnabled(True)
+            # remove from list and show next
             del self.files[self.index]
             if not self.files:
                 self.index = -1
             else:
-                # keep position; if we removed the last, wrap to 0
                 self.index = self.index % len(self.files)
             self._show_current()
         except Exception as e:
