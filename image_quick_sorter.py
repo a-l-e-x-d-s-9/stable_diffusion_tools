@@ -24,6 +24,11 @@ from PyQt6.QtCore import QPoint, QRect
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QRubberBand
 from PIL import PngImagePlugin
+from pathlib import Path  # NEW
+try:
+    from send2trash import send2trash  # NEW: OS trash
+except Exception:
+    send2trash = None
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", ".gif", ".heic", ".heif"}
 CONFIG_PATH = os.path.expanduser("~/.config/image_mover_config.json")
@@ -570,49 +575,124 @@ class MainWindow(QMainWindow):
         # mapping = only digit keys 1..9 from config
         self.mapping = {k: v for k, v in self.config.items() if k.isdigit() and 1 <= int(k) <= 9}
 
-    def _garbage_dir_for(self, path: str) -> str:
-        """Per-folder trash: <current-folder>/.trash"""
+    def _legacy_trash_dir_for(self, path: str) -> str:
+        """Old behavior: <working-folder>/.trash (unique per working folder)."""
         base = self.folder if self.folder else os.path.dirname(path)
         d = os.path.join(base, ".trash")
         os.makedirs(d, exist_ok=True)
         return d
 
+    def _move_to_legacy_trash(self, path: str) -> str:
+        """Move to local .trash with a collision-safe name. Return final dest path."""
+        trash_dir = self._legacy_trash_dir_for(path)
+        base = os.path.basename(path)
+        dest = os.path.join(trash_dir, base)
+        if os.path.exists(dest):
+            stem, ext = os.path.splitext(base)
+            k = 1
+            while True:
+                cand = os.path.join(trash_dir, f"{stem}_del_{k}{ext}")
+                if not os.path.exists(cand):
+                    dest = cand
+                    break
+                k += 1
+        shutil.move(path, dest)
+        return dest
+
+    def _trash_with_fallback(self, path: str) -> tuple[str, str | None]:
+        """
+        Try OS trash first; on failure, fall back to legacy .trash move.
+        Returns (method, legacy_dest):
+          method ∈ {"os", "legacy", "none", "fail"}
+          legacy_dest is the destination path if method == "legacy", else None.
+        """
+        if not os.path.exists(path):
+            return ("none", None)
+
+        if send2trash:
+            try:
+                send2trash(path)
+                return ("os", None)
+            except Exception as err:
+                # Surface why OS trash failed (e.g., permission, mount without trash support, etc.)
+                self.status.showMessage(f"OS trash failed, using .trash: {err}", 6000)
+
+        # Legacy fallback
+        try:
+            dest = self._move_to_legacy_trash(path)
+            return ("legacy", dest)
+        except Exception as e:
+            QMessageBox.warning(self, "Trash failed", f"Couldn't move to trash:\n{e}")
+            return ("fail", None)
+
+    def _app_cache_dir(self) -> str:
+        """Cross-platform writable cache dir."""
+        if sys.platform.startswith("win"):
+            base = os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")
+            return os.path.join(base, "image_quick_sorter")
+        elif sys.platform == "darwin":
+            return os.path.join(os.path.expanduser("~/Library/Caches"), "image_quick_sorter")
+        else:
+            return os.path.join(os.path.expanduser("~/.cache"), "image_quick_sorter")
+
+    def _stash_dir(self) -> str:
+        d = os.path.join(self._app_cache_dir(), "undo_stash")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+
     def delete_current(self):
-        """Move current image into per-folder .trash and record undo."""
+        """Move current image to OS trash (or legacy .trash on fallback) and record undo via a cache-stashed copy."""
         if not self._ensure_no_pending_crop():
             return
         if not (0 <= self.index < len(self.files)):
             return
 
         src = self.files[self.index]
-        trash_dir = self._garbage_dir_for(src)
         base = os.path.basename(src)
-        dest = os.path.join(trash_dir, base)
-        if os.path.exists(dest):
+
+        # Make a stash copy for Undo (session-lifetime only)
+        stash_dir = self._stash_dir()
+        stash = os.path.join(stash_dir, base)
+        if os.path.exists(stash):
             stem, ext = os.path.splitext(base)
             k = 1
             while True:
-                alt = os.path.join(trash_dir, f"{stem}_del_{k}{ext}")
-                if not os.path.exists(alt):
-                    dest = alt
+                cand = os.path.join(stash_dir, f"{stem}_stash_{k}{ext}")
+                if not os.path.exists(cand):
+                    stash = cand
                     break
                 k += 1
-
         try:
-            shutil.move(src, dest)
-            # record undo
-            self._undo_stack.append({"op": "delete", "src": src, "dest": dest, "src_index": self.index})
-            self.act_undo.setEnabled(True)
-            # update list & show
-            del self.files[self.index]
-            if not self.files:
-                self.index = -1
-            else:
-                self.index = self.index % len(self.files)
-            self._show_current()
-            self.status.showMessage(f"Moved to trash: {os.path.basename(src)}", 3000)
+            shutil.copy2(src, stash)
         except Exception as e:
-            QMessageBox.warning(self, "Delete failed", str(e))
+            QMessageBox.warning(self, "Delete failed", f"Couldn't create undo copy:\n{e}")
+            return
+
+        method, legacy_path = self._trash_with_fallback(src)
+        if method == "fail":
+            # Keep stash so user can manually restore; do not mutate list/index
+            self.status.showMessage("Trash failed; kept a safety copy in cache (no changes applied).", 5000)
+            return
+
+        # Record undo (we always undo from stash, never from OS/.trash)
+        self._undo_stack.append({"op": "delete", "src": src, "stash": stash, "src_index": self.index})
+        self.act_undo.setEnabled(True)
+
+        # Update list & show next/prev
+        del self.files[self.index]
+        if not self.files:
+            self.index = -1
+        else:
+            self.index = self.index % len(self.files)
+        self._show_current()
+
+        if method == "os":
+            self.status.showMessage(f"Moved to OS trash: {base}", 3000)
+        elif method == "legacy":
+            self.status.showMessage(f"Moved to .trash: {os.path.basename(legacy_path)}", 3000)
+        else:
+            self.status.showMessage("Nothing to delete", 2000)
 
     def _on_sel_state(self, has: bool):
         self.act_crop.setEnabled(has)
@@ -778,13 +858,13 @@ class MainWindow(QMainWindow):
             else:
                 cropped.save(tmp_path)
 
-            # BACKUP original into .trash BEFORE replacing (so undo can restore)
-            trash_dir = self._garbage_dir_for(path)
+            # BACKUP original into cache stash BEFORE replacing (so undo can restore)
+            stash_dir = self._stash_dir()
             stem, ext = os.path.splitext(os.path.basename(path))
-            backup = os.path.join(trash_dir, f"{stem}_precrop{ext}")
+            backup = os.path.join(stash_dir, f"{stem}_precrop{ext}")
             bk = 1
             while os.path.exists(backup):
-                backup = os.path.join(trash_dir, f"{stem}_precrop_{bk}{ext}")
+                backup = os.path.join(stash_dir, f"{stem}_precrop_{bk}{ext}")
                 bk += 1
             shutil.copy2(path, backup)
 
