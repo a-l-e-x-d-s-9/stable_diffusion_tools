@@ -20,6 +20,10 @@ from PyQt6.QtWidgets import (
 from PIL import Image, ImageOps, ImageFile, ImageQt
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 import argparse
+from PyQt6.QtCore import QPoint, QRect
+from PyQt6.QtGui import QCursor
+from PyQt6.QtWidgets import QRubberBand
+from PIL import PngImagePlugin
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", ".gif", ".heic", ".heif"}
 CONFIG_PATH = os.path.expanduser("~/.config/image_mover_config.json")
@@ -80,7 +84,9 @@ class LoadJob(QRunnable):
 
 class ImageView(QGraphicsView):
     requestLoad = pyqtSignal(str, object)  # (path, target_or_None)
-    requestOpenPath = pyqtSignal(str)  # NEW
+    requestOpenPath = pyqtSignal(str)
+    cropSelected = pyqtSignal(QRectF)
+    selectionChanged = pyqtSignal(bool)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -102,6 +108,232 @@ class ImageView(QGraphicsView):
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(120)
         self._resize_timer.timeout.connect(self._refit_after_resize)
+
+        self._rubber: Optional[QRubberBand] = None
+        self._crop_origin: Optional[QPoint] = None
+        self._cropping: bool = False
+        self._orig_size_cache: Optional[Tuple[int,int]] = None  # oriented original (w,h)
+        self._pending_sel_scene: Optional[QRectF] = None
+        self._drag_mode: Optional[str] = None  # 'move','n','s','e','w','ne','nw','se','sw','new'
+        self._last_scene_pt = None  # last mouse pos in scene
+        self.set_crop_mode(True)  # selection enabled by default
+
+    def has_visible_selection(self) -> bool:
+        """Selection exists and rubber band is currently visible."""
+        return self._pending_sel_scene is not None and self._rubber is not None and self._rubber.isVisible()
+
+    def _cursor_for_mode(self, mode: str) -> Qt.CursorShape:
+        return {
+            "n": Qt.CursorShape.SizeVerCursor,
+            "s": Qt.CursorShape.SizeVerCursor,
+            "e": Qt.CursorShape.SizeHorCursor,
+            "w": Qt.CursorShape.SizeHorCursor,
+            "ne": Qt.CursorShape.SizeBDiagCursor,  # ↗↙
+            "sw": Qt.CursorShape.SizeBDiagCursor,
+            "nw": Qt.CursorShape.SizeFDiagCursor,  # ↖↘
+            "se": Qt.CursorShape.SizeFDiagCursor,
+            "move": Qt.CursorShape.SizeAllCursor,
+            "new": Qt.CursorShape.CrossCursor,
+            "none": Qt.CursorShape.CrossCursor,
+        }.get(mode, Qt.CursorShape.ArrowCursor)
+
+    def pending_selection(self) -> Optional[QRectF]:
+        return self._pending_sel_scene
+
+    def clear_selection(self):
+        self._pending_sel_scene = None
+        self._drag_mode = None
+        self._last_scene_pt = None
+        if self._rubber:
+            self._rubber.hide()
+        self.selectionChanged.emit(False)
+
+    def _update_rubber_from_selection(self):
+        """Mirror _pending_sel_scene onto the rubber band."""
+        if not self._rubber:
+            self._rubber = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
+        if self._pending_sel_scene is None or self.pix_item is None:
+            self._rubber.hide()
+            return
+        # Map the scene rect to viewport coords
+        tl = self.mapFromScene(self._pending_sel_scene.topLeft())
+        br = self.mapFromScene(self._pending_sel_scene.bottomRight())
+        r = QRect(tl, br).normalized()
+        # Keep a minimum 1×1 box
+        if r.width() < 1: r.setWidth(1)
+        if r.height() < 1: r.setHeight(1)
+        self._rubber.setGeometry(r)
+        self._rubber.show()
+        self.selectionChanged.emit(self.has_visible_selection())
+
+    def _clamp_rect_to_image(self, r: QRectF) -> QRectF:
+        if not self.pix_item:
+            return r
+        return r.intersected(self.pix_item.boundingRect())
+
+    def _hit_test_selection(self, pos_view) -> str:
+        """
+        Return which part of the selection is grabbed:
+        'ne','nw','se','sw','n','s','e','w','move','none'
+        Hit-test is done in VIEW coordinates with ~6 px tolerance.
+        """
+        if self._pending_sel_scene is None:
+            return "none"
+        # selection in view coords
+        rect_view = QRect(self.mapFromScene(self._pending_sel_scene.topLeft()),
+                          self.mapFromScene(self._pending_sel_scene.bottomRight())).normalized()
+        if rect_view.isEmpty():
+            return "none"
+        m = 6  # px tolerance
+        x, y = pos_view.x(), pos_view.y()
+        L, T, R, B = rect_view.left(), rect_view.top(), rect_view.right(), rect_view.bottom()
+        nearL, nearR = abs(x - L) <= m, abs(x - R) <= m
+        nearT, nearB = abs(y - T) <= m, abs(y - B) <= m
+        inside = rect_view.adjusted(m, m, -m, -m).contains(pos_view)
+
+        # corners first
+        if nearL and nearT: return "nw"
+        if nearR and nearT: return "ne"
+        if nearL and nearB: return "sw"
+        if nearR and nearB: return "se"
+        # edges
+        if nearT: return "n"
+        if nearB: return "s"
+        if nearL: return "w"
+        if nearR: return "e"
+        # move
+        if inside: return "move"
+        return "none"
+
+    def set_crop_mode(self, on: bool):
+        self._cropping = bool(on)
+        if not on and self._rubber:
+            self._rubber.hide()
+        self.setCursor(QCursor(Qt.CursorShape.CrossCursor) if on else QCursor(Qt.CursorShape.ArrowCursor))
+
+    def _get_oriented_size(self) -> Tuple[Optional[int], Optional[int]]:
+        if self._orig_size_cache and self._path:
+            return self._orig_size_cache
+        if not self._path:
+            return (None, None)
+        try:
+            im = Image.open(self._path)
+            im = ImageOps.exif_transpose(im)
+            self._orig_size_cache = (im.width, im.height)
+            return self._orig_size_cache
+        except Exception:
+            return (None, None)
+
+    def mousePressEvent(self, ev):
+        if self._cropping and ev.button() == Qt.MouseButton.LeftButton and self.pix_item:
+            pos_view = ev.position().toPoint()
+            # If we have a selection, check if user wants to move/resize it
+            mode = self._hit_test_selection(pos_view) if self._pending_sel_scene else "none"
+            if mode != "none":
+                self._drag_mode = mode
+                self._last_scene_pt = self.mapToScene(pos_view)
+                ev.accept()
+                return
+            # Start a new selection anywhere; the rect will be clamped to image on move
+            if not self._rubber:
+                self._rubber = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
+            self._drag_mode = "new"
+            self._crop_origin = pos_view
+            self._rubber.setGeometry(QRect(self._crop_origin, QSize(1, 1)))
+            self._rubber.show()
+            self._last_scene_pt = self.mapToScene(pos_view)
+            self.setCursor(self._cursor_for_mode("new"))
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self._cropping and self.pix_item:
+            pos_view = ev.position().toPoint()
+
+            # When NOT dragging, just update cursor based on hit test
+            if not self._drag_mode:
+                mode = self._hit_test_selection(pos_view) if self._pending_sel_scene else "new"
+                self.setCursor(self._cursor_for_mode(mode))
+                # still allow default behavior to handle panning etc. when not cropping a selection
+                super().mouseMoveEvent(ev)
+                return
+
+            # DRAGGING branch
+            cur_scene = self.mapToScene(pos_view)
+
+            if self._drag_mode == "new" and self._crop_origin:
+                rect = QRect(self._crop_origin, pos_view).normalized()
+                tl = self.mapToScene(rect.topLeft())
+                br = self.mapToScene(rect.bottomRight())
+                sel = QRectF(tl, br).normalized()
+                sel = self._clamp_rect_to_image(sel)
+                self._pending_sel_scene = sel
+                self._update_rubber_from_selection()
+                self.setCursor(self._cursor_for_mode("new"))
+
+            elif self._pending_sel_scene is not None and self._last_scene_pt is not None:
+                dx = cur_scene.x() - self._last_scene_pt.x()
+                dy = cur_scene.y() - self._last_scene_pt.y()
+                r = QRectF(self._pending_sel_scene)
+
+                if self._drag_mode == "move":
+                    r.translate(dx, dy)
+                    img = self.pix_item.boundingRect()
+                    if r.left() < img.left():   r.moveLeft(img.left())
+                    if r.top() < img.top():     r.moveTop(img.top())
+                    if r.right() > img.right(): r.moveRight(img.right())
+                    if r.bottom() > img.bottom(): r.moveBottom(img.bottom())
+                else:
+                    if "w" in self._drag_mode: r.setLeft(r.left() + dx)
+                    if "e" in self._drag_mode: r.setRight(r.right() + dx)
+                    if "n" in self._drag_mode: r.setTop(r.top() + dy)
+                    if "s" in self._drag_mode: r.setBottom(r.bottom() + dy)
+                    r = r.normalized()
+                    r = self._clamp_rect_to_image(r)
+                    if r.width() < 2 or r.height() < 2:
+                        r = self._pending_sel_scene
+
+                self._pending_sel_scene = r
+                self._update_rubber_from_selection()
+                self._last_scene_pt = cur_scene
+                self.setCursor(self._cursor_for_mode(self._drag_mode))
+
+            # live size feedback
+            if self._pending_sel_scene is not None:
+                sel = self._pending_sel_scene
+                dw = self.pix_item.pixmap().width()
+                dh = self.pix_item.pixmap().height()
+                ow, oh = self._get_oriented_size()
+                if dw > 0 and dh > 0 and ow and oh:
+                    sx = ow / dw;
+                    sy = oh / dh
+                    w = int(round(sel.width() * sx));
+                    h = int(round(sel.height() * sy))
+                    if self.window():
+                        self.window().status.showMessage(f"Crop: {w}×{h}px", 0)
+
+            ev.accept()
+            return
+
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        if self._cropping and ev.button() == Qt.MouseButton.LeftButton and self.pix_item:
+            # at the end of your custom branch, before return:
+            self._drag_mode = None
+            self._last_scene_pt = None
+            if self._pending_sel_scene is not None:
+                self._pending_sel_scene = self._clamp_rect_to_image(self._pending_sel_scene.normalized())
+                self._update_rubber_from_selection()
+                self.selectionChanged.emit(self.has_visible_selection())
+            # set hover cursor after release
+            mode = self._hit_test_selection(ev.position().toPoint()) if self._pending_sel_scene else "new"
+            self.setCursor(self._cursor_for_mode(mode))
+            ev.accept()
+            return
+
+        super().mouseReleaseEvent(ev)
 
     # --- DnD helpers ---
     def _first_image_path(self, mime) -> str | None:
@@ -137,6 +369,7 @@ class ImageView(QGraphicsView):
 
     def set_path(self, path: Optional[str]):
         self._path = path
+        self._orig_size_cache = None
         self._resize_timer.stop()
         self.scene.clear()
         self.pix_item = None
@@ -149,18 +382,29 @@ class ImageView(QGraphicsView):
         # Ignore stale loads
         if path != self._path:
             return
+        self._pending_sel_scene = None
+        if self._rubber: self._rubber.hide()
         self.scene.clear()
         pm = QPixmap.fromImage(img)
         self.pix_item = self.scene.addPixmap(pm)
+        self._update_rubber_from_selection()
         self.scene.setSceneRect(QRectF(pm.rect()))
         if self.fit_mode:
             self.resetTransform()
             self.fit_in_view()
 
+        # after fit_in_view / scene setup
+        self._update_rubber_from_selection()
+        self.setCursor(self._cursor_for_mode("new"))
+
     def clear_image(self):
         self._path = None
+        self._pending_sel_scene = None  # NEW
+        if self._rubber: self._rubber.hide()  # NEW
         self.scene.clear()
         self.pix_item = None
+
+        self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def fit_in_view(self):
         if not self.pix_item:
@@ -267,13 +511,27 @@ class MainWindow(QMainWindow):
             pass
         self.act_undo.setEnabled(False)
 
+        self.act_crop = QAction("Crop", self)
+        self.act_crop_copy = QAction("Crop As Copy", self)
 
         self.act_prev.setShortcut(QKeySequence(Qt.Key.Key_Left))
         self.act_next.setShortcut(QKeySequence(Qt.Key.Key_Right))
         self.act_fit.setShortcut(QKeySequence("/"))  # also '-' handled in keyPressEvent
 
-        for a in (self.act_open, self.act_prev, self.act_next, self.act_fit, self.act_undo, self.act_settings):
+        for a in (self.act_open, self.act_prev, self.act_next, self.act_fit,
+                  self.act_undo, self.act_crop, self.act_crop_copy, self.act_settings):  # added act_crop_copy
             tb.addAction(a)
+
+        self.act_crop.triggered.connect(self.apply_crop_now)
+        self.act_crop_copy.triggered.connect(self.apply_crop_copy_now)
+
+        self.act_crop_copy.setShortcut(QKeySequence("Shift+C"))
+
+        self.act_crop.setEnabled(False)
+        self.act_crop_copy.setEnabled(False)
+
+        self.view.selectionChanged.connect(self._on_sel_state)
+
         self.act_open.triggered.connect(self.open_folder)
         self.act_prev.triggered.connect(lambda: self.goto_rel(-1))
         self.act_next.triggered.connect(lambda: self.goto_rel(+1))
@@ -301,6 +559,307 @@ class MainWindow(QMainWindow):
         # mapping = only digit keys 1..9 from config
         self.mapping = {k: v for k, v in self.config.items() if k.isdigit() and 1 <= int(k) <= 9}
 
+    def _on_sel_state(self, has: bool):
+        self.act_crop.setEnabled(has)
+        self.act_crop_copy.setEnabled(has)
+
+    def apply_crop_copy_now(self) -> bool:
+        """Save the crop as a new file '<name>_cropped.ext' (preserves EXIF/ICC/text)."""
+        if not (0 <= self.index < len(self.files)) or not self.view.pix_item:
+            return False
+        sel_scene = self.view.pending_selection()
+        if not sel_scene:
+            self.status.showMessage("No selection to crop", 2500)
+            return False
+
+        path = self.files[self.index]
+        dw = self.view.pix_item.pixmap().width()
+        dh = self.view.pix_item.pixmap().height()
+        if dw <= 0 or dh <= 0:
+            return False
+
+        try:
+            im = Image.open(path)
+            im = ImageOps.exif_transpose(im)
+        except Exception as e:
+            QMessageBox.warning(self, "Crop failed", f"Open error: {e}")
+            return False
+
+        ow, oh = im.width, im.height
+        sx = ow / dw;
+        sy = oh / dh
+
+        left = max(0, min(ow, int(round(sel_scene.left() * sx))))
+        top = max(0, min(oh, int(round(sel_scene.top() * sy))))
+        right = max(0, min(ow, int(round(sel_scene.right() * sx))))
+        bottom = max(0, min(oh, int(round(sel_scene.bottom() * sy))))
+        if right - left < 2 or bottom - top < 2:
+            self.status.showMessage("Crop too small", 3000)
+            return False
+
+        w = right - left;
+        h = bottom - top
+
+        try:
+            fmt = (im.format or os.path.splitext(path)[1].lstrip(".")).upper()
+            exif_bytes = im.info.get("exif", None)
+            icc = im.info.get("icc_profile", None)
+            cropped = im.crop((left, top, right, bottom))
+
+            folder = os.path.dirname(path)
+            stem, ext = os.path.splitext(os.path.basename(path))
+            out = os.path.join(folder, f"{stem}_cropped{ext}")
+            if os.path.exists(out):
+                k = 1
+                while True:
+                    cand = os.path.join(folder, f"{stem}_cropped_{k}{ext}")
+                    if not os.path.exists(cand):
+                        out = cand
+                        break
+                    k += 1
+
+            if fmt in ("JPG", "JPEG"):
+                kw = {"quality": 95}
+                if exif_bytes: kw["exif"] = exif_bytes
+                if icc: kw["icc_profile"] = icc
+                cropped.save(out, format="JPEG", **kw)
+            elif fmt == "PNG":
+                pnginfo = PngImagePlugin.PngInfo()
+                for k, v in im.info.items():
+                    if k in ("exif", "icc_profile"): continue
+                    if isinstance(v, str):
+                        try:
+                            pnginfo.add_text(k, v)
+                        except:
+                            pass
+                kw = {"pnginfo": pnginfo}
+                if icc: kw["icc_profile"] = icc
+                cropped.save(out, format="PNG", **kw)
+            elif fmt == "WEBP":
+                kw = {}
+                if exif_bytes: kw["exif"] = exif_bytes
+                if icc: kw["icc_profile"] = icc
+                cropped.save(out, format="WEBP", **kw)
+            else:
+                cropped.save(out)
+
+            self.status.showMessage(f"Saved copy: {os.path.basename(out)} ({w}×{h}px)", 4000)
+            # Keep selection and current image; no reload needed
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "Crop failed", str(e))
+            return False
+
+    def apply_crop_now(self) -> bool:
+        """Apply current selection if any; return True on success, False if canceled/failed/no selection."""
+        if not (0 <= self.index < len(self.files)) or not self.view.pix_item:
+            return False
+        sel_scene = self.view.pending_selection()
+        if not sel_scene:
+            self.status.showMessage("No selection to crop", 2500)
+            return False
+
+        path = self.files[self.index]
+        dw = self.view.pix_item.pixmap().width()
+        dh = self.view.pix_item.pixmap().height()
+        if dw <= 0 or dh <= 0:
+            return False
+
+        try:
+            im = Image.open(path)
+            im = ImageOps.exif_transpose(im)
+        except Exception as e:
+            QMessageBox.warning(self, "Crop failed", f"Open error: {e}")
+            return False
+
+        ow, oh = im.width, im.height
+        sx = ow / dw;
+        sy = oh / dh
+
+        left = max(0, min(ow, int(round(sel_scene.left() * sx))))
+        top = max(0, min(oh, int(round(sel_scene.top() * sy))))
+        right = max(0, min(ow, int(round(sel_scene.right() * sx))))
+        bottom = max(0, min(oh, int(round(sel_scene.bottom() * sy))))
+
+        if right - left < 2 or bottom - top < 2:
+            self.status.showMessage("Crop too small", 3000)
+            return False
+
+        w = right - left;
+        h = bottom - top
+
+        try:
+            fmt = (im.format or os.path.splitext(path)[1].lstrip(".")).upper()
+            exif_bytes = im.info.get("exif", None)
+            icc = im.info.get("icc_profile", None)
+            cropped = im.crop((left, top, right, bottom))
+            tmp_path = path + ".crop_tmp"
+
+            if fmt in ("JPG", "JPEG"):
+                kw = {"quality": 95}
+                if exif_bytes: kw["exif"] = exif_bytes
+                if icc: kw["icc_profile"] = icc
+                cropped.save(tmp_path, format="JPEG", **kw)
+            elif fmt == "PNG":
+                pnginfo = PngImagePlugin.PngInfo()
+                for k, v in im.info.items():
+                    if k in ("exif", "icc_profile"): continue
+                    if isinstance(v, str):
+                        try:
+                            pnginfo.add_text(k, v)
+                        except:
+                            pass
+                kw = {"pnginfo": pnginfo}
+                if icc: kw["icc_profile"] = icc
+                cropped.save(tmp_path, format="PNG", **kw)
+            elif fmt == "WEBP":
+                kw = {}
+                if exif_bytes: kw["exif"] = exif_bytes
+                if icc: kw["icc_profile"] = icc
+                cropped.save(tmp_path, format="WEBP", **kw)
+            else:
+                cropped.save(tmp_path)
+
+            os.replace(tmp_path, path)
+            self.status.showMessage(f"Cropped → {w}×{h}px", 4000)
+            self.view.clear_selection()  # clear pending selection
+            self.view.set_path(path)  # reload
+            return True
+        except Exception as e:
+            try:
+                if os.path.exists(tmp_path): os.unlink(tmp_path)
+            except Exception:
+                pass
+            QMessageBox.warning(self, "Crop failed", str(e))
+            return False
+
+    def _confirm_and_crop(self, sel_scene: QRectF):
+        """Confirm and write crop in-place, preserving metadata."""
+        if not (0 <= self.index < len(self.files)):
+            return
+        path = self.files[self.index]
+        # displayed pixmap size
+        if not self.view.pix_item:
+            return
+        dw = self.view.pix_item.pixmap().width()
+        dh = self.view.pix_item.pixmap().height()
+        if dw <= 0 or dh <= 0:
+            return
+
+        # oriented original pixels
+        try:
+            im = Image.open(path)
+            im = ImageOps.exif_transpose(im)
+        except Exception as e:
+            QMessageBox.warning(self, "Crop failed", f"Open error: {e}")
+            return
+
+        ow, oh = im.width, im.height
+        sx = ow / dw
+        sy = oh / dh
+
+        # Map selection to original pixel box
+        left = max(0, min(ow, int(round(sel_scene.left() * sx))))
+        top = max(0, min(oh, int(round(sel_scene.top() * sy))))
+        right = max(0, min(ow, int(round(sel_scene.right() * sx))))
+        bottom = max(0, min(oh, int(round(sel_scene.bottom() * sy))))
+
+        if right - left < 2 or bottom - top < 2:
+            self.status.showMessage("Crop too small", 3000)
+            return
+
+        w = right - left
+        h = bottom - top
+        if QMessageBox.question(
+                self, "Confirm crop",
+                f"Crop to {w}×{h}px and overwrite the file?\n(Metadata will be preserved)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        # Preserve metadata (EXIF/ICC/text where applicable)
+        try:
+            fmt = (im.format or os.path.splitext(path)[1].lstrip(".")).upper()
+            exif_bytes = im.info.get("exif", None)
+            icc = im.info.get("icc_profile", None)
+
+            cropped = im.crop((left, top, right, bottom))
+
+            tmp_path = path + ".crop_tmp"
+
+            if fmt in ("JPG", "JPEG"):
+                save_kwargs = {"quality": 95}
+                if exif_bytes: save_kwargs["exif"] = exif_bytes
+                if icc: save_kwargs["icc_profile"] = icc
+                cropped.save(tmp_path, format="JPEG", **save_kwargs)
+            elif fmt == "PNG":
+                pnginfo = PngImagePlugin.PngInfo()
+                # copy textual metadata
+                for k, v in im.info.items():
+                    if k in ("exif", "icc_profile"):
+                        continue
+                    if isinstance(v, str):
+                        try:
+                            pnginfo.add_text(k, v)
+                        except Exception:
+                            pass
+                save_kwargs = {"pnginfo": pnginfo}
+                if icc: save_kwargs["icc_profile"] = icc
+                cropped.save(tmp_path, format="PNG", **save_kwargs)
+            elif fmt == "WEBP":
+                save_kwargs = {}
+                if exif_bytes: save_kwargs["exif"] = exif_bytes
+                if icc: save_kwargs["icc_profile"] = icc
+                cropped.save(tmp_path, format="WEBP", **save_kwargs)
+            else:
+                # fallback: keep ext-driven format
+                cropped.save(tmp_path)
+
+            os.replace(tmp_path, path)
+            self.status.showMessage(f"Cropped → {w}×{h}px", 4000)
+            # reload (respect fit/zoom)
+            self.view.set_path(path)
+            self.act_crop.setChecked(False)  # exit crop mode
+        except Exception as e:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
+            QMessageBox.warning(self, "Crop failed", str(e))
+
+    def _ensure_no_pending_crop(self) -> bool:
+        """
+        If a visible selection is pending, ask what to do:
+          - Crop   → apply_crop_now() and proceed on success
+          - Ignore → clear selection and proceed
+          - Cancel → stop the action
+        Returns True if it is safe to proceed.
+        """
+        if not self.view.has_visible_selection():
+            return True
+
+        mb = QMessageBox(self)
+        mb.setIcon(QMessageBox.Icon.Question)
+        mb.setWindowTitle("Pending crop")
+        mb.setText("You have a crop selection. What would you like to do?")
+        crop_btn = mb.addButton("Crop", QMessageBox.ButtonRole.AcceptRole)
+        ignore_btn = mb.addButton("Ignore", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = mb.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        mb.setDefaultButton(crop_btn)
+        mb.exec()
+
+        clicked = mb.clickedButton()
+        if clicked is crop_btn:
+            return self.apply_crop_now()  # this clears selection on success
+        elif clicked is ignore_btn:
+            self.view.clear_selection()
+            self.status.showMessage("Crop ignored", 2000)
+            return True
+        else:
+            # Cancel
+            return False
 
     def undo_last_move(self):
         """Undo the last successful move_to_slot. Safe if file went missing."""
@@ -387,6 +946,9 @@ class MainWindow(QMainWindow):
         ev.ignore()
 
     def open_path(self, path: str):
+        if not self._ensure_no_pending_crop():
+            return
+
         """Open either a folder or a single image; start from that image."""
         path = os.path.abspath(path)
         if os.path.isdir(path):
@@ -475,6 +1037,9 @@ class MainWindow(QMainWindow):
 
     # ---------- navigation ----------
     def goto_rel(self, delta: int):
+        if not self._ensure_no_pending_crop():
+            return
+
         if not self.files:
             return
         # wrap around with modulo
@@ -512,9 +1077,16 @@ class MainWindow(QMainWindow):
             self.view.key_reset_zoom();
             return
 
+        if key in (Qt.Key.Key_C, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.apply_crop_now()
+            return
+
         super().keyPressEvent(ev)
 
     def move_to_slot(self, digit: str):
+        if not self._ensure_no_pending_crop():
+            return
+
         if not (0 <= self.index < len(self.files)): return
         dest_root = self.mapping.get(digit, "").strip()
         if not dest_root:
@@ -619,7 +1191,13 @@ def main():
     sys.exit(app.exec())
 
 
+def closeEvent(self, ev):
+    if self._ensure_no_pending_crop():
+        ev.accept()
+    else:
+        ev.ignore()
 
 
 if __name__ == "__main__":
     main()
+
