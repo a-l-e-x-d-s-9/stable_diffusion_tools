@@ -227,6 +227,16 @@ class ImageView(QGraphicsView):
     def mousePressEvent(self, ev):
         if self._cropping and ev.button() == Qt.MouseButton.LeftButton and self.pix_item:
             pos_view = ev.position().toPoint()
+
+            # If a selection exists and the click is outside it → cancel selection
+            if self._pending_sel_scene is not None:
+                mode = self._hit_test_selection(pos_view)
+                if mode == "none":
+                    self.clear_selection()
+                    self.setCursor(self._cursor_for_mode("new"))
+                    ev.accept()
+                    return
+
             # If we have a selection, check if user wants to move/resize it
             mode = self._hit_test_selection(pos_view) if self._pending_sel_scene else "none"
             if mode != "none":
@@ -498,6 +508,7 @@ class MainWindow(QMainWindow):
 
         tb = QToolBar("Main", self); self.addToolBar(tb)
         self.act_open = QAction("Open Folder", self)
+        self.act_open_file = QAction("Open Image…", self)
         self.act_prev = QAction("Prev", self)
         self.act_next = QAction("Next", self)
         self.act_fit  = QAction("Fit", self)
@@ -518,9 +529,11 @@ class MainWindow(QMainWindow):
         self.act_next.setShortcut(QKeySequence(Qt.Key.Key_Right))
         self.act_fit.setShortcut(QKeySequence("/"))  # also '-' handled in keyPressEvent
 
-        for a in (self.act_open, self.act_prev, self.act_next, self.act_fit,
+        for a in (self.act_open, self.act_open_file, self.act_prev, self.act_next, self.act_fit,
                   self.act_undo, self.act_crop, self.act_crop_copy, self.act_settings):  # added act_crop_copy
             tb.addAction(a)
+
+        self.act_open_file.triggered.connect(self.open_file)
 
         self.act_crop.triggered.connect(self.apply_crop_now)
         self.act_crop_copy.triggered.connect(self.apply_crop_copy_now)
@@ -551,13 +564,55 @@ class MainWindow(QMainWindow):
 
         self.setAcceptDrops(True)
 
-        self.act_open_file = QAction("Open Image…", self)
-        tb.addAction(self.act_open_file)
-        self.act_open_file.triggered.connect(self.open_file)
+
 
         self.config = load_config()
         # mapping = only digit keys 1..9 from config
         self.mapping = {k: v for k, v in self.config.items() if k.isdigit() and 1 <= int(k) <= 9}
+
+    def _garbage_dir_for(self, path: str) -> str:
+        """Per-folder trash: <current-folder>/.trash"""
+        base = self.folder if self.folder else os.path.dirname(path)
+        d = os.path.join(base, ".trash")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def delete_current(self):
+        """Move current image into per-folder .trash and record undo."""
+        if not self._ensure_no_pending_crop():
+            return
+        if not (0 <= self.index < len(self.files)):
+            return
+
+        src = self.files[self.index]
+        trash_dir = self._garbage_dir_for(src)
+        base = os.path.basename(src)
+        dest = os.path.join(trash_dir, base)
+        if os.path.exists(dest):
+            stem, ext = os.path.splitext(base)
+            k = 1
+            while True:
+                alt = os.path.join(trash_dir, f"{stem}_del_{k}{ext}")
+                if not os.path.exists(alt):
+                    dest = alt
+                    break
+                k += 1
+
+        try:
+            shutil.move(src, dest)
+            # record undo
+            self._undo_stack.append({"op": "delete", "src": src, "dest": dest, "src_index": self.index})
+            self.act_undo.setEnabled(True)
+            # update list & show
+            del self.files[self.index]
+            if not self.files:
+                self.index = -1
+            else:
+                self.index = self.index % len(self.files)
+            self._show_current()
+            self.status.showMessage(f"Moved to trash: {os.path.basename(src)}", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "Delete failed", str(e))
 
     def _on_sel_state(self, has: bool):
         self.act_crop.setEnabled(has)
@@ -654,6 +709,7 @@ class MainWindow(QMainWindow):
         """Apply current selection if any; return True on success, False if canceled/failed/no selection."""
         if not (0 <= self.index < len(self.files)) or not self.view.pix_item:
             return False
+
         sel_scene = self.view.pending_selection()
         if not sel_scene:
             self.status.showMessage("No selection to crop", 2500)
@@ -665,6 +721,7 @@ class MainWindow(QMainWindow):
         if dw <= 0 or dh <= 0:
             return False
 
+        # open oriented original
         try:
             im = Image.open(path)
             im = ImageOps.exif_transpose(im)
@@ -673,28 +730,29 @@ class MainWindow(QMainWindow):
             return False
 
         ow, oh = im.width, im.height
-        sx = ow / dw;
+        sx = ow / dw
         sy = oh / dh
 
         left = max(0, min(ow, int(round(sel_scene.left() * sx))))
         top = max(0, min(oh, int(round(sel_scene.top() * sy))))
         right = max(0, min(ow, int(round(sel_scene.right() * sx))))
         bottom = max(0, min(oh, int(round(sel_scene.bottom() * sy))))
-
         if right - left < 2 or bottom - top < 2:
             self.status.showMessage("Crop too small", 3000)
             return False
 
-        w = right - left;
+        w = right - left
         h = bottom - top
 
-        try:
-            fmt = (im.format or os.path.splitext(path)[1].lstrip(".")).upper()
-            exif_bytes = im.info.get("exif", None)
-            icc = im.info.get("icc_profile", None)
-            cropped = im.crop((left, top, right, bottom))
-            tmp_path = path + ".crop_tmp"
+        # prepare save
+        fmt = (im.format or os.path.splitext(path)[1].lstrip(".")).upper()
+        exif_bytes = im.info.get("exif", None)
+        icc = im.info.get("icc_profile", None)
+        cropped = im.crop((left, top, right, bottom))
+        tmp_path = path + ".crop_tmp"
 
+        try:
+            # write to tmp with metadata preserved
             if fmt in ("JPG", "JPEG"):
                 kw = {"quality": 95}
                 if exif_bytes: kw["exif"] = exif_bytes
@@ -720,14 +778,33 @@ class MainWindow(QMainWindow):
             else:
                 cropped.save(tmp_path)
 
+            # BACKUP original into .trash BEFORE replacing (so undo can restore)
+            trash_dir = self._garbage_dir_for(path)
+            stem, ext = os.path.splitext(os.path.basename(path))
+            backup = os.path.join(trash_dir, f"{stem}_precrop{ext}")
+            bk = 1
+            while os.path.exists(backup):
+                backup = os.path.join(trash_dir, f"{stem}_precrop_{bk}{ext}")
+                bk += 1
+            shutil.copy2(path, backup)
+
+            # atomically replace
             os.replace(tmp_path, path)
+
+            # record undo
+            self._undo_stack.append({"op": "crop", "orig": path, "backup": backup, "index": self.index})
+            self.act_undo.setEnabled(True)
+
             self.status.showMessage(f"Cropped → {w}×{h}px", 4000)
             self.view.clear_selection()  # clear pending selection
-            self.view.set_path(path)  # reload
+            self.view.set_path(path)  # reload current image
             return True
+
         except Exception as e:
+            # best-effort tmp cleanup
             try:
-                if os.path.exists(tmp_path): os.unlink(tmp_path)
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
             except Exception:
                 pass
             QMessageBox.warning(self, "Crop failed", str(e))
@@ -862,61 +939,81 @@ class MainWindow(QMainWindow):
             return False
 
     def undo_last_move(self):
-        """Undo the last successful move_to_slot. Safe if file went missing."""
+        """Undo last operation: move, delete, or crop. Safe if files are missing."""
         if not self._undo_stack:
             return
 
         op = self._undo_stack.pop()
-        src_path = op.get("src")        # original location
-        dest_path = op.get("dest")      # where we moved it
-        orig_index = int(op.get("src_index", 0))
-
-        # If the moved file is gone (deleted or moved externally), just report & disable if empty.
-        if not dest_path or not os.path.exists(dest_path):
-            self.status.showMessage("Undo skipped: moved file is missing at destination", 4000)
-            if not self._undo_stack:
-                self.act_undo.setEnabled(False)
-            return
-
-        # Compute a restore path, avoiding collisions in the original folder
-        src_dir  = os.path.dirname(src_path) if src_path else self.folder or os.path.dirname(dest_path)
-        base     = os.path.basename(src_path) if src_path else os.path.basename(dest_path)
-        restore  = os.path.join(src_dir, base)
-
-        if os.path.exists(restore):
-            stem, ext = os.path.splitext(base)
-            k = 1
-            while True:
-                alt = os.path.join(src_dir, f"{stem}_restored_{k}{ext}")
-                if not os.path.exists(alt):
-                    restore = alt
-                    break
-                k += 1
+        typ = op.get("op", "move")
 
         try:
-            shutil.move(dest_path, restore)
+            if typ in ("move", "delete"):
+                # both are file moves; 'delete' is just a move to .trash
+                src_path = op.get("src")
+                dest_path = op.get("dest")
+                orig_index = int(op.get("src_index", 0))
+                if not dest_path or not os.path.exists(dest_path):
+                    self.status.showMessage("Undo skipped: file missing at destination", 4000)
+                    return
+
+                src_dir = os.path.dirname(src_path) if src_path else (self.folder or os.path.dirname(dest_path))
+                base = os.path.basename(src_path) if src_path else os.path.basename(dest_path)
+                restore = os.path.join(src_dir, base)
+                if os.path.exists(restore):
+                    stem, ext = os.path.splitext(base)
+                    k = 1
+                    while True:
+                        alt = os.path.join(src_dir, f"{stem}_restored_{k}{ext}")
+                        if not os.path.exists(alt):
+                            restore = alt
+                            break
+                        k += 1
+
+                shutil.move(dest_path, restore)
+
+                if self.folder and os.path.dirname(restore) == self.folder:
+                    ins = min(max(0, orig_index), len(self.files))
+                    self.files.insert(ins, restore)
+                    self.index = ins
+                else:
+                    self.files.append(restore)
+                    self.index = len(self.files) - 1
+
+                self._show_current()
+                self.status.showMessage("Undo: restored file", 3000)
+
+            elif typ == "crop":
+                orig = op.get("orig")
+                backup = op.get("backup")
+                idx = int(op.get("index", self.index))
+                if not (orig and backup and os.path.exists(backup)):
+                    self.status.showMessage("Undo crop skipped: backup missing", 4000)
+                    return
+
+                # put backup over the current (cropped) file
+                tmp = orig + ".undo_tmp"
+                shutil.copy2(backup, tmp)
+                os.replace(tmp, orig)
+
+                # show it
+                if self.folder and os.path.dirname(orig) == self.folder:
+                    # ensure file is listed
+                    if orig not in self.files:
+                        self.files.insert(min(idx, len(self.files)), orig)
+                    self.index = self.files.index(orig)
+                else:
+                    if orig not in self.files:
+                        self.files.append(orig)
+                    self.index = self.files.index(orig)
+
+                self._show_current()
+                self.status.showMessage("Undo: restored pre-crop image", 3000)
+
         except Exception as e:
             QMessageBox.warning(self, "Undo failed", str(e))
-            if not self._undo_stack:
-                self.act_undo.setEnabled(False)
-            return
 
-        # If this window is still on the same folder, put the file back into the list
-        if self.folder and os.path.dirname(restore) == self.folder:
-            # Insert near the original index if possible; clamp to current list size
-            ins = min(max(0, orig_index), len(self.files))
-            self.files.insert(ins, restore)
-            self.index = ins
-        else:
-            # Fallback: just append and show it
-            self.files.append(restore)
-            self.index = len(self.files) - 1
-
-        self._show_current()
-
-        if not self._undo_stack:
-            self.act_undo.setEnabled(False)
-
+        finally:
+            self.act_undo.setEnabled(bool(self._undo_stack))
 
     def open_file(self):
         p, _ = QFileDialog.getOpenFileName(self, "Choose an image")
@@ -1081,6 +1178,10 @@ class MainWindow(QMainWindow):
             self.apply_crop_now()
             return
 
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.delete_current()
+            return
+
         super().keyPressEvent(ev)
 
     def move_to_slot(self, digit: str):
@@ -1110,8 +1211,8 @@ class MainWindow(QMainWindow):
 
         try:
             shutil.move(src, dest)
-            # NEW: record for undo
-            self._undo_stack.append({"src": src, "dest": dest, "src_index": self.index})
+            # record for undo
+            self._undo_stack.append({"op":"move", "src": src, "dest": dest, "src_index": self.index})
             self.act_undo.setEnabled(True)
             # remove from list and show next
             del self.files[self.index]
@@ -1134,6 +1235,12 @@ class MainWindow(QMainWindow):
             self.config.update(self.mapping)  # keep non-digit keys (like last_path) intact
             save_config(self.config)
             self.status.showMessage("Saved destination folders", 3000)
+    def closeEvent(self, ev):
+        if self._ensure_no_pending_crop():
+            ev.accept()
+        else:
+            ev.ignore()
+
 
 def parse_cli():
     """
@@ -1191,11 +1298,6 @@ def main():
     sys.exit(app.exec())
 
 
-def closeEvent(self, ev):
-    if self._ensure_no_pending_crop():
-        ev.accept()
-    else:
-        ev.ignore()
 
 
 if __name__ == "__main__":
