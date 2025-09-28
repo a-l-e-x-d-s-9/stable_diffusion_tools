@@ -511,57 +511,93 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar(self); self.setStatusBar(self.status)
         self.view.requestOpenPath.connect(self.open_path)
 
-        tb = QToolBar("Main", self); self.addToolBar(tb)
-        self.act_open = QAction("Open Folder", self)
-        self.act_open_file = QAction("Open Image…", self)
-        self.act_prev = QAction("Prev", self)
-        self.act_next = QAction("Next", self)
-        self.act_fit  = QAction("Fit", self)
-        self.act_settings = QAction("Settings…", self)
+        tb = QToolBar("Main", self)
+        self.addToolBar(tb)
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
 
-        self.act_undo = QAction("Undo", self)
+        # Pretty style
+        tb.setStyleSheet("""
+        QToolBar { spacing: 6px; }
+        QToolButton {
+          padding: 6px 10px;
+          border-radius: 8px;
+          border: 1px solid #d0d0d0;
+          background: qlineargradient(x1:0,y1:0, x2:0,y2:1,
+                                      stop:0 #0a0a0a, stop:1 #000000);
+        }
+        QToolButton:hover { background: #0e060f; }
+        QToolButton[group="nav"]   { background: #0a040f; }
+        QToolButton[group="edit"]  { background: #0f040b; }
+        QToolButton[group="danger"]{ background: #0f0909; }
+        """)
+
+        # Actions (emoji + clearer titles)
+        self.act_open_any = QAction("📂 Open…", self)  # merged open
+        self.act_prev = QAction("⬅️ Prev", self)
+        self.act_next = QAction("➡️ Next", self)
+        self.act_fit = QAction("🔍 Fit", self)
+
+        self.act_undo = QAction("↩️ Undo", self)
         try:
-            # Nice-to-have shortcut (Ctrl+Z / Cmd+Z)
             self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
         except Exception:
             pass
-        self.act_undo.setEnabled(False)
+        self.act_crop = QAction("✂️ Crop", self)
+        self.act_crop_copy = QAction("🧩 Crop As Copy", self)
 
-        self.act_crop = QAction("Crop", self)
-        self.act_crop_copy = QAction("Crop As Copy", self)
+        self.act_settings = QAction("⚙️ Settings…", self)
 
+        # Shortcuts
         self.act_prev.setShortcut(QKeySequence(Qt.Key.Key_Left))
         self.act_next.setShortcut(QKeySequence(Qt.Key.Key_Right))
-        self.act_fit.setShortcut(QKeySequence("/"))  # also '-' handled in keyPressEvent
-
-        for a in (self.act_open, self.act_open_file, self.act_prev, self.act_next, self.act_fit,
-                  self.act_undo, self.act_crop, self.act_crop_copy, self.act_settings):  # added act_crop_copy
-            tb.addAction(a)
-
-        self.act_open_file.triggered.connect(self.open_file)
-
-        self.act_crop.triggered.connect(self.apply_crop_now)
-        self.act_crop_copy.triggered.connect(self.apply_crop_copy_now)
-
+        self.act_fit.setShortcut(QKeySequence("/"))
         self.act_crop_copy.setShortcut(QKeySequence("Shift+C"))
 
-        self.act_crop.setEnabled(False)
-        self.act_crop_copy.setEnabled(False)
-
-        self.view.selectionChanged.connect(self._on_sel_state)
-
-        self.act_open.triggered.connect(self.open_folder)
+        # Wire up
+        self.act_open_any.triggered.connect(self.open_any)
         self.act_prev.triggered.connect(lambda: self.goto_rel(-1))
         self.act_next.triggered.connect(lambda: self.goto_rel(+1))
         self.act_fit.triggered.connect(self.view.key_reset_zoom)
         self.act_undo.triggered.connect(self.undo_last_move)
+        self.act_crop.triggered.connect(self.apply_crop_now)
+        self.act_crop_copy.triggered.connect(self.apply_crop_copy_now)
         self.act_settings.triggered.connect(self.edit_settings)
+
+        # Add to toolbar with groups + separators
+        for a in (self.act_open_any, self.act_prev, self.act_next, self.act_fit):
+            tb.addAction(a)
+        tb.addSeparator()
+        for a in (self.act_crop, self.act_crop_copy, self.act_undo):
+            tb.addAction(a)
+        tb.addSeparator()
+        tb.addAction(self.act_settings)
+
+        # Tag buttons with a "group" property for CSS tinting
+        def _tag(tb, act, grp):
+            btn = tb.widgetForAction(act)
+            if btn:
+                btn.setProperty("group", grp)
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+
+        for a in (self.act_open_any, self.act_prev, self.act_next, self.act_fit):
+            _tag(tb, a, "nav")
+        for a in (self.act_crop, self.act_crop_copy, self.act_undo):
+            _tag(tb, a, "edit")
+        _tag(tb, self.act_settings, "danger")  # or just leave ungrouped
+
+        # Initially disable crop actions until there is a selection
+        self.act_crop.setEnabled(False)
+        self.act_crop_copy.setEnabled(False)
 
         self.folder: Optional[str] = None
         self.files: List[str] = []
         self.index: int = -1
 
         self._undo_stack: List[dict] = []
+        self._sel_last_rect = None  # type: Optional[tuple[int,int,int,int]]
+        self._sel_used_for_copy = False  # selection has been used for Crop As Copy since last change
+        self.view.selectionChanged.connect(self._on_sel_state)
 
         # Thread pool + wiring
         self.pool = QThreadPool.globalInstance()
@@ -569,11 +605,35 @@ class MainWindow(QMainWindow):
 
         self.setAcceptDrops(True)
 
-
-
         self.config = load_config()
         # mapping = only digit keys 1..9 from config
         self.mapping = {k: v for k, v in self.config.items() if k.isdigit() and 1 <= int(k) <= 9}
+
+    def _to_jpeg_compatible(self, im: Image.Image, bg=(255, 255, 255)) -> Image.Image:
+        """
+        Ensure a PIL image can be saved as JPEG:
+        - If it has alpha (RGBA/LA or P with transparency), flatten onto a solid background.
+        - Convert unusual modes (CMYK, etc.) to RGB.
+        """
+        if im.mode in ("RGB", "L"):  # JPEG accepts RGB or L (grayscale)
+            return im
+
+        # Paletted with transparency
+        if im.mode == "P":
+            if "transparency" in im.info:
+                im = im.convert("RGBA")
+            else:
+                return im.convert("RGB")
+
+        # Has alpha (RGBA/LA) → flatten onto bg
+        if im.mode in ("RGBA", "LA"):
+            rgba = im.convert("RGBA")
+            bg_im = Image.new("RGB", rgba.size, bg)
+            bg_im.paste(rgba, mask=rgba.split()[-1])  # alpha mask
+            return bg_im
+
+        # Other modes (CMYK, YCbCr, I;16, etc.)
+        return im.convert("RGB")
 
     def _legacy_trash_dir_for(self, path: str) -> str:
         """Old behavior: <working-folder>/.trash (unique per working folder)."""
@@ -695,8 +755,20 @@ class MainWindow(QMainWindow):
             self.status.showMessage("Nothing to delete", 2000)
 
     def _on_sel_state(self, has: bool):
+        # button enable/disable as before
         self.act_crop.setEnabled(has)
         self.act_crop_copy.setEnabled(has)
+
+        # Track selection geometry; if it changed, clear the "already used" flag
+        cur = self.view.pending_selection()
+        if cur is None:
+            self._sel_last_rect = None
+            self._sel_used_for_copy = False
+        else:
+            r = (int(cur.x()), int(cur.y()), int(cur.width()), int(cur.height()))
+            if self._sel_last_rect != r:
+                self._sel_last_rect = r
+                self._sel_used_for_copy = False
 
     def apply_crop_copy_now(self) -> bool:
         """Save the crop as a new file '<name>_cropped.ext' (preserves EXIF/ICC/text)."""
@@ -754,6 +826,7 @@ class MainWindow(QMainWindow):
                     k += 1
 
             if fmt in ("JPG", "JPEG"):
+                cropped = self._to_jpeg_compatible(cropped)  # <<< add this line
                 kw = {"quality": 95}
                 if exif_bytes: kw["exif"] = exif_bytes
                 if icc: kw["icc_profile"] = icc
@@ -778,8 +851,15 @@ class MainWindow(QMainWindow):
             else:
                 cropped.save(out)
 
+            # Add the new file into the browsing list (next to current)
+            if self.folder and os.path.dirname(out) == self.folder:
+                if out not in self.files:
+                    self.files.insert(min(self.index + 1, len(self.files)), out)
+
             self.status.showMessage(f"Saved copy: {os.path.basename(out)} ({w}×{h}px)", 4000)
-            # Keep selection and current image; no reload needed
+            self._sel_used_for_copy = True  # allow silent navigation with this crop box
+            # keep selection visible for consecutive Crop As Copy actions
+
             return True
         except Exception as e:
             QMessageBox.warning(self, "Crop failed", str(e))
@@ -834,6 +914,7 @@ class MainWindow(QMainWindow):
         try:
             # write to tmp with metadata preserved
             if fmt in ("JPG", "JPEG"):
+                cropped = self._to_jpeg_compatible(cropped)  # <<< add this line
                 kw = {"quality": 95}
                 if exif_bytes: kw["exif"] = exif_bytes
                 if icc: kw["icc_profile"] = icc
@@ -996,6 +1077,9 @@ class MainWindow(QMainWindow):
         """
         if not self.view.has_visible_selection():
             return True
+        if self._sel_used_for_copy:
+            # Selection was used for 'Crop As Copy' at least once since last edit → no prompt
+            return True
 
         mb = QMessageBox(self)
         mb.setIcon(QMessageBox.Icon.Question)
@@ -1095,10 +1179,27 @@ class MainWindow(QMainWindow):
         finally:
             self.act_undo.setEnabled(bool(self._undo_stack))
 
-    def open_file(self):
-        p, _ = QFileDialog.getOpenFileName(self, "Choose an image")
-        if p:
-            self.open_path(p)
+    def open_any(self):
+        """
+        Single dialog that lets you pick either a file or a folder.
+        Uses a non-native QFileDialog so selecting a directory works on all platforms.
+        """
+        dlg = QFileDialog(self, "Open Image or Folder")
+        dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        # show images by default, but folders remain selectable in the list
+        dlg.setNameFilters(
+            ["Images (*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.gif *.heic *.heif)", "All files (*)"])
+        if dlg.exec():
+            paths = dlg.selectedFiles()
+            if not paths:
+                return
+            # If a single directory was chosen, open it; otherwise treat first as a path
+            selected = paths[0]
+            if os.path.isdir(selected):
+                self.open_path(selected)
+            else:
+                self.open_path(selected)
 
     def dragEnterEvent(self, ev):
         if ev.mimeData().hasUrls():
@@ -1155,13 +1256,6 @@ class MainWindow(QMainWindow):
 
 
     # ---------- loading ----------
-    def open_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Choose folder with images")
-        if not d: return
-        self.folder = d
-        self.files = self._scan_images(d)
-        self.index = 0 if self.files else -1
-        self._show_current()
 
     def _scan_images(self, d: str) -> List[str]:
         out = []
@@ -1179,7 +1273,25 @@ class MainWindow(QMainWindow):
         if 0 <= self.index < len(self.files):
             path = self.files[self.index]
             self.view.set_path(path)
-            self.status.showMessage(f"[{self.index + 1}/{len(self.files)}] {path}")
+
+            # Try to read oriented size from the current pixmap (fast)
+            res = "?"
+            pi = getattr(self.view, "pix_item", None)
+            if pi is not None:
+                pm = pi.pixmap()
+                if not pm.isNull():
+                    res = f"{pm.width()}×{pm.height()}"
+            else:
+                # Fallback: open once with PIL and honor EXIF orientation
+                try:
+                    im = Image.open(path)
+                    im = ImageOps.exif_transpose(im)
+                    res = f"{im.width}×{im.height}"
+                except Exception:
+                    pass
+
+            self.status.showMessage(f"{res} [{self.index + 1}/{len(self.files)}] {path}")
+
             # persist last image path
             self.config["last_path"] = path
             save_config(self.config)
