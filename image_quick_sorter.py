@@ -906,7 +906,7 @@ class MainWindow(QMainWindow):
 
         # prepare save
         fmt = (im.format or os.path.splitext(path)[1].lstrip(".")).upper()
-        exif_bytes = im.info.get("exif", None)
+        exif_bytes = self._strip_orientation_exif_bytes(im.info.get("exif", None))
         icc = im.info.get("icc_profile", None)
         cropped = im.crop((left, top, right, bottom))
         tmp_path = path + ".crop_tmp"
@@ -1019,7 +1019,7 @@ class MainWindow(QMainWindow):
         # Preserve metadata (EXIF/ICC/text where applicable)
         try:
             fmt = (im.format or os.path.splitext(path)[1].lstrip(".")).upper()
-            exif_bytes = im.info.get("exif", None)
+            exif_bytes = self._strip_orientation_exif_bytes(im.info.get("exif", None))
             icc = im.info.get("icc_profile", None)
 
             cropped = im.crop((left, top, right, bottom))
@@ -1067,6 +1067,19 @@ class MainWindow(QMainWindow):
                 pass
             QMessageBox.warning(self, "Crop failed", str(e))
 
+    def _strip_orientation_exif_bytes(self, exif_bytes: bytes | None) -> bytes | None:
+        if not exif_bytes:
+            return None
+        try:
+            import piexif  # optional dependency
+            exif_dict = piexif.load(exif_bytes)
+            if piexif.ImageIFD.Orientation in exif_dict.get("0th", {}):
+                del exif_dict["0th"][piexif.ImageIFD.Orientation]
+            return piexif.dump(exif_dict)
+        except Exception:
+            # If piexif isn't available or parsing fails, keep original EXIF.
+            return exif_bytes
+
     def _ensure_no_pending_crop(self) -> bool:
         """
         If a visible selection is pending, ask what to do:
@@ -1112,28 +1125,25 @@ class MainWindow(QMainWindow):
 
         try:
             if typ in ("move", "delete"):
-                # both are file moves; 'delete' is just a move to .trash
                 src_path = op.get("src")
-                dest_path = op.get("dest")
                 orig_index = int(op.get("src_index", 0))
-                if not dest_path or not os.path.exists(dest_path):
-                    self.status.showMessage("Undo skipped: file missing at destination", 4000)
+                restore_from = op.get("dest") if typ == "move" else op.get("stash")
+
+                if not restore_from or not os.path.exists(restore_from):
+                    self.status.showMessage("Undo skipped: file missing at stored location", 4000)
                     return
 
-                src_dir = os.path.dirname(src_path) if src_path else (self.folder or os.path.dirname(dest_path))
-                base = os.path.basename(src_path) if src_path else os.path.basename(dest_path)
+                src_dir = os.path.dirname(src_path) if src_path else (self.folder or os.path.dirname(restore_from))
+                base = os.path.basename(src_path) if src_path else os.path.basename(restore_from)
                 restore = os.path.join(src_dir, base)
                 if os.path.exists(restore):
-                    stem, ext = os.path.splitext(base)
+                    stem, ext = os.path.splitext(base);
                     k = 1
-                    while True:
-                        alt = os.path.join(src_dir, f"{stem}_restored_{k}{ext}")
-                        if not os.path.exists(alt):
-                            restore = alt
-                            break
+                    while os.path.exists(os.path.join(src_dir, f"{stem}_restored_{k}{ext}")):
                         k += 1
+                    restore = os.path.join(src_dir, f"{stem}_restored_{k}{ext}")
 
-                shutil.move(dest_path, restore)
+                shutil.move(restore_from, restore)
 
                 if self.folder and os.path.dirname(restore) == self.folder:
                     ins = min(max(0, orig_index), len(self.files))
