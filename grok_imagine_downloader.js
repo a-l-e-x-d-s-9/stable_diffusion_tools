@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.2
-// @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF and MP4 metadata; no sidecars; dedupe; Ctrl+Shift+S
+// @version      2.3
+// @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF and MP4 metadata; strong dedupe by Signature + URL(normalized) + SHA1; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
 // @grant        GM_download
@@ -25,12 +25,14 @@
   const PROMPT_SELECTOR = `${PROMPT_SELECTOR_GEN}, ${PROMPT_SELECTOR_VIEW}`;
 
   // Behavior & storage keys
-  const STATE_KEY           = "grok_auto_on";
-  const SEEN_IMG_BYTES_KEY  = "grok_seen_sha1_v1";
-  const SEEN_VID_BYTES_KEY  = "grok_seen_vid_sha1_v1";
-  const SEEN_VID_URL_KEY    = "grok_seen_vid_urls_v1";
-  const MAX_WAIT_MS         = 20000;
-  const SCAN_INTERVAL_MS    = 1500;
+  const STATE_KEY              = "grok_auto_on";
+  const SEEN_IMG_BYTES_KEY     = "grok_seen_sha1_v1";
+  const SEEN_VID_BYTES_KEY     = "grok_seen_vid_sha1_v1";
+  const SEEN_VID_URL_KEY       = "grok_seen_vid_urls_v1";
+  const SEEN_VID_URL_NORM_KEY  = "grok_seen_vid_urls_norm_v1"; // NEW
+  const SEEN_SIGNATURE_KEY     = "grok_seen_signature_v1";     // NEW (images + videos)
+  const MAX_WAIT_MS            = 20000;
+  const SCAN_INTERVAL_MS       = 1500;
 
   // Filenames
   const INCLUDE_PROMPT_IN_NAME = true;
@@ -39,16 +41,22 @@
   // Heuristics
   const QUICK_SKIP_IMG_B64LEN  = 80000;   // tiny data-URL images => skip
   const QUICK_SKIP_VID_B64LEN  = 120000;  // tiny data-URL videos => skip
-  const TRUST_HTTPS_VIDEO       = true;    // treat https MP4 from grok as final
+  const TRUST_HTTPS_VIDEO      = true;    // treat https MP4 from grok as final
 
   // State
   let autoOn = GM_getValue(STATE_KEY, false);
-  let seenImgArr   = GM_getValue(SEEN_IMG_BYTES_KEY, []);
-  let seenVidArr   = GM_getValue(SEEN_VID_BYTES_KEY, []);
-  let seenVidUrlArr= GM_getValue(SEEN_VID_URL_KEY, []);
-  let seenImg      = new Set(seenImgArr);
-  let seenVid      = new Set(seenVidArr);
-  let seenVidUrls  = new Set(seenVidUrlArr);
+  let seenImgArr     = GM_getValue(SEEN_IMG_BYTES_KEY, []);
+  let seenVidArr     = GM_getValue(SEEN_VID_BYTES_KEY, []);
+  let seenVidUrlArr  = GM_getValue(SEEN_VID_URL_KEY, []);
+  let seenVidUrlNormArr = GM_getValue(SEEN_VID_URL_NORM_KEY, []);   // NEW
+  let seenSigArr     = GM_getValue(SEEN_SIGNATURE_KEY, []);         // NEW
+
+  let seenImg        = new Set(seenImgArr);
+  let seenVid        = new Set(seenVidArr);
+  let seenVidUrls    = new Set(seenVidUrlArr);
+  let seenVidUrlsNorm= new Set(seenVidUrlNormArr);                  // NEW
+  let seenSig        = new Set(seenSigArr);                         // NEW
+
   let lastSeenPrompt = "";
 
   // UI
@@ -59,6 +67,7 @@
   updateIndicator();
 
   GM_registerMenuCommand("Toggle auto-download (Ctrl+Shift+S)", toggleAuto);
+  GM_registerMenuCommand("Clear dedupe history", clearDedupe); // handy
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey && e.shiftKey && e.code === "KeyS") { e.preventDefault(); toggleAuto(); }
   });
@@ -81,6 +90,11 @@
     if (autoOn) { scanImages(); scanVideos(); }
   }
   function updateIndicator() { indicator.textContent = `Grok auto-download: ${autoOn ? "ON" : "OFF"}`; }
+  function clearDedupe() {
+    seenImg.clear(); seenVid.clear(); seenVidUrls.clear(); seenVidUrlsNorm.clear(); seenSig.clear();
+    persistSeen();
+    alert("Cleared dedupe history. Reload the page to re-scan.");
+  }
 
   // ---------------- Images ----------------
   function scanImages() {
@@ -128,6 +142,11 @@
     try { meta = await exifr.parse(bytes.buffer, { userComment: true }); } catch {}
     if (!isGrokFinal(meta)) return;
 
+    // Signature-based dedupe (NEW, strongest)
+    const sig = extractSignature(meta);
+    if (sig && seenSig.has(sig)) { imgEl.dataset.grokDone = "1"; return; }
+
+    // Hash-based dedupe (backstop)
     const sha1 = await sha1Hex(bytes);
     if (seenImg.has(sha1)) { imgEl.dataset.grokDone = "1"; return; }
 
@@ -135,16 +154,17 @@
     const prompt = getPromptNearestToNode(imgEl) || lastSeenPrompt || "";
 
     // Filename
-    const sig = extractSignature(meta);
     const artist = typeof meta?.Artist === "string" ? meta.Artist.trim() : "";
-    const stamp = isoStamp(new Date());
-    const dims  = dimStringFromImage(imgEl, meta);
-    const short = sig ? "sig" + sig.slice(0, 10) : "h" + sha1.slice(0, 10);
-    const slug  = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
+    const stamp  = isoStamp(new Date());
+    const dims   = dimStringFromImage(imgEl, meta);
+    const short  = sig ? "sig" + sig.slice(0, 10) : "h" + sha1.slice(0, 10);
+    const slug   = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
     const filename = ["grok", stamp, short, dims, slug].filter(Boolean).join("_") + ".jpg";
 
-    // Persist dedupe
-    seenImg.add(sha1); persistSeen();
+    // Persist dedupe (all keys we have)
+    if (sig) seenSig.add(sig);
+    seenImg.add(sha1);
+    persistSeen();
 
     // Inject EXIF (XPComment = Signature; UserComment = Prompt + Size + Artist + Page + SHA1)
     let outUrl = src;
@@ -244,13 +264,21 @@
       return;
     }
 
-    // Detect signature (filter previews) and compute SHA1 for dedupe (pre-injection)
     const u8 = new Uint8Array(abuf);
-    const sha1 = await sha1Hex(u8);
-    if (seenVid.has(sha1) || seenVidUrls.has(url)) { videoEl.dataset.grokDone = "1"; return; }
 
+    // Signature (NEW: first-class dedupe key)
     const signature = findSignatureAscii(u8); // base64 if present
-    if (!signature && url.startsWith("data:")) return; // require signature for data: (previews)
+    if (signature && seenSig.has(signature)) { videoEl.dataset.grokDone = "1"; return; }
+
+    // SHA1 backstop
+    const sha1 = await sha1Hex(u8);
+    const normUrl = normalizeUrl(url); // NEW
+    if (seenVid.has(sha1) || seenVidUrls.has(url) || seenVidUrlsNorm.has(normUrl)) {
+      videoEl.dataset.grokDone = "1"; return;
+    }
+
+    // For data: require signature (previews often lack it)
+    if (!signature && url.startsWith("data:")) return;
     if (!signature && url.startsWith("https://") && !TRUST_HTTPS_VIDEO) return;
 
     // Prompt & dims
@@ -258,19 +286,15 @@
     const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : "";
     const prompt = getPromptNearestToNode(videoEl) || lastSeenPrompt || "";
 
-    // Build comment payload
-    const extraParts = [];
-    if (prompt) extraParts.push(`Prompt: ${prompt}`);
-    if (sizeStr) extraParts.push(`Size: ${sizeStr}`);
-    // Artist comes from images' EXIF; for videos Grok often lacks it; leave empty if unknown
-    const artist = ""; // fill from page if you later find a reliable source
-    if (artist) extraParts.push(`Artist: ${artist}`);
-    extraParts.push(`Page: ${location.href}`);
-    extraParts.push(`SHA1: ${String(sha1).slice(0,16)}`);
-
-    const commentText =
-      (signature ? `Signature: ${signature}\n` : "") +
-      extraParts.join(", ");
+    // Build comment payload (same style as images' UserComment)
+    const parts = [];
+    if (signature) parts.push(`Signature: ${signature}`);
+    const extras = [];
+    if (prompt)  extras.push(`Prompt: ${prompt}`);
+    if (sizeStr) extras.push(`Size: ${sizeStr}`);
+    extras.push(`Page: ${location.href}`);
+    extras.push(`SHA1: ${String(sha1).slice(0,16)}`);
+    const commentText = (parts.join("\n") + (extras.length ? "\n" + extras.join(", ") : "")).trim();
 
     // Inject/append '©cmt' into MP4 moov/udta/meta/ilst
     let newU8;
@@ -287,9 +311,14 @@
     const slug  = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
     const filename = ["grokvid", stamp, short, sizeStr || null, slug].filter(Boolean).join("_") + ".mp4";
 
-    // Persist dedupe and save
-    seenVid.add(sha1); seenVidUrls.add(url); persistSeen();
+    // Persist dedupe (all keys we have)
+    if (signature) seenSig.add(signature);
+    seenVid.add(sha1);
+    seenVidUrls.add(url);
+    seenVidUrlsNorm.add(normUrl);
+    persistSeen();
 
+    // Save
     const blob = new Blob([newU8], { type: "video/mp4" });
     const objUrl = URL.createObjectURL(blob);
     await new Promise((resolve, reject) => {
@@ -336,6 +365,14 @@
   }
 
   // ---------- Shared helpers ----------
+  function normalizeUrl(u) {
+    try {
+      const x = new URL(u, location.href);
+      x.search = ""; x.hash = "";
+      return x.toString();
+    } catch { return u; }
+  }
+
   function getPromptNearestToNode(el) {
     const chips = collectNearbyChips(el, 6);
     if (!chips.length) return "";
@@ -428,7 +465,7 @@
     return piexif.insert(exifBytes, dataUrl);
   }
 
-  // ---------- MP4 metadata injection: moov/udta/meta/ilst/©cmt ----------
+  // ---------- MP4 metadata injection ----------
   function injectMp4Comment(u8in, commentText) {
     const te = new TextEncoder();
     const commentBytes = te.encode(commentText);
@@ -438,48 +475,35 @@
     const dataBox = fullBox("data", 0, 0, dataPayload);
 
     // Build '©cmt' item containing one 'data'
-    const cmtItem = box("\xA9cmt", dataBox); // \xA9 = ©
+    const cmtItem = box("\xA9cmt", dataBox);
 
     // Build 'ilst'
     const ilst = box("ilst", cmtItem);
 
-    // Build 'hdlr' (QuickTime/iTunes style)
-    // version/flags + pre_defined(0) + handler_type('mdir') + reserved(12x00) + name("Apple Metadata\0")
+    // 'hdlr' + 'meta'
     const name = new TextEncoder().encode("Apple Metadata\u0000");
-    const hdlrPayload = concatBytes(
-      u32be(0),               // pre_defined
-      str4("mdir"),           // handler type
-      new Uint8Array(12),     // reserved
-      name
-    );
+    const hdlrPayload = concatBytes(u32be(0), str4("mdir"), new Uint8Array(12), name);
     const hdlr = fullBox("hdlr", 0, 0, hdlrPayload);
-
-    // Build 'meta' (full box + children hdlr + ilst)
     const meta = fullBox("meta", 0, 0, concatBytes(hdlr, ilst));
 
-    // Build 'udta'
+    // 'udta'
     const udta = box("udta", meta);
 
     // Insert or append 'udta' inside 'moov'
     const { moovStart, moovSize } = findBox(u8in, 0, u8in.length, "moov");
     if (moovStart < 0) throw new Error("moov box not found");
 
-    // New moov = original moov bytes + our udta appended
     const oldMoov = u8in.subarray(moovStart, moovStart + moovSize);
     const newMoovSize = moovSize + udta.length;
     const newMoov = new Uint8Array(newMoovSize);
     newMoov.set(oldMoov, 0);
     newMoov.set(udta, moovSize);
-
-    // Patch size at start of moov
     writeU32be(newMoov, 0, newMoovSize);
 
-    // Assemble final file
     const out = new Uint8Array(u8in.length + udta.length);
     out.set(u8in.subarray(0, moovStart), 0);
     out.set(newMoov, moovStart);
     out.set(u8in.subarray(moovStart + moovSize), moovStart + newMoovSize);
-
     return out;
   }
 
@@ -503,6 +527,9 @@
     u8[off+1] = (v >>> 16) & 0xFF;
     u8[off+2] = (v >>>  8) & 0xFF;
     u8[off+3] = (v       ) & 0xFF;
+  }
+  function readStr4(u8, off) {
+    return String.fromCharCode(u8[off], u8[off+1], u8[off+2], u8[off+3]);
   }
   function str4(s) {
     const u = new Uint8Array(4);
@@ -555,7 +582,7 @@
     const w = imgEl?.naturalWidth || meta?.ExifImageWidth || meta?.ImageWidth;
     const h = imgEl?.naturalHeight || meta?.ExifImageHeight || meta?.ImageHeight;
     return (w && h) ? `${w}x${h}` : null;
-    }
+  }
   function isoStamp(d) {
     const p = n => String(n).padStart(2, "0");
     return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}T${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
@@ -587,20 +614,20 @@
   function persistSeen() {
     const trim = (set, keep) => {
       if (set.size > keep) {
-        const trimmed = Array.from(set).slice(-keep);
-        set.clear(); trimmed.forEach(v => set.add(v));
+        const arr = Array.from(set).slice(-keep);
+        set.clear(); arr.forEach(v => set.add(v));
       }
     };
-    trim(seenImg, 2000);
-    trim(seenVid, 1000);
-    trim(seenVidUrls, 1000);
+    trim(seenImg, 6000);
+    trim(seenVid, 6000);
+    trim(seenVidUrls, 6000);
+    trim(seenVidUrlsNorm, 6000);
+    trim(seenSig, 10000);
+
     GM_setValue(SEEN_IMG_BYTES_KEY, Array.from(seenImg));
     GM_setValue(SEEN_VID_BYTES_KEY, Array.from(seenVid));
     GM_setValue(SEEN_VID_URL_KEY, Array.from(seenVidUrls));
-  }
-  function anchorDownload(url, name) {
-    const a = document.createElement("a");
-    a.href = url; a.download = name; document.body.appendChild(a);
-    a.click(); a.remove();
+    GM_setValue(SEEN_VID_URL_NORM_KEY, Array.from(seenVidUrlsNorm));
+    GM_setValue(SEEN_SIGNATURE_KEY, Array.from(seenSig));
   }
 })();
