@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.0
-// @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt to JPEG EXIF; sidecar for MP4; dedupe; Ctrl+Shift+S toggle
+// @version      2.2
+// @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF and MP4 metadata; no sidecars; dedupe; Ctrl+Shift+S
 // @author       Alex
 // @match        https://grok.com/imagine*
 // @grant        GM_download
@@ -11,19 +11,20 @@
 // @grant        GM_setValue
 // @grant        GM_notification
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      *
 // @require      https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/lite.umd.js
 // @require      https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.js
 // ==/UserScript==
 (function () {
   "use strict";
 
-  // ---------- Config ----------
   // Prompt chips (generator + viewer)
   const PROMPT_SELECTOR_GEN  = "div.border.border-border-l2.bg-surface-l1.rounded-3xl";
   const PROMPT_SELECTOR_VIEW = "div.border.border-border-l2.bg-surface-l1.truncate.rounded-full";
   const PROMPT_SELECTOR = `${PROMPT_SELECTOR_GEN}, ${PROMPT_SELECTOR_VIEW}`;
 
-  // Behavior
+  // Behavior & storage keys
   const STATE_KEY           = "grok_auto_on";
   const SEEN_IMG_BYTES_KEY  = "grok_seen_sha1_v1";
   const SEEN_VID_BYTES_KEY  = "grok_seen_vid_sha1_v1";
@@ -36,21 +37,21 @@
   const PROMPT_SLUG_MAX        = 50;
 
   // Heuristics
-  const QUICK_SKIP_IMG_B64LEN  = 80000;  // tiny data-URL images => skip
-  const QUICK_SKIP_VID_B64LEN  = 120000; // tiny data-URL videos => skip
-  const TRUST_HTTPS_VIDEO       = true;   // assume https videos from grok.com are finals
+  const QUICK_SKIP_IMG_B64LEN  = 80000;   // tiny data-URL images => skip
+  const QUICK_SKIP_VID_B64LEN  = 120000;  // tiny data-URL videos => skip
+  const TRUST_HTTPS_VIDEO       = true;    // treat https MP4 from grok as final
 
-  // ---------- State ----------
+  // State
   let autoOn = GM_getValue(STATE_KEY, false);
-  let seenImgArr = GM_getValue(SEEN_IMG_BYTES_KEY, []);
-  let seenVidArr = GM_getValue(SEEN_VID_BYTES_KEY, []);
-  let seenVidUrlArr = GM_getValue(SEEN_VID_URL_KEY, []);
-  let seenImg = new Set(seenImgArr);
-  let seenVid = new Set(seenVidArr);     // SHA-1 of video bytes
-  let seenVidUrls = new Set(seenVidUrlArr); // URL-based dedupe fallback
+  let seenImgArr   = GM_getValue(SEEN_IMG_BYTES_KEY, []);
+  let seenVidArr   = GM_getValue(SEEN_VID_BYTES_KEY, []);
+  let seenVidUrlArr= GM_getValue(SEEN_VID_URL_KEY, []);
+  let seenImg      = new Set(seenImgArr);
+  let seenVid      = new Set(seenVidArr);
+  let seenVidUrls  = new Set(seenVidUrlArr);
   let lastSeenPrompt = "";
 
-  // ---------- UI ----------
+  // UI
   GM_addStyle(`#grok-auto-indicator{position:fixed;top:10px;right:10px;z-index:999999;background:rgba(20,20,24,.9);color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 system-ui,Segoe UI,Roboto,Ubuntu,Arial;box-shadow:0 2px 10px rgba(0,0,0,.25);pointer-events:none;user-select:none}`);
   const indicator = document.createElement("div");
   indicator.id = "grok-auto-indicator";
@@ -81,7 +82,7 @@
   }
   function updateIndicator() { indicator.textContent = `Grok auto-download: ${autoOn ? "ON" : "OFF"}`; }
 
-  // ---------- IMAGES (unchanged from your v1.9 behavior) ----------
+  // ---------------- Images ----------------
   function scanImages() {
     const q = 'img[alt="Generated image"], img[src^="data:image/"]';
     document.querySelectorAll(q).forEach(img => {
@@ -96,7 +97,7 @@
     const obs = new MutationObserver(async (muts) => {
       for (const m of muts) {
         if (m.type === "attributes" && m.attributeName === "src") {
-          try { await tryDownloadImageIfFinal(imgEl); } catch (e) { console.warn("check final failed:", e); }
+          try { await tryDownloadImageIfFinal(imgEl); } catch (e) { console.warn("img final check failed:", e); }
         }
       }
     });
@@ -130,7 +131,10 @@
     const sha1 = await sha1Hex(bytes);
     if (seenImg.has(sha1)) { imgEl.dataset.grokDone = "1"; return; }
 
+    // Prompt
     const prompt = getPromptNearestToNode(imgEl) || lastSeenPrompt || "";
+
+    // Filename
     const sig = extractSignature(meta);
     const artist = typeof meta?.Artist === "string" ? meta.Artist.trim() : "";
     const stamp = isoStamp(new Date());
@@ -139,9 +143,10 @@
     const slug  = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
     const filename = ["grok", stamp, short, dims, slug].filter(Boolean).join("_") + ".jpg";
 
+    // Persist dedupe
     seenImg.add(sha1); persistSeen();
 
-    // Inject EXIF (XPComment = Signature; UserComment = Prompt + info)
+    // Inject EXIF (XPComment = Signature; UserComment = Prompt + Size + Artist + Page + SHA1)
     let outUrl = src;
     if (mime === "jpeg" || mime === "jpg") {
       try {
@@ -165,9 +170,8 @@
     console.log("[Grok downloader][IMG] saved", filename);
   }
 
-  // ---------- VIDEOS (new) ----------
+  // ---------------- Videos ----------------
   function scanVideos() {
-    // Watch both <video> and nested <source>
     document.querySelectorAll("video").forEach(v => {
       if (v.dataset.grokWatching === "1" || v.dataset.grokDone === "1") return;
       v.dataset.grokWatching = "1";
@@ -187,31 +191,28 @@
     });
     obsVideo.observe(videoEl, { attributes: true, attributeFilter: ["src", "poster"] });
 
-    // Also track <source> children
-    const obsSources = new MutationObserver(async (muts) => {
+    // Watch <source> changes
+    const watchSources = () => {
+      videoEl.querySelectorAll("source").forEach(s => {
+        srcObs.observe(s, { attributes: true, attributeFilter: ["src"] });
+      });
+    };
+    const srcObs = new MutationObserver(async (muts) => {
       for (const m of muts) {
         if (m.type === "attributes" && m.attributeName === "src" && m.target.tagName === "SOURCE") {
-          try { await tryDownloadVideoIfFinal(videoEl); } catch (e) { console.warn("video<source> final check failed:", e); }
-        }
-        if (m.type === "childList") {
           try { await tryDownloadVideoIfFinal(videoEl); } catch {}
         }
       }
     });
-    videoEl.querySelectorAll("source").forEach(s => obsSources.observe(s, { attributes: true, attributeFilter: ["src"] }));
-    const obsChildren = new MutationObserver(() => {
-      obsSources.disconnect();
-      videoEl.querySelectorAll("source").forEach(s => obsSources.observe(s, { attributes: true, attributeFilter: ["src"] }));
-      try { tryDownloadVideoIfFinal(videoEl); } catch {}
-    });
-    obsChildren.observe(videoEl, { childList: true, subtree: true });
+    watchSources();
+    const childObs = new MutationObserver(() => { srcObs.disconnect(); watchSources(); try { tryDownloadVideoIfFinal(videoEl); } catch {} });
+    childObs.observe(videoEl, { childList: true, subtree: true });
 
-    // Initial attempt
     await tryDownloadVideoIfFinal(videoEl);
 
     const timer = setInterval(async () => {
       if (videoEl.dataset.grokDone === "1" || Date.now() - start > MAX_WAIT_MS) {
-        obsVideo.disconnect(); obsSources.disconnect(); obsChildren.disconnect();
+        obsVideo.disconnect(); srcObs.disconnect(); childObs.disconnect();
         clearInterval(timer); delete videoEl.dataset.grokWatching;
       } else if (autoOn) {
         await tryDownloadVideoIfFinal(videoEl);
@@ -225,102 +226,82 @@
     const url = getVideoUrl(videoEl);
     if (!url) return;
 
-    // Dedupe by URL for blob/https fallback
-    if (url.startsWith("blob:")) {
-      if (seenVidUrls.has(url)) { videoEl.dataset.grokDone = "1"; return; }
-      // We cannot read blob: bytes here; best effort: mark once and let user click if needed.
-      // We'll trigger a safe anchor download fallback (filename still applied).
-      const dims = await videoDims(videoEl);
-      const prompt = getPromptNearestToNode(videoEl) || lastSeenPrompt || "";
-      const stamp = isoStamp(new Date());
-      const short = "u" + hashOfString(url).slice(0, 10);
-      const slug  = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
-      const filename = ["grokvid", stamp, short, dims.w && dims.h ? `${dims.w}x${dims.h}` : null, slug].filter(Boolean).join("_") + ".mp4";
-      anchorDownload(url, filename);
-      seenVidUrls.add(url); persistSeen();
-      videoEl.dataset.grokDone = "1";
-      console.log("[Grok downloader][VID] saved (blob URL via anchor)", filename);
-      return;
-    }
-
+    // Get raw bytes (ArrayBuffer) regardless of URL scheme
+    let abuf;
     if (url.startsWith("data:")) {
       const m = url.match(/^data:video\/mp4;base64,(.*)$/i);
-      if (!m) return; // other codecs not handled yet
+      if (!m) return; // only mp4 in this version
       const b64 = m[1];
       if (b64.length < QUICK_SKIP_VID_B64LEN) return;
-
-      const bytes = b64ToUint8Array(b64);
-
-      // Require visible "Signature:" text somewhere in the MP4 (Comment atom)
-      const signature = findSignatureAscii(bytes); // returns base64 string or null
-      if (!signature) return;
-
-      const sha1 = await sha1Hex(bytes);
-      if (seenVid.has(sha1)) { videoEl.dataset.grokDone = "1"; return; }
-
-      const dims = await videoDims(videoEl);
-      const prompt = getPromptNearestToNode(videoEl) || lastSeenPrompt || "";
-      const stamp = isoStamp(new Date());
-      const short = "sig" + signature.slice(0, 10);
-      const slug  = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
-      const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : null;
-      const filename = ["grokvid", stamp, short, sizeStr, slug].filter(Boolean).join("_") + ".mp4";
-
-      seenVid.add(sha1); persistSeen();
-
-      // Download original bytes; also write a sidecar .txt with prompt + identifiers
-      await new Promise((resolve, reject) => {
-        GM_download({ url, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
-      });
-      await saveVideoSidecar(filename, {
-        signature_b64: signature,
-        page_url: location.href,
-        dims: sizeStr || "",
-        sha1: sha1,
-        prompt: prompt
-      });
-
-      videoEl.dataset.grokDone = "1";
-      console.log("[Grok downloader][VID] saved (data URL)", filename);
-      return;
-    }
-
-    if (url.startsWith("https://")) {
-      // If it’s coming from grok.com, we treat it as final (configurable)
+      abuf = b64ToUint8Array(b64).buffer;
+    } else if (url.startsWith("blob:")) {
+      const resp = await fetch(url);
+      abuf = await resp.arrayBuffer();
+    } else if (url.startsWith("https://")) {
       if (!TRUST_HTTPS_VIDEO) return;
-
-      if (seenVidUrls.has(url)) { videoEl.dataset.grokDone = "1"; return; }
-
-      const dims = await videoDims(videoEl);
-      const prompt = getPromptNearestToNode(videoEl) || lastSeenPrompt || "";
-      const stamp = isoStamp(new Date());
-      const short = "u" + hashOfString(url).slice(0, 10);
-      const slug  = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
-      const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : null;
-      const filename = ["grokvid", stamp, short, sizeStr, slug].filter(Boolean).join("_") + ".mp4";
-
-      // We can try to content-hash by fetching; but cross-origin/cookies may fail.
-      // Keep URL-based dedupe for reliability.
-      await new Promise((resolve, reject) => {
-        GM_download({ url, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
-      });
-      await saveVideoSidecar(filename, {
-        signature_b64: "", // unknown without reading bytes
-        page_url: location.href,
-        dims: sizeStr || "",
-        sha1: short.slice(1), // url-hash fragment
-        prompt: prompt
-      });
-
-      seenVidUrls.add(url); persistSeen();
-      videoEl.dataset.grokDone = "1";
-      console.log("[Grok downloader][VID] saved (https)", filename);
+      abuf = await gmFetchArrayBuffer(url);
+    } else {
       return;
     }
+
+    // Detect signature (filter previews) and compute SHA1 for dedupe (pre-injection)
+    const u8 = new Uint8Array(abuf);
+    const sha1 = await sha1Hex(u8);
+    if (seenVid.has(sha1) || seenVidUrls.has(url)) { videoEl.dataset.grokDone = "1"; return; }
+
+    const signature = findSignatureAscii(u8); // base64 if present
+    if (!signature && url.startsWith("data:")) return; // require signature for data: (previews)
+    if (!signature && url.startsWith("https://") && !TRUST_HTTPS_VIDEO) return;
+
+    // Prompt & dims
+    const dims = await videoDims(videoEl);
+    const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : "";
+    const prompt = getPromptNearestToNode(videoEl) || lastSeenPrompt || "";
+
+    // Build comment payload
+    const extraParts = [];
+    if (prompt) extraParts.push(`Prompt: ${prompt}`);
+    if (sizeStr) extraParts.push(`Size: ${sizeStr}`);
+    // Artist comes from images' EXIF; for videos Grok often lacks it; leave empty if unknown
+    const artist = ""; // fill from page if you later find a reliable source
+    if (artist) extraParts.push(`Artist: ${artist}`);
+    extraParts.push(`Page: ${location.href}`);
+    extraParts.push(`SHA1: ${String(sha1).slice(0,16)}`);
+
+    const commentText =
+      (signature ? `Signature: ${signature}\n` : "") +
+      extraParts.join(", ");
+
+    // Inject/append '©cmt' into MP4 moov/udta/meta/ilst
+    let newU8;
+    try {
+      newU8 = injectMp4Comment(u8, commentText);
+    } catch (e) {
+      console.warn("MP4 metadata inject failed, saving original:", e);
+      newU8 = u8;
+    }
+
+    // Filename
+    const stamp = isoStamp(new Date());
+    const short = signature ? "sig" + signature.slice(0, 10) : "h" + sha1.slice(0, 10);
+    const slug  = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
+    const filename = ["grokvid", stamp, short, sizeStr || null, slug].filter(Boolean).join("_") + ".mp4";
+
+    // Persist dedupe and save
+    seenVid.add(sha1); seenVidUrls.add(url); persistSeen();
+
+    const blob = new Blob([newU8], { type: "video/mp4" });
+    const objUrl = URL.createObjectURL(blob);
+    await new Promise((resolve, reject) => {
+      GM_download({ url: objUrl, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
+    });
+    URL.revokeObjectURL(objUrl);
+
+    videoEl.dataset.grokDone = "1";
+    console.log("[Grok downloader][VID] saved", filename);
   }
 
   function getVideoUrl(videoEl) {
-    // Prefer <video src>, else first <source src>
     const vs = videoEl.getAttribute("src");
     if (vs) return vs;
     const s = videoEl.querySelector("source[src]");
@@ -333,32 +314,28 @@
     await new Promise(res => {
       const on = () => { videoEl.removeEventListener("loadedmetadata", on); res(); };
       videoEl.addEventListener("loadedmetadata", on, { once: true });
-      // in case it already loaded
       if (videoEl.readyState >= 1) on();
     });
     return { w: videoEl.videoWidth || 0, h: videoEl.videoHeight || 0 };
   }
 
-  // Returns base64 signature if found in MP4 bytes (Comment atom holds "Signature: ...")
+  // Find "Signature: <base64>" as ASCII anywhere in MP4 (e.g., comment atom or muxer tag)
   function findSignatureAscii(uint8) {
-    // Decode to string safely in chunks
     const td = new TextDecoder("utf-8");
-    const step = 1 << 20; // 1MB chunk (videos are typically a few MB)
+    const step = 1 << 20;
     let partial = "";
     for (let i = 0; i < uint8.length; i += step) {
       const slice = uint8.subarray(i, Math.min(uint8.length, i + step));
       partial += td.decode(slice, { stream: i + step < uint8.length });
       const m = partial.match(/Signature:\s*([A-Za-z0-9+/=]+)/);
       if (m && m[1]) return m[1];
-      // keep last 100 chars to handle boundary splits
       partial = partial.slice(-100);
     }
-    // final flush
     const m = partial.match(/Signature:\s*([A-Za-z0-9+/=]+)/);
     return (m && m[1]) ? m[1] : null;
   }
 
-  // ---------- Prompt chip resolver (shared) ----------
+  // ---------- Shared helpers ----------
   function getPromptNearestToNode(el) {
     const chips = collectNearbyChips(el, 6);
     if (!chips.length) return "";
@@ -403,7 +380,24 @@
   }
   function safeRect(el) { try { return el.getBoundingClientRect(); } catch { return { top: 0, bottom: 0 }; } }
 
-  // ---------- JPEG EXIF inject (unchanged) ----------
+  function isGrokFinal(meta) {
+    if (!meta || typeof meta !== "object") return false;
+    const id = meta.ImageDescription || "";
+    const uc = meta.UserComment || "";
+    const art = meta.Artist || "";
+    const hasSig = /Signature:\s*[A-Za-z0-9+/=]+/.test(id) || /Signature:\s*[A-Za-z0-9+/=]+/.test(uc);
+    const hasArtist = typeof art === "string" && art.trim().length > 0;
+    return hasSig || hasArtist;
+  }
+  function extractSignature(meta) {
+    const id = meta?.ImageDescription;
+    const uc = meta?.UserComment;
+    const m = (typeof id === "string" && id.match(/Signature:\s*([A-Za-z0-9+/=]+)/)) ||
+              (typeof uc === "string" && uc.match(/Signature:\s*([A-Za-z0-9+/=]+)/));
+    return m ? m[1] : null;
+  }
+
+  // JPEG EXIF injection (unchanged)
   function injectMetaIntoJpeg(dataUrl, info) {
     if (!window.piexif) throw new Error("piexifjs not loaded");
     const exifObj = piexif.load(dataUrl);
@@ -419,8 +413,6 @@
     // User Comment (Prompt + Size + Artist + Page + SHA1)
     const parts = [];
     if (info.prompt) parts.push(`${info.prompt}`);
-    // Add any extra lines you like here:
-    // parts.push(`Negative prompt: bad quality, ...`);
     if (info.dims)   parts.push(`Size: ${info.dims}`);
     if (info.artist) parts.push(`Artist: ${info.artist}`);
     if (info.pageUrl)parts.push(`Page: ${info.pageUrl}`);
@@ -429,36 +421,141 @@
     const ucText = parts.join(", ");
     if (ucText) {
       const tag = piexif.ExifIFD.UserComment; // 0x9286
-      exifObj["Exif"][tag] = "ASCII\0\0\0" + ucText; // EXIF ASCII header + text
+      exifObj["Exif"][tag] = "ASCII\0\0\0" + ucText;
     }
 
     const exifBytes = piexif.dump(exifObj);
     return piexif.insert(exifBytes, dataUrl);
   }
 
-  // ---------- Sidecars ----------
-  async function saveVideoSidecar(mp4Name, extra) {
-    const base = mp4Name.replace(/\.mp4$/i, "");
-    const sidecar = base + ".txt";
-    const content =
-`file: ${mp4Name}
-signature_b64: ${extra.signature_b64 || ""}
-sha1: ${extra.sha1 || ""}
-dims: ${extra.dims || ""}
-page_url: ${extra.page_url || ""}
-prompt:
-${extra.prompt || ""}
-`;
-    const url = "data:text/plain;charset=utf-8," + encodeURIComponent(content);
-    await new Promise((res, rej) => GM_download({ url, name: sidecar, saveAs: false, onload: res, onerror: e => rej(e?.error || "dl error") }));
+  // ---------- MP4 metadata injection: moov/udta/meta/ilst/©cmt ----------
+  function injectMp4Comment(u8in, commentText) {
+    const te = new TextEncoder();
+    const commentBytes = te.encode(commentText);
+
+    // Build 'data' (full box: version/flags + type(1) + locale(0) + payload)
+    const dataPayload = concatBytes(u32be(1), u32be(0), commentBytes); // type=1 UTF-8, locale=0
+    const dataBox = fullBox("data", 0, 0, dataPayload);
+
+    // Build '©cmt' item containing one 'data'
+    const cmtItem = box("\xA9cmt", dataBox); // \xA9 = ©
+
+    // Build 'ilst'
+    const ilst = box("ilst", cmtItem);
+
+    // Build 'hdlr' (QuickTime/iTunes style)
+    // version/flags + pre_defined(0) + handler_type('mdir') + reserved(12x00) + name("Apple Metadata\0")
+    const name = new TextEncoder().encode("Apple Metadata\u0000");
+    const hdlrPayload = concatBytes(
+      u32be(0),               // pre_defined
+      str4("mdir"),           // handler type
+      new Uint8Array(12),     // reserved
+      name
+    );
+    const hdlr = fullBox("hdlr", 0, 0, hdlrPayload);
+
+    // Build 'meta' (full box + children hdlr + ilst)
+    const meta = fullBox("meta", 0, 0, concatBytes(hdlr, ilst));
+
+    // Build 'udta'
+    const udta = box("udta", meta);
+
+    // Insert or append 'udta' inside 'moov'
+    const { moovStart, moovSize } = findBox(u8in, 0, u8in.length, "moov");
+    if (moovStart < 0) throw new Error("moov box not found");
+
+    // New moov = original moov bytes + our udta appended
+    const oldMoov = u8in.subarray(moovStart, moovStart + moovSize);
+    const newMoovSize = moovSize + udta.length;
+    const newMoov = new Uint8Array(newMoovSize);
+    newMoov.set(oldMoov, 0);
+    newMoov.set(udta, moovSize);
+
+    // Patch size at start of moov
+    writeU32be(newMoov, 0, newMoovSize);
+
+    // Assemble final file
+    const out = new Uint8Array(u8in.length + udta.length);
+    out.set(u8in.subarray(0, moovStart), 0);
+    out.set(newMoov, moovStart);
+    out.set(u8in.subarray(moovStart + moovSize), moovStart + newMoovSize);
+
+    return out;
   }
 
-  // ---------- Utils ----------
+  // ---------- Low-level MP4 helpers ----------
+  function findBox(u8, start, end, fourcc) {
+    let p = start;
+    while (p + 8 <= end) {
+      const size = readU32be(u8, p);
+      const type = readStr4(u8, p + 4);
+      if (!size || size < 8) break;
+      if (type === fourcc) return { moovStart: p, moovSize: size };
+      p += size;
+    }
+    return { moovStart: -1, moovSize: 0 };
+  }
+  function readU32be(u8, off) {
+    return (u8[off] << 24) | (u8[off+1] << 16) | (u8[off+2] << 8) | (u8[off+3]);
+  }
+  function writeU32be(u8, off, v) {
+    u8[off]   = (v >>> 24) & 0xFF;
+    u8[off+1] = (v >>> 16) & 0xFF;
+    u8[off+2] = (v >>>  8) & 0xFF;
+    u8[off+3] = (v       ) & 0xFF;
+  }
+  function str4(s) {
+    const u = new Uint8Array(4);
+    for (let i = 0; i < 4; i++) u[i] = s.charCodeAt(i) & 0xFF;
+    return u;
+  }
+  function u32be(v) {
+    const u = new Uint8Array(4);
+    writeU32be(u, 0, v >>> 0);
+    return u;
+  }
+  function box(type4, payload) {
+    const size = 8 + payload.length;
+    const out = new Uint8Array(size);
+    writeU32be(out, 0, size);
+    for (let i = 0; i < 4; i++) out[4 + i] = type4.charCodeAt(i) & 0xFF;
+    out.set(payload, 8);
+    return out;
+  }
+  function fullBox(type4, version, flags, payload) {
+    const vf = new Uint8Array(4);
+    vf[0] = version & 0xFF;
+    vf[1] = (flags >>> 16) & 0xFF;
+    vf[2] = (flags >>>  8) & 0xFF;
+    vf[3] = (flags       ) & 0xFF;
+    return box(type4, concatBytes(vf, payload));
+  }
+  function concatBytes(...arrs) {
+    const len = arrs.reduce((a, b) => a + b.length, 0);
+    const out = new Uint8Array(len);
+    let p = 0;
+    for (const a of arrs) { out.set(a, p); p += a.length; }
+    return out;
+  }
+
+  // ---------- Net / misc helpers ----------
+  async function gmFetchArrayBuffer(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        responseType: "arraybuffer",
+        onload: (res) => resolve(res.response),
+        onerror: (e) => reject(e?.error || "gm xhr error")
+      });
+    });
+  }
+
   function dimStringFromImage(imgEl, meta) {
     const w = imgEl?.naturalWidth || meta?.ExifImageWidth || meta?.ImageWidth;
     const h = imgEl?.naturalHeight || meta?.ExifImageHeight || meta?.ImageHeight;
     return (w && h) ? `${w}x${h}` : null;
-  }
+    }
   function isoStamp(d) {
     const p = n => String(n).padStart(2, "0");
     return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}T${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
@@ -488,7 +585,6 @@ ${extra.prompt || ""}
     return norm.replace(/[^a-zA-Z0-9 _.-]/g, "").trim().replace(/\s+/g, "_");
   }
   function persistSeen() {
-    // keep roughly bounded
     const trim = (set, keep) => {
       if (set.size > keep) {
         const trimmed = Array.from(set).slice(-keep);
@@ -501,10 +597,6 @@ ${extra.prompt || ""}
     GM_setValue(SEEN_IMG_BYTES_KEY, Array.from(seenImg));
     GM_setValue(SEEN_VID_BYTES_KEY, Array.from(seenVid));
     GM_setValue(SEEN_VID_URL_KEY, Array.from(seenVidUrls));
-  }
-  function hashOfString(s) {
-    let h = 0; for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) >>> 0; }
-    return ("00000000" + h.toString(16)).slice(-8);
   }
   function anchorDownload(url, name) {
     const a = document.createElement("a");
