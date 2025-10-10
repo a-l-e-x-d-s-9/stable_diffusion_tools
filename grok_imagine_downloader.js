@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.3.3
+// @version      2.3.7
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -13,6 +13,8 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      *
+// @connect      assets.grok.com
+// @connect      imagine-public.x.ai
 // @require      https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/lite.umd.js
 // @require      https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.js
 // ==/UserScript==
@@ -31,8 +33,9 @@
   const SEEN_VID_URL_KEY       = "grok_seen_vid_urls_v1";
   const SEEN_VID_URL_NORM_KEY  = "grok_seen_vid_urls_norm_v1";
   const SEEN_SIGNATURE_KEY     = "grok_seen_signature_v1";
-  const MAX_WAIT_MS            = 20000;
-  const SCAN_INTERVAL_MS       = 1500;
+  const MAX_WAIT_MS            = 60000; // give Favorites more time
+  const SCAN_INTERVAL_MS       = 400;   // scan more frequently
+
 
   // Filenames
   const INCLUDE_PROMPT_IN_NAME = true;
@@ -42,6 +45,10 @@
   const QUICK_SKIP_IMG_B64LEN  = 80000;
   const QUICK_SKIP_VID_B64LEN  = 120000;
   const TRUST_HTTPS_VIDEO      = true;
+
+  // Safe selector for the masonry card / list item (escape the slash!)
+  const CARD_SELECTOR = '.group\\/media-post-masonry-card, [role="listitem"], .relative';
+
 
   // Per-page force
   const FORCE_PAGE_DEFAULT = false;
@@ -55,6 +62,40 @@
   let seenVidUrlsNorm= new Set(GM_getValue(SEEN_VID_URL_NORM_KEY, []));
   let seenSig        = new Set(GM_getValue(SEEN_SIGNATURE_KEY, []));
   let lastSeenPrompt = "";
+
+    // ---- small async queues to avoid network overload ----
+    const MAX_PARALLEL_FETCHES = 5;
+    const MAX_PARALLEL_DOWNLOADS = 4;
+
+    function makeQueue(limit) {
+      let active = 0;
+      const q = [];
+      const pump = () => {
+        while (active < limit && q.length) {
+          const {fn, resolve, reject} = q.shift();
+          active++;
+          (async () => {
+            try { resolve(await fn()); }
+            catch (e) { reject(e); }
+            finally { active--; pump(); }
+          })();
+        }
+      };
+      return (fn) => new Promise((resolve, reject) => { q.push({fn, resolve, reject}); pump(); });
+    }
+
+    const fetchQ = makeQueue(MAX_PARALLEL_FETCHES);
+    const dlQ    = makeQueue(MAX_PARALLEL_DOWNLOADS);
+
+    // small helper for 1 retry on transient errors
+    async function withRetry(fn, attempts = 2) {
+      let last;
+      for (let i = 0; i < attempts; i++) {
+        try { return await fn(); } catch (e) { last = e; }
+      }
+      throw last;
+    }
+
 
   // UI
   GM_addStyle(`#grok-auto-indicator{position:fixed;top:10px;right:10px;z-index:999999;background:rgba(20,20,24,.9);color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 system-ui,Segoe UI,Roboto,Ubuntu,Arial;box-shadow:0 2px 10px rgba(0,0,0,.25);pointer-events:none;user-select:none}`);
@@ -106,6 +147,7 @@
     const q = 'img[alt="Generated image"], img[src^="data:image/"]';
     document.querySelectorAll(q).forEach(img => {
       if (img.dataset.grokWatching === "1") return;
+      if (isVideoPosterImage(img)) return; // NEW: ignore video posters
       if (!forcePage && img.dataset.grokDone === "1") return;
       if (forcePage && img.dataset.grokDoneForce === "1") return;
       img.dataset.grokWatching = "1";
@@ -137,20 +179,60 @@
     if (!autoOn) return;
     if (!forcePage && imgEl.dataset.grokDone === "1") return;
     if (forcePage && imgEl.dataset.grokDoneForce === "1") return;
+    if (isVideoPosterImage(imgEl)) return; // NEW: skip posters even if force is on
 
     const src = imgEl.getAttribute("src") || "";
-    const m = src.match(/^data:image\/(jpeg|jpg|png);base64,(.*)$/i);
-    if (!m) return;
-    const mime = m[1].toLowerCase();
-    const b64  = m[2];
-    if (b64.length < QUICK_SKIP_IMG_B64LEN) return;
+    const onFavorites = location.pathname.includes("/imagine/favorites");
 
-    const bytes = b64ToUint8Array(b64);
+    let scheme = "";
+    if (src.startsWith("data:")) scheme = "data";
+    else if (src.startsWith("blob:")) scheme = "blob";
+    else if (src.startsWith("https://")) scheme = "https";
+    else return;
 
-    // Require Grok EXIF (skip previews)
+    // Acquire bytes + detect mime best-effort
+    let bytes = null;
+    let mime  = "jpeg"; // default; corrected below where possible
+
+    if (scheme === "data") {
+      const m = src.match(/^data:image\/(jpeg|jpg|png);base64,(.*)$/i);
+      if (!m) return;
+      mime = m[1].toLowerCase();
+      const b64 = m[2];
+      if (b64.length < QUICK_SKIP_IMG_B64LEN) return;
+      bytes = b64ToUint8Array(b64);
+    } else if (scheme === "blob") {
+      const abuf = await withRetry(() => fetchQ(async () => (await fetch(src)).arrayBuffer()));
+      bytes = new Uint8Array(abuf);
+      // Try extension hint
+      if (/\.jpe?g(\?|#|$)/i.test(src)) mime = "jpeg";
+      else if (/\.png(\?|#|$)/i.test(src)) mime = "png";
+    } else if (scheme === "https") {
+     const abuf = await withRetry(() => fetchQ(() => gmFetchArrayBuffer(src)));
+      bytes = new Uint8Array(abuf);
+      // Try extension hint
+      if (/\.jpe?g(\?|#|$)/i.test(src)) mime = "jpeg";
+      else if (/\.png(\?|#|$)/i.test(src)) mime = "png";
+    }
+
+
+    // Decide if this is a final image
     let meta = {};
-    try { meta = await exifr.parse(bytes.buffer, { userComment: true }); } catch {}
-    if (!isGrokFinal(meta)) return;
+    try {
+      // exifr works on JPEG; PNG often has no EXIF
+      if (mime === "jpeg" || mime === "jpg") {
+        meta = await exifr.parse(bytes.buffer, { userComment: true });
+      }
+    } catch {}
+
+    const isFinalExif = isGrokFinal(meta);
+    const isFinalEnough = isFinalExif || onFavorites || forcePage;
+
+    // For inline data: keep the strict check to avoid blur previews.
+    if (scheme === "data" && !isFinalExif) return;
+    // For https/blob: allow favorites (and force) even if EXIF missing.
+    if ((scheme === "https" || scheme === "blob") && !isFinalEnough) return;
+
 
     const sig = extractSignature(meta);
     let sha1;
@@ -177,11 +259,13 @@
     seenImg.add(sha1);
     persistSeen();
 
-    // Write EXIF for JPEGs
+    // Write EXIF for JPEGs when we have bytes; PNGs saved as-is
     let outUrl = src;
     if (mime === "jpeg" || mime === "jpg") {
       try {
-        outUrl = injectMetaIntoJpeg(src, {
+        // For https/blob we must build a data URL from the fetched bytes
+        const dataUrl = scheme === "data" ? src : bytesToDataURL("image/jpeg", bytes);
+        outUrl = injectMetaIntoJpeg(dataUrl, {
           signature: sig || "",
           prompt: prompt || "",
           dims: dims || "",
@@ -194,9 +278,11 @@
       }
     }
 
-    await new Promise((resolve, reject) => {
+    // Save (data URL or original URL)
+    await dlQ(() => new Promise((resolve, reject) => {
       GM_download({ url: outUrl, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
-    });
+    }));
+
     imgEl.dataset.grokDone = "1";
     if (forcePage) imgEl.dataset.grokDoneForce = "1";
     console.log("[Grok downloader][IMG] saved", filename);
@@ -283,7 +369,7 @@
         canInspect = false; // avoid cross-origin fetch in forced mode
       } else {
         if (!TRUST_HTTPS_VIDEO) return;
-        abuf = await gmFetchArrayBuffer(url); // bytes only for dedupe
+        abuf = await withRetry(() => fetchQ(() => gmFetchArrayBuffer(url)));
       }
     } else {
       return;
@@ -295,7 +381,6 @@
     if (canInspect && abuf) {
       const u8 = new Uint8Array(abuf);
       signature = findSignatureAscii(u8);
-      if (!forcePage && signature && seenSig.has(signature)) { videoEl.dataset.grokDone = "1"; return; }
 
       sha1 = await sha1Hex(u8);
       if (!forcePage && (seenVid.has(sha1) || seenVidUrls.has(url) || seenVidUrlsNorm.has(normUrl))) {
@@ -326,7 +411,6 @@
     const filename = ["grokvid", stamp, short, sizeStr || null, slug].filter(Boolean).join("_") + ".mp4";
 
     // Persist dedupe
-    if (signature) seenSig.add(signature);
     if (sha1)      seenVid.add(sha1);
     seenVidUrls.add(url);
     seenVidUrlsNorm.add(normUrl);
@@ -336,9 +420,9 @@
     if (url.startsWith("blob:")) {
       anchorDownload(url, filename);
     } else {
-      await new Promise((resolve, reject) => {
-        GM_download({ url, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
-      });
+        await dlQ(() => new Promise((resolve, reject) => {
+          GM_download({ url, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
+        }));
     }
 
     videoEl.dataset.grokDone = "1";
@@ -346,6 +430,47 @@
     console.log("[Grok downloader][VID]", forcePage ? "saved (FORCED)" : "saved", filename);
 
   }
+
+    function isVideoPosterImage(imgEl) {
+      // guard: if anything about selector parsing fails, never break the scan loop
+      let card = null;
+      try {
+        card = imgEl.closest(CARD_SELECTOR);
+      } catch (e) {
+        // Fallback: walk up a few ancestors if a future class change breaks the selector again
+        let cur = imgEl;
+        for (let i = 0; i < 4 && cur && !card; i++) {
+          if (cur.matches && (cur.matches('[role="listitem"]') || cur.matches('.relative'))) card = cur;
+          cur = cur.parentElement;
+        }
+      }
+      if (!card) card = imgEl.parentElement || null;
+      if (!card) return false;
+
+      const src = imgEl.src || "";
+
+      // 1) hard skip known poster host/patterns
+      //    (these are not finals; they're video thumbnails)
+      if (/imagine-public\.x\.ai\/imagine-public\/share-images\//.test(src)) return true;
+      if (/\/content(\?|#|$)/.test(src)) return true;
+
+      // 2) if a <video> exists in the same card and its poster equals this <img>, skip
+      const vid = card.querySelector && card.querySelector('video');
+      if (!vid) return false;
+
+      const poster = vid.getAttribute('poster') || '';
+      if (poster) {
+        // normalize before comparing to avoid query/hash mismatches
+        const p = normalizeUrl(poster);
+        const s = normalizeUrl(src);
+        if (p === s) return true;
+      }
+
+      return false;
+    }
+
+
+
 
   function getVideoUrl(videoEl) {
     const vs = videoEl.getAttribute("src");
@@ -559,5 +684,18 @@
 
   // ---- geometry helpers
   function safeRect(el) { try { return el.getBoundingClientRect(); } catch { return { top: 0, bottom: 0 }; } }
+
+    function u8ToBase64(u8) {
+      // chunked encode to avoid call stack limits
+      let out = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < u8.length; i += CHUNK) {
+        out += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+      }
+      return btoa(out);
+    }
+    function bytesToDataURL(mime, u8) {
+      return `data:${mime};base64,` + u8ToBase64(u8);
+    }
 
 })();
