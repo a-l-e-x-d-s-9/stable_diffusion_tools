@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.3.10
+// @version      2.4.16
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -12,11 +12,15 @@
 // @grant        GM_notification
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getResourceText
 // @connect      *
 // @connect      assets.grok.com
 // @connect      imagine-public.x.ai
 // @require      https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/lite.umd.js
 // @require      https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.js
+// @connect      cdn.jsdelivr.net
+// @connect      unpkg.com
+// @connect      fastly.jsdelivr.net
 // ==/UserScript==
 (function () {
   "use strict";
@@ -35,6 +39,12 @@
   const SEEN_SIGNATURE_KEY     = "grok_seen_signature_v1";
   const MAX_WAIT_MS            = 60000; // give Favorites more time
   const SCAN_INTERVAL_MS       = 400;   // scan more frequently
+
+    // === MP4 metadata embedding ===
+    const WRITE_MP4_COMMENT = false;       // IT'S IMPOSSIBLE TO USE IT
+    const MP4_COMMENT_MAX   = 10000;       // max bytes we’ll try to store in ©cmt
+
+    const WRITE_MP4_SIDECAR = false;      // don't drop .txt sidecars
 
 
   // Filenames
@@ -94,6 +104,92 @@
         delete el.dataset.grokWatching;
       });
     }
+
+    function buildVideoCommentLines(meta) {
+      const parts = [];
+      if (meta.signature) parts.push(`Signature: ${meta.signature}`);
+      if (meta.prompt)    parts.push(`Prompt: ${meta.prompt}`);
+      if (meta.size)      parts.push(`Size: ${meta.size}`);
+      if (meta.artist)    parts.push(`Artist: ${meta.artist}`);
+      if (meta.model)     parts.push(`Model: ${meta.model}`);
+      if (meta.page)      parts.push(`Page: ${meta.page}`);
+      if (meta.src)       parts.push(`Src: ${meta.src}`);
+      const comment = parts.join("\n");
+      return comment.length > MP4_COMMENT_MAX ? comment.slice(0, MP4_COMMENT_MAX) : comment;
+    }
+
+    let mp4boxReady = false;
+    let MP4 = null; // resolved reference to the mp4box API (sandbox or page)
+
+    async function ensureMp4Box() {
+      if (mp4boxReady) return;
+
+      // In userscript engines, @require libraries are in the sandbox scope, not page window.
+      MP4 = (typeof MP4Box !== "undefined")
+          ? MP4Box
+          : (typeof unsafeWindow !== "undefined" && unsafeWindow.MP4Box ? unsafeWindow.MP4Box : null);
+
+      if (!MP4) {
+        throw new Error("MP4Box missing — @require failed");
+      }
+
+      const tmp = MP4.createFile?.();
+      const hasGet  = !!(tmp && typeof tmp.getMeta === "function");
+      const hasSet  = !!(tmp && typeof tmp.setMeta === "function");   // optional on some builds
+      const hasSave = !!(tmp && (typeof tmp.save === "function" || typeof tmp.serialize === "function"));
+
+      if (!hasGet || !hasSave) {
+        // We need at least getMeta + save/serialize. If these are missing, this build cannot write tags.
+        throw new Error("This MP4Box build lacks getMeta/save (writer unavailable)");
+      }
+
+      // (Optional) one-time debug to confirm what the build exposes
+      try {
+        console.debug(`[Grok downloader] MP4Box ready — getMeta=${hasGet} setMeta=${hasSet} save=${hasSave}`);
+      } catch {}
+
+      mp4boxReady = true;
+    }
+
+    async function embedMp4Comment(uint8, comment) {
+      await ensureMp4Box();
+
+      return await new Promise((resolve, reject) => {
+        const file = MP4.createFile();
+        file.onError = (e) => reject(e || new Error("mp4box parse error"));
+        file.onReady = () => {
+          try {
+            if (typeof file.setMeta !== "function") {
+              // Some mp4box builds don’t include a metadata writer; let caller fall back.
+              throw new Error("setMeta missing in this MP4Box build");
+            }
+
+            const before = (typeof file.getMeta === "function" ? (file.getMeta() || {}) : {});
+            const after  = { ...before, "©cmt": [String(comment || "")] };
+            file.setMeta(after);
+
+            const outBuf = (typeof file.save === "function")
+              ? file.save({ keepMdat: true })
+              : (typeof file.serialize === "function" ? file.serialize() : null);
+
+            if (!outBuf || !(outBuf.byteLength > 0)) {
+              throw new Error("save/serialize returned empty buffer");
+            }
+            resolve(new Uint8Array(outBuf));
+          } catch (err) {
+            reject(err);
+          }
+        };
+
+        // Feed full file
+        const ab = uint8.buffer.slice(0);
+        // mp4box expects a fileStart property on the ArrayBuffer
+        ab.fileStart = 0;
+        file.appendBuffer(ab);
+        file.flush();
+      });
+    }
+
 
 
     // Hook SPA navigation
@@ -518,16 +614,47 @@
     seenVidUrlsNorm.add(normUrl);
     persistSeen();
 
-    // Save originals only (no MP4 rewriting)
-    if (url.startsWith("blob:")) {
-      anchorDownload(url, filename, myEpoch);
+        // ---- Save video, with optional MP4 comment embedding (works for https/blob/data) ----
+    const vidMeta = {
+      signature: signature || "",
+      prompt,
+      size: sizeStr || "",
+      artist: "",     // fill when you have it
+      model:  "",     // fill when you have it
+      page: location.href,
+      src: url
+    };
+
+    if (!WRITE_MP4_COMMENT) {
+      await simpleDownload(url, filename, myEpoch);
     } else {
-        await dlQ(() => new Promise((resolve, reject) => {
-          GM_download({ url, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
-        }));
+      const comment = buildVideoCommentLines(vidMeta);
+      try {
+        await ensureMp4Box();
+        const u8 = await fetchMp4Bytes(url);           // Uint8Array
+        const out = await embedMp4Comment(u8, comment); // Uint8Array with ©cmt
+        // Save edited MP4
+        const blob = new Blob([out], { type: "video/mp4" });
+        const objUrl = URL.createObjectURL(blob);
+        anchorDownload(objUrl, filename, myEpoch);
+        setTimeout(() => URL.revokeObjectURL(objUrl), 30000);
+        // Optional, convenient sidecar for grepping
+        if (WRITE_MP4_SIDECAR) {
+          downloadTextFile(comment, filename.replace(/\.mp4$/i, ".txt"), myEpoch);
+        }
+        console.debug("[Grok downloader][VID] MP4 comment embedded & saved");
+
+      } catch (e) {
+        console.warn("[Grok downloader][VID] MP4 comment embed failed; falling back:", e);
+        await simpleDownload(url, filename, myEpoch);
+        if (WRITE_MP4_SIDECAR) {
+          const fbComment = buildVideoCommentLines(vidMeta);
+          downloadTextFile(fbComment, filename.replace(/\.mp4$/i, ".txt"), myEpoch);
+        }
+      }
     }
 
-    videoEl.dataset.grokDone = "1";
+
     if (forcePage) videoEl.dataset.grokDoneForce = "1";
     console.log("[Grok downloader][VID]", forcePage ? "saved (FORCED)" : "saved", filename);
 
@@ -755,6 +882,7 @@
     const norm = normText(s).slice(0, max);
     return norm.replace(/[^a-zA-Z0-9 _.-]/g, "").trim().replace(/\s+/g, "_");
   }
+
     function anchorDownload(url, name, myEpoch) {
       if (typeof myEpoch === "number" && myEpoch !== routeEpoch) return;
       const a = document.createElement("a");
@@ -764,6 +892,45 @@
       a.click();
       a.remove();
     }
+
+    // download a small text file (used for MP4 comment sidecar)
+    function downloadTextFile(text, filename, epoch = Date.now()) {
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const url  = URL.createObjectURL(blob);
+      anchorDownload(url, filename, epoch);
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    }
+
+  async function fetchMp4Bytes(url) {
+    if (url.startsWith("blob:")) {
+      const resp = await fetch(url, { credentials: "include" });
+      return new Uint8Array(await resp.arrayBuffer());
+    } else if (url.startsWith("https://")) {
+      const abuf = await withRetry(() => fetchQ(() => gmFetchArrayBuffer(url)));
+      return new Uint8Array(abuf);
+    } else if (url.startsWith("data:")) {
+      const m = url.match(/^data:video\/mp4;base64,(.*)$/i);
+      if (!m) throw new Error("Unsupported data: URL for video");
+      return b64ToUint8Array(m[1]);
+    }
+    throw new Error("Unsupported video URL scheme");
+  }
+
+  function simpleDownload(url, filename, myEpoch) {
+    if (url.startsWith("blob:") || url.startsWith("data:")) {
+      anchorDownload(url, filename, myEpoch);
+      return Promise.resolve();
+    }
+    return dlQ(() => new Promise((resolve, reject) => {
+      GM_download({
+        url, name: filename, saveAs: false,
+        onload: resolve,
+        onerror: e => reject(e?.error || "download error"),
+        ontimeout: () => reject("timeout")
+      });
+    }));
+  }
+
 
   function hashOfString(s) {
     let h = 0; for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) >>> 0; }
