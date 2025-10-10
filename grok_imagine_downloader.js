@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.3.7
+// @version      2.3.10
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -62,10 +62,58 @@
   let seenVidUrlsNorm= new Set(GM_getValue(SEEN_VID_URL_NORM_KEY, []));
   let seenSig        = new Set(GM_getValue(SEEN_SIGNATURE_KEY, []));
   let lastSeenPrompt = "";
+  // Route epoch: bump on SPA navigation to cancel stale watchers/tasks
+  let routeEpoch = 0;
 
     // ---- small async queues to avoid network overload ----
     const MAX_PARALLEL_FETCHES = 5;
     const MAX_PARALLEL_DOWNLOADS = 4;
+
+    // --- Route helpers & SPA hooks ---
+    function normPath(href = location.href) {
+      const u = new URL(href, location.origin);
+      let p = u.pathname;
+      if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+      return p;
+    }
+
+    function onAllowedRoute() {
+      const p = normPath();
+      // Allow all imagine routes (root, favorites, post); block site root "/"
+      if (p === '/') return false;
+      return p === '/imagine' || p.startsWith('/imagine/');
+    }
+
+    // Reset per-page state but keep global de-dupe (by signature)
+    function resetPerPageState() {
+      // Mark the route for debugging/telemetry; active watchers self-cancel via routeEpoch checks
+      window.__GROK_ROUTE_KEY__ = normPath();
+
+      // Clear "watching" flags so new scans can pick items up again cleanly
+      document.querySelectorAll('[data-grok-watching="1"]').forEach(el => {
+        delete el.dataset.grokWatching;
+      });
+    }
+
+
+    // Hook SPA navigation
+    (function hookHistory(){
+      const push = history.pushState;
+      const replace = history.replaceState;
+      function fire(){ setTimeout(handleRouteChange, 0); }
+      history.pushState = function(){ const r = push.apply(this, arguments); fire(); return r; };
+      history.replaceState = function(){ const r = replace.apply(this, arguments); fire(); return r; };
+      window.addEventListener('popstate', fire);
+    })();
+
+    function handleRouteChange() {
+      if (!onAllowedRoute()) return; // don’t run on site root etc.
+      routeEpoch++;                  // invalidate all prior watchers & tasks
+      resetPerPageState();
+      // kick an initial scan after the route settles
+      setTimeout(() => { try { scanImages?.(); scanVideos?.(); } catch(e){} }, 150);
+    }
+
 
     function makeQueue(limit) {
       let active = 0;
@@ -117,6 +165,11 @@
     if (autoOn) { scanImages(); scanVideos(); }
   });
   mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+  // Initial pass shortly after load so we don't wait for a mutation
+  setTimeout(() => {
+    if (onAllowedRoute() && autoOn) { scanImages(); scanVideos(); }
+  }, 150);
+
 
   setInterval(() => { if (autoOn) { scanImages(); scanVideos(); } }, SCAN_INTERVAL_MS);
   if (autoOn) { scanImages(); scanVideos(); }
@@ -142,47 +195,126 @@
     alert("Cleared dedupe history. Reload the page to re-scan.");
   }
 
-  // ---------------- Images ----------------
-  function scanImages() {
-    const q = 'img[alt="Generated image"], img[src^="data:image/"]';
-    document.querySelectorAll(q).forEach(img => {
-      if (img.dataset.grokWatching === "1") return;
-      if (isVideoPosterImage(img)) return; // NEW: ignore video posters
-      if (!forcePage && img.dataset.grokDone === "1") return;
-      if (forcePage && img.dataset.grokDoneForce === "1") return;
-      img.dataset.grokWatching = "1";
-      watchImg(img).catch(err => { console.warn("watchImg error:", err); delete img.dataset.grokWatching; });
-    });
-  }
+    async function watchImg(imgEl) {
+      const myEpoch = Number(imgEl.dataset.grokEpoch || routeEpoch);
+      const start = Date.now();
 
-  async function watchImg(imgEl) {
-    const start = Date.now();
-    const obs = new MutationObserver(async (muts) => {
-      for (const m of muts) {
-        if (m.type === "attributes" && m.attributeName === "src") {
-          try { await tryDownloadImageIfFinal(imgEl); } catch (e) { console.warn("img final check failed:", e); }
+      const obs = new MutationObserver(async (muts) => {
+        if (myEpoch !== routeEpoch || !imgEl.isConnected) return;
+        for (const m of muts) {
+          if (m.type === "attributes" && m.attributeName === "src") {
+            try { await tryDownloadImageIfFinal(imgEl); } catch {}
+          }
         }
-      }
-    });
-    obs.observe(imgEl, { attributes: true, attributeFilter: ["src"] });
-    await tryDownloadImageIfFinal(imgEl);
-    const timer = setInterval(async () => {
-      if (imgEl.dataset.grokDone === "1" || Date.now() - start > MAX_WAIT_MS) {
-        obs.disconnect(); clearInterval(timer); delete imgEl.dataset.grokWatching;
-      } else if (autoOn) {
-        await tryDownloadImageIfFinal(imgEl);
-      }
-    }, 600);
-  }
+      });
+      obs.observe(imgEl, { attributes: true, attributeFilter: ["src"] });
+
+      // Initial attempt
+      try { await tryDownloadImageIfFinal(imgEl); } catch {}
+
+      // Periodic retry while the card settles
+      const timer = setInterval(async () => {
+        if (
+          myEpoch !== routeEpoch || !imgEl.isConnected ||
+          imgEl.dataset.grokDone === "1" ||
+          Date.now() - start > MAX_WAIT_MS
+        ) {
+          try { obs.disconnect(); } catch {}
+          clearInterval(timer);
+          delete imgEl.dataset.grokWatching;
+          return;
+        }
+        if (autoOn) { try { await tryDownloadImageIfFinal(imgEl); } catch {} }
+      }, 800);
+    }
+
+
+  // ---------------- Images ----------------
+    function scanImages() {
+      if (!onAllowedRoute()) return;
+
+      const onFavAtScan = location.pathname.includes("/imagine/favorites");
+      const q = 'img[alt="Generated image"], img[src^="data:image/"]';
+
+      document.querySelectorAll(q).forEach(img => {
+        if (img.dataset.grokWatching === "1") return;
+        if (isVideoPosterImage(img)) return; // skip video thumbnails
+
+        if (!forcePage && img.dataset.grokDone === "1") return;
+        if (forcePage && img.dataset.grokDoneForce === "1") return;
+
+        img.dataset.grokWatching = "1";
+        img.dataset.grokEpoch = String(routeEpoch);
+        if (onFavAtScan) img.dataset.grokFav = "1"; else delete img.dataset.grokFav;
+
+        watchImg(img).catch(err => { console.warn("watchImg error:", err); delete img.dataset.grokWatching; });
+      });
+    }
+
+
+
+    async function watchVideo(videoEl) {
+      const myEpoch = Number(videoEl.dataset.grokEpoch || routeEpoch);
+      const start = Date.now();
+
+      const obsVideo = new MutationObserver(async (muts) => {
+        if (myEpoch !== routeEpoch || !videoEl.isConnected) return;
+        for (const m of muts) {
+          if (m.type === "attributes" && (m.attributeName === "src" || m.attributeName === "poster")) {
+            try { await tryDownloadVideoIfFinal(videoEl); } catch (e) { console.warn("video final check failed:", e); }
+          }
+        }
+      });
+      obsVideo.observe(videoEl, { attributes: true, attributeFilter: ["src", "poster"] });
+
+      const srcObs = new MutationObserver(async (muts) => {
+        if (myEpoch !== routeEpoch || !videoEl.isConnected) return;
+        for (const m of muts) {
+          if (m.type === "attributes" && m.attributeName === "src" && m.target.tagName === "SOURCE") {
+            try { await tryDownloadVideoIfFinal(videoEl); } catch {}
+          }
+        }
+      });
+
+      const watchSources = () => {
+        videoEl.querySelectorAll("source").forEach(s => {
+          srcObs.observe(s, { attributes: true, attributeFilter: ["src"] });
+        });
+      };
+      watchSources();
+      const childObs = new MutationObserver(() => {
+        if (myEpoch !== routeEpoch || !videoEl.isConnected) return;
+        srcObs.disconnect(); watchSources();
+        try { tryDownloadVideoIfFinal(videoEl); } catch {}
+      });
+      childObs.observe(videoEl, { childList: true, subtree: true });
+
+      await tryDownloadVideoIfFinal(videoEl);
+
+      const timer = setInterval(async () => {
+        if (myEpoch !== routeEpoch || !videoEl.isConnected ||
+            videoEl.dataset.grokDone === "1" || Date.now() - start > MAX_WAIT_MS) {
+          try { obsVideo.disconnect(); srcObs.disconnect(); childObs.disconnect(); } catch {}
+          clearInterval(timer);
+          delete videoEl.dataset.grokWatching;
+          return;
+        }
+        if (autoOn) await tryDownloadVideoIfFinal(videoEl);
+      }, 800);
+    }
+
+
 
   async function tryDownloadImageIfFinal(imgEl) {
+    const myEpoch = Number(imgEl.dataset.grokEpoch || routeEpoch);
+    if (myEpoch !== routeEpoch || !imgEl.isConnected) return;
     if (!autoOn) return;
     if (!forcePage && imgEl.dataset.grokDone === "1") return;
     if (forcePage && imgEl.dataset.grokDoneForce === "1") return;
     if (isVideoPosterImage(imgEl)) return; // NEW: skip posters even if force is on
 
     const src = imgEl.getAttribute("src") || "";
-    const onFavorites = location.pathname.includes("/imagine/favorites");
+    const onFavorites = imgEl.dataset.grokFav === "1";
 
     let scheme = "";
     if (src.startsWith("data:")) scheme = "data";
@@ -252,7 +384,9 @@
     const dims   = dimStringFromImage(imgEl, meta);
     const short  = sig ? "sig" + sig.slice(0, 10) : "h" + sha1.slice(0, 10);
     const slug   = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
-    const filename = ["grok", stamp, short, dims, slug].filter(Boolean).join("_") + ".jpg";
+    const ext = (mime === "png") ? "png" : "jpg";
+    const filename = ["grok", stamp, short, dims, slug].filter(Boolean).join("_") + "." + ext;
+
 
     // Persist dedupe
     if (sig) seenSig.add(sig);
@@ -280,6 +414,7 @@
 
     // Save (data URL or original URL)
     await dlQ(() => new Promise((resolve, reject) => {
+      if (myEpoch !== routeEpoch) return; // don’t save if we navigated meanwhile
       GM_download({ url: outUrl, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
     }));
 
@@ -290,58 +425,25 @@
   }
 
   // ---------------- Videos ----------------
-  function scanVideos() {
-    document.querySelectorAll("video").forEach(v => {
-      if (v.dataset.grokWatching === "1") return;
-      if (!forcePage && v.dataset.grokDone === "1") return;
-      if (forcePage && v.dataset.grokDoneForce === "1") return;
-      v.dataset.grokWatching = "1";
-      watchVideo(v).catch(err => { console.warn("watchVideo error:", err); delete v.dataset.grokWatching; });
-    });
-  }
+    function scanVideos() {
+      if (!onAllowedRoute()) return;
 
-  async function watchVideo(videoEl) {
-    const start = Date.now();
+      document.querySelectorAll("video").forEach(v => {
+        if (v.dataset.grokWatching === "1") return;
+        if (!forcePage && v.dataset.grokDone === "1") return;
+        if (forcePage && v.dataset.grokDoneForce === "1") return;
 
-    const obsVideo = new MutationObserver(async (muts) => {
-      for (const m of muts) {
-        if (m.type === "attributes" && (m.attributeName === "src" || m.attributeName === "poster")) {
-          try { await tryDownloadVideoIfFinal(videoEl); } catch (e) { console.warn("video final check failed:", e); }
-        }
-      }
-    });
-    obsVideo.observe(videoEl, { attributes: true, attributeFilter: ["src", "poster"] });
+        v.dataset.grokWatching = "1";
+        v.dataset.grokEpoch = String(routeEpoch);
 
-    // Watch <source> changes
-    const watchSources = () => {
-      videoEl.querySelectorAll("source").forEach(s => {
-        srcObs.observe(s, { attributes: true, attributeFilter: ["src"] });
+        watchVideo(v).catch(err => { console.warn("watchVideo error:", err); delete v.dataset.grokWatching; });
       });
-    };
-    const srcObs = new MutationObserver(async (muts) => {
-      for (const m of muts) {
-        if (m.type === "attributes" && m.attributeName === "src" && m.target.tagName === "SOURCE") {
-          try { await tryDownloadVideoIfFinal(videoEl); } catch {}
-        }
-      }
-    });
-    watchSources();
-    const childObs = new MutationObserver(() => { srcObs.disconnect(); watchSources(); try { tryDownloadVideoIfFinal(videoEl); } catch {} });
-    childObs.observe(videoEl, { childList: true, subtree: true });
+    }
 
-    await tryDownloadVideoIfFinal(videoEl);
-
-    const timer = setInterval(async () => {
-      if (videoEl.dataset.grokDone === "1" || Date.now() - start > MAX_WAIT_MS) {
-        obsVideo.disconnect(); srcObs.disconnect(); childObs.disconnect();
-        clearInterval(timer); delete videoEl.dataset.grokWatching;
-      } else if (autoOn) {
-        await tryDownloadVideoIfFinal(videoEl);
-      }
-    }, 800);
-  }
 
   async function tryDownloadVideoIfFinal(videoEl) {
+    const myEpoch = Number(videoEl.dataset.grokEpoch || routeEpoch);
+    if (myEpoch !== routeEpoch || !videoEl.isConnected) return;
     if (!autoOn) return;
     if (!forcePage && videoEl.dataset.grokDone === "1") return;
     if (forcePage && videoEl.dataset.grokDoneForce === "1") return;
@@ -418,7 +520,7 @@
 
     // Save originals only (no MP4 rewriting)
     if (url.startsWith("blob:")) {
-      anchorDownload(url, filename);
+      anchorDownload(url, filename, myEpoch);
     } else {
         await dlQ(() => new Promise((resolve, reject) => {
           GM_download({ url, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
@@ -449,8 +551,7 @@
 
       const src = imgEl.src || "";
 
-      // 1) hard skip known poster host/patterns
-      //    (these are not finals; they're video thumbnails)
+      // 1) hard skip known poster host/patterns (these are video thumbnails, not finals)
       if (/imagine-public\.x\.ai\/imagine-public\/share-images\//.test(src)) return true;
       if (/\/content(\?|#|$)/.test(src)) return true;
 
@@ -468,6 +569,7 @@
 
       return false;
     }
+
 
 
 
@@ -653,11 +755,16 @@
     const norm = normText(s).slice(0, max);
     return norm.replace(/[^a-zA-Z0-9 _.-]/g, "").trim().replace(/\s+/g, "_");
   }
-  function anchorDownload(url, name) {
-    const a = document.createElement("a");
-    a.href = url; a.download = name; document.body.appendChild(a);
-    a.click(); a.remove();
-  }
+    function anchorDownload(url, name, myEpoch) {
+      if (typeof myEpoch === "number" && myEpoch !== routeEpoch) return;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
   function hashOfString(s) {
     let h = 0; for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) >>> 0; }
     return ("00000000" + h.toString(16)).slice(-8);
@@ -683,7 +790,6 @@
   }
 
   // ---- geometry helpers
-  function safeRect(el) { try { return el.getBoundingClientRect(); } catch { return { top: 0, bottom: 0 }; } }
 
     function u8ToBase64(u8) {
       // chunked encode to avoid call stack limits
