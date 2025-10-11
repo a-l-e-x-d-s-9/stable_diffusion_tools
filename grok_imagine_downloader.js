@@ -448,7 +448,7 @@
     let meta = {};
     try {
       // exifr works on JPEG; PNG often has no EXIF
-      if (mime === "jpeg" || mime === "jpg") {
+      if (mime === "jpeg" || mime === "jpg" || mime === "png") {
         meta = await exifr.parse(bytes.buffer, { userComment: true });
       }
     } catch {}
@@ -480,7 +480,7 @@
     const dims   = dimStringFromImage(imgEl, meta);
     const short  = sig ? "sig" + sig.slice(0, 10) : "h" + sha1.slice(0, 10);
     const slug   = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
-    const ext = (mime === "png") ? "png" : "jpg";
+    const ext = "jpg"; //(mime === "png") ? "png" : "jpg";
     const filename = ["grok", stamp, short, dims, slug].filter(Boolean).join("_") + "." + ext;
 
 
@@ -491,7 +491,7 @@
 
     // Write EXIF for JPEGs when we have bytes; PNGs saved as-is
     let outUrl = src;
-    if (mime === "jpeg" || mime === "jpg") {
+    if (mime === "jpeg" || mime === "jpg" || mime === "png") {
       try {
         // For https/blob we must build a data URL from the fetched bytes
         const dataUrl = scheme === "data" ? src : bytesToDataURL("image/jpeg", bytes);
