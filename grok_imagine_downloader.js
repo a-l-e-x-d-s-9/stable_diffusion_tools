@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.4.16
+// @version      2.4.20
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -59,6 +59,27 @@
   // Safe selector for the masonry card / list item (escape the slash!)
   const CARD_SELECTOR = '.group\\/media-post-masonry-card, [role="listitem"], .relative';
 
+    // --- Card & visibility helpers ---
+    function elementCard(el) {
+      try { return el.closest(CARD_SELECTOR); }
+      catch { return el.closest('[role="listitem"]') || el.closest('.relative'); }
+    }
+    function isEffectivelyVisible(el) {
+      const cs = getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden" || Number(cs.opacity) === 0) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 2 && r.height > 2;
+    }
+    function isFavoritedCard(card) {
+      if (!card) return false;
+      // Primary signal on favorites grid
+      if (card.querySelector('button[aria-label="Unsave"]')) return true;
+      // On the favorites route, cards often show only "Make video" on hover – treat those as finals too
+      if (onFavoritesRoute() && card.querySelector('button[aria-label="Make video"]')) return true;
+      return false;
+    }
+
+
 
   // Per-page force
   const FORCE_PAGE_DEFAULT = false;
@@ -75,6 +96,9 @@
   // Route epoch: bump on SPA navigation to cancel stale watchers/tasks
   let routeEpoch = 0;
 
+  let forceSeenThisPage = new Set(); // sha1s saved in current page/view when forcePage is on
+
+
     // ---- small async queues to avoid network overload ----
     const MAX_PARALLEL_FETCHES = 5;
     const MAX_PARALLEL_DOWNLOADS = 4;
@@ -86,6 +110,12 @@
       if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
       return p;
     }
+
+      function onFavoritesRoute() {
+        const p = normPath();
+        return p === "/imagine/favorites" || p.startsWith("/imagine/favorites/");
+      }
+
 
     function onAllowedRoute() {
       const p = normPath();
@@ -103,7 +133,25 @@
       document.querySelectorAll('[data-grok-watching="1"]').forEach(el => {
         delete el.dataset.grokWatching;
       });
+
+      // Clear stale done/doneForce so reused nodes are eligible again
+      document.querySelectorAll('[data-grok-done],[data-grok-done-force]').forEach(el => {
+        delete el.dataset.grokDone;
+        delete el.dataset.grokDoneForce;
+      });
+
+      // Clear any previous-page "fav" markers & first-seen timers
+      document.querySelectorAll('[data-grok-fav], [data-grok-first-seen]').forEach(el => {
+        delete el.dataset.grokFav;
+        delete el.dataset.grokFirstSeen;
+      });
+
+      // NEW: clear per-page force dedupe
+      forceSeenThisPage = new Set();
     }
+
+
+
 
     function buildVideoCommentLines(meta) {
       const parts = [];
@@ -329,23 +377,36 @@
     function scanImages() {
       if (!onAllowedRoute()) return;
 
-      const onFavAtScan = location.pathname.includes("/imagine/favorites");
-      const q = 'img[alt="Generated image"], img[src^="data:image/"]';
-
+      const q = 'img[alt="Generated image"], img[src^="data:image/"], img[src*="imagine-public.x.ai/imagine-public/images/"]';
       document.querySelectorAll(q).forEach(img => {
         if (img.dataset.grokWatching === "1") return;
-        if (isVideoPosterImage(img)) return; // skip video thumbnails
+        // On Favorites, process even if off-screen; elsewhere still require visibility
+        const requireVisible = !onFavoritesRoute();
+        if (requireVisible && !isEffectivelyVisible(img)) return;
+
+        if (isVideoPosterImage(img)) return;             // skip video thumbnails
 
         if (!forcePage && img.dataset.grokDone === "1") return;
         if (forcePage && img.dataset.grokDoneForce === "1") return;
 
+        const card = elementCard(img);
+        // Route says "Favorites" OR card has an Unsave heart OR (on Favorites) the card has "Make video"
+        const fav  = onFavoritesRoute() ||
+                     isFavoritedCard(card) ||
+                     (onFavoritesRoute() && !!card?.querySelector('button[aria-label="Make video"]'));
+
+
         img.dataset.grokWatching = "1";
         img.dataset.grokEpoch = String(routeEpoch);
-        if (onFavAtScan) img.dataset.grokFav = "1"; else delete img.dataset.grokFav;
+        img.dataset.grokFav = fav ? "1" : "0";           // NEW: label by card, not by URL route
 
-        watchImg(img).catch(err => { console.warn("watchImg error:", err); delete img.dataset.grokWatching; });
+        watchImg(img).catch(err => {
+          console.warn("watchImg error:", err);
+          delete img.dataset.grokWatching;
+        });
       });
     }
+
 
 
 
@@ -401,124 +462,171 @@
 
 
 
-  async function tryDownloadImageIfFinal(imgEl) {
-    const myEpoch = Number(imgEl.dataset.grokEpoch || routeEpoch);
-    if (myEpoch !== routeEpoch || !imgEl.isConnected) return;
-    if (!autoOn) return;
-    if (!forcePage && imgEl.dataset.grokDone === "1") return;
-    if (forcePage && imgEl.dataset.grokDoneForce === "1") return;
-    if (isVideoPosterImage(imgEl)) return; // NEW: skip posters even if force is on
+    async function tryDownloadImageIfFinal(imgEl) {
+      if (imgEl.dataset.grokSaving === "1") return; // already saving this node
 
-    const src = imgEl.getAttribute("src") || "";
-    const onFavorites = imgEl.dataset.grokFav === "1";
+      const myEpoch = Number(imgEl.dataset.grokEpoch || routeEpoch);
+      if (myEpoch !== routeEpoch || !imgEl.isConnected) return;
+      if (!autoOn) return;
+      if (!onFavoritesRoute() && !isEffectivelyVisible(imgEl)) return; // allow off-screen on Favorites
+      if (!forcePage && imgEl.dataset.grokDone === "1") return;
+      if (forcePage && imgEl.dataset.grokDoneForce === "1") return;
+      if (isVideoPosterImage(imgEl)) return;                   // keep skipping posters
 
-    let scheme = "";
-    if (src.startsWith("data:")) scheme = "data";
-    else if (src.startsWith("blob:")) scheme = "blob";
-    else if (src.startsWith("https://")) scheme = "https";
-    else return;
+      const card        = elementCard(imgEl);
+      const onFavorites = onFavoritesRoute() ||
+                          isFavoritedCard(card) ||
+                          (onFavoritesRoute() && !!card?.querySelector('button[aria-label="Make video"]'));
 
-    // Acquire bytes + detect mime best-effort
-    let bytes = null;
-    let mime  = "jpeg"; // default; corrected below where possible
+      const src = imgEl.getAttribute("src") || "";
 
-    if (scheme === "data") {
-      const m = src.match(/^data:image\/(jpeg|jpg|png);base64,(.*)$/i);
-      if (!m) return;
-      mime = m[1].toLowerCase();
-      const b64 = m[2];
-      if (b64.length < QUICK_SKIP_IMG_B64LEN) return;
-      bytes = b64ToUint8Array(b64);
-    } else if (scheme === "blob") {
-      const abuf = await withRetry(() => fetchQ(async () => (await fetch(src)).arrayBuffer()));
-      bytes = new Uint8Array(abuf);
-      // Try extension hint
-      if (/\.jpe?g(\?|#|$)/i.test(src)) mime = "jpeg";
-      else if (/\.png(\?|#|$)/i.test(src)) mime = "png";
-    } else if (scheme === "https") {
-     const abuf = await withRetry(() => fetchQ(() => gmFetchArrayBuffer(src)));
-      bytes = new Uint8Array(abuf);
-      // Try extension hint
-      if (/\.jpe?g(\?|#|$)/i.test(src)) mime = "jpeg";
-      else if (/\.png(\?|#|$)/i.test(src)) mime = "png";
-    }
+      const finalByHost = /imagine-public\.x\.ai\/imagine-public\/images\//.test(src);
 
 
-    // Decide if this is a final image
-    let meta = {};
-    try {
-      // exifr works on JPEG; PNG often has no EXIF
-      if (mime === "jpeg" || mime === "jpg" || mime === "png") {
-        meta = await exifr.parse(bytes.buffer, { userComment: true });
+      let scheme = "";
+      if (src.startsWith("data:")) scheme = "data";
+      else if (src.startsWith("blob:")) scheme = "blob";
+      else if (src.startsWith("https://")) scheme = "https";
+      else return;
+
+      // Acquire bytes + detect mime best-effort
+      let bytes = null;
+      let mime  = "jpeg"; // default; corrected below where possible
+
+      if (scheme === "data") {
+        const m = src.match(/^data:image\/(jpeg|jpg|png);base64,(.*)$/i);
+        if (!m) return;
+        mime = m[1].toLowerCase();
+        const b64 = m[2];
+        if (b64.length < QUICK_SKIP_IMG_B64LEN) return;
+        bytes = b64ToUint8Array(b64);
+      } else if (scheme === "blob") {
+        const abuf = await withRetry(() => fetchQ(async () => (await fetch(src)).arrayBuffer()));
+        bytes = new Uint8Array(abuf);
+        if (/\.jpe?g(\?|#|$)/i.test(src)) mime = "jpeg";
+        else if (/\.png(\?|#|$)/i.test(src)) mime = "png";
+      } else if (scheme === "https") {
+        const abuf = await withRetry(() => fetchQ(() => gmFetchArrayBuffer(src)));
+        bytes = new Uint8Array(abuf);
+        if (/\.jpe?g(\?|#|$)/i.test(src)) mime = "jpeg";
+        else if (/\.png(\?|#|$)/i.test(src)) mime = "png";
       }
-    } catch {}
 
-    const isFinalExif = isGrokFinal(meta);
-    const isFinalEnough = isFinalExif || onFavorites || forcePage;
+        // --- Poster grace: if we’re NOT on Favorites and EXIF isn’t final, wait briefly to see if a <video> arrives.
+        imgEl.dataset.grokFirstSeen ??= String(Date.now());
+        const firstSeen = Number(imgEl.dataset.grokFirstSeen) || Date.now();
+        const POSTER_GRACE_MS = 1400; // ~1.4s is enough for the <video poster> to attach
 
-    // For inline data: keep the strict check to avoid blur previews.
-    if (scheme === "data" && !isFinalExif) return;
-    // For https/blob: allow favorites (and force) even if EXIF missing.
-    if ((scheme === "https" || scheme === "blob") && !isFinalEnough) return;
-
-
-    const sig = extractSignature(meta);
-    let sha1;
-
-    if (!forcePage) {
-      if (sig && seenSig.has(sig)) { imgEl.dataset.grokDone = "1"; return; }
-      sha1 = await sha1Hex(bytes);
-      if (seenImg.has(sha1)) { imgEl.dataset.grokDone = "1"; return; }
-    } else {
-      sha1 = await sha1Hex(bytes); // still compute for naming
-    }
-
-    const prompt = getPromptNearestToNode(imgEl) || lastSeenPrompt || "";
-
-    const artist = typeof meta?.Artist === "string" ? meta.Artist.trim() : "";
-    const stamp  = isoStamp(new Date());
-    const dims   = dimStringFromImage(imgEl, meta);
-    const short  = sig ? "sig" + sig.slice(0, 10) : "h" + sha1.slice(0, 10);
-    const slug   = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
-    const ext = "jpg"; //(mime === "png") ? "png" : "jpg";
-    const filename = ["grok", stamp, short, dims, slug].filter(Boolean).join("_") + "." + ext;
+        if (!onFavorites && scheme !== "data") {
+          const hasVideoNow = !!card?.querySelector("video");
+          const isFinalExifNow = false; // we haven’t computed meta yet
+          if (!hasVideoNow && Date.now() - firstSeen < POSTER_GRACE_MS) {
+            // Defer – the periodic timer / mutation observer will retry
+            return;
+          }
+        }
 
 
-    // Persist dedupe
-    if (sig) seenSig.add(sig);
-    seenImg.add(sha1);
-    persistSeen();
+      // Decide if this is a final image
 
-    // Write EXIF for JPEGs when we have bytes; PNGs saved as-is
-    let outUrl = src;
-    if (mime === "jpeg" || mime === "jpg" || mime === "png") {
-      try {
-        // For https/blob we must build a data URL from the fetched bytes
-        const dataUrl = scheme === "data" ? src : bytesToDataURL("image/jpeg", bytes);
-        outUrl = injectMetaIntoJpeg(dataUrl, {
-          signature: sig || "",
-          prompt: prompt || "",
-          dims: dims || "",
-          artist: artist || "",
-          pageUrl: location.href,
-          sha1: sha1
-        });
-      } catch (e) {
-        console.warn("JPEG EXIF inject failed; downloading original:", e);
+        let meta = {};
+        try {
+          // exifr works on JPEG; PNG often has no EXIF
+          if (mime === "jpeg" || mime === "jpg" || mime === "png") {
+            meta = await exifr.parse(bytes.buffer, { userComment: true });
+          }
+        } catch {}
+
+        const isFinalExif = isGrokFinal(meta);
+        const isFinalEnough = isFinalExif || onFavorites || forcePage || finalByHost;
+
+
+        // For inline data: keep the strict check to avoid blur previews.
+        if (scheme === "data" && !isFinalExif) return;
+        // For https/blob: allow favorites (and force) even if EXIF missing.
+        if ((scheme === "https" || scheme === "blob") && !isFinalEnough) return;
+
+
+        const sig = extractSignature(meta);
+        let sha1;
+
+        if (!forcePage) {
+          if (sig && seenSig.has(sig)) { imgEl.dataset.grokDone = "1"; return; }
+          sha1 = await sha1Hex(bytes);
+          if (seenImg.has(sha1)) { imgEl.dataset.grokDone = "1"; return; }
+        } else {
+          sha1 = await sha1Hex(bytes); // still compute for naming
+        }
+
+        // In force mode, still avoid duplicates within this page/view
+        if (forcePage) {
+          if (forceSeenThisPage.has(sha1)) {
+            imgEl.dataset.grokDone = "1";
+            imgEl.dataset.grokDoneForce = "1";
+            return;
+          }
+          forceSeenThisPage.add(sha1);
+        }
+
+
+        const prompt = getPromptNearestToNode(imgEl) || lastSeenPrompt || "";
+
+        const artist = typeof meta?.Artist === "string" ? meta.Artist.trim() : "";
+        const stamp  = isoStamp(new Date());
+        const dims   = dimStringFromImage(imgEl, meta);
+        const short  = sig ? "sig" + sig.slice(0, 10) : "h" + sha1.slice(0, 10);
+        const slug   = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
+        const ext = "jpg"; //(mime === "png") ? "png" : "jpg";
+        const filename = ["grok", stamp, short, dims, slug].filter(Boolean).join("_") + "." + ext;
+
+
+        // Persist dedupe
+        if (sig) seenSig.add(sig);
+        seenImg.add(sha1);
+        persistSeen();
+
+        // Write EXIF for JPEGs when we have bytes; PNGs saved as-is
+        let outUrl = src;
+        if (mime === "jpeg" || mime === "jpg" || mime === "png") {
+          try {
+            // For https/blob we must build a data URL from the fetched bytes
+            const dataUrl = scheme === "data" ? src : bytesToDataURL("image/jpeg", bytes);
+            outUrl = injectMetaIntoJpeg(dataUrl, {
+              signature: sig || "",
+              prompt: prompt || "",
+              dims: dims || "",
+              artist: artist || "",
+              pageUrl: location.href,
+              sha1: sha1
+            });
+          } catch (e) {
+            console.warn("JPEG EXIF inject failed; downloading original:", e);
+          }
+        }
+
+        // Save (data URL or original URL) with race guard
+        imgEl.dataset.grokSaving = "1";
+        try {
+          await dlQ(() => new Promise((resolve, reject) => {
+            if (myEpoch !== routeEpoch) { resolve(); return; } // silently bail after nav
+            GM_download({
+              url: outUrl,
+              name: filename,
+              saveAs: false,
+              onload: resolve,
+              onerror: e => reject(e?.error || "download error"),
+              ontimeout: () => reject("timeout")
+            });
+          }));
+          imgEl.dataset.grokDone = "1";
+          if (forcePage) imgEl.dataset.grokDoneForce = "1";
+          console.log("[Grok downloader][IMG] saved", filename);
+        } finally {
+          delete imgEl.dataset.grokSaving;
+        }
+
+
       }
-    }
-
-    // Save (data URL or original URL)
-    await dlQ(() => new Promise((resolve, reject) => {
-      if (myEpoch !== routeEpoch) return; // don’t save if we navigated meanwhile
-      GM_download({ url: outUrl, name: filename, saveAs: false, onload: resolve, onerror: e => reject(e?.error || "download error"), ontimeout: () => reject("timeout") });
-    }));
-
-    imgEl.dataset.grokDone = "1";
-    if (forcePage) imgEl.dataset.grokDoneForce = "1";
-    console.log("[Grok downloader][IMG] saved", filename);
-
-  }
 
   // ---------------- Videos ----------------
     function scanVideos() {
@@ -526,15 +634,22 @@
 
       document.querySelectorAll("video").forEach(v => {
         if (v.dataset.grokWatching === "1") return;
+        const requireVisible = !onFavoritesRoute();
+        if (requireVisible && !isEffectivelyVisible(v)) return;
+
         if (!forcePage && v.dataset.grokDone === "1") return;
         if (forcePage && v.dataset.grokDoneForce === "1") return;
 
         v.dataset.grokWatching = "1";
         v.dataset.grokEpoch = String(routeEpoch);
 
-        watchVideo(v).catch(err => { console.warn("watchVideo error:", err); delete v.dataset.grokWatching; });
+        watchVideo(v).catch(err => {
+          console.warn("watchVideo error:", err);
+          delete v.dataset.grokWatching;
+        });
       });
     }
+
 
 
   async function tryDownloadVideoIfFinal(videoEl) {
