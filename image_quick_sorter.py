@@ -5,10 +5,10 @@ import os, sys, json, shutil
 from typing import List, Dict, Optional, Tuple
 
 from PyQt6.QtCore import (
-    Qt, QRectF, QSize, QTimer, QRunnable, QThreadPool, pyqtSignal, QObject
+    Qt, QRectF, QSize, QTimer, QRunnable, QThreadPool, pyqtSignal, QObject, QMimeData, QUrl
 )
 from PyQt6.QtGui import (
-    QPixmap, QAction, QKeySequence, QPainter, QImage
+    QPixmap, QAction, QKeySequence, QPainter, QImage, QDrag
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QFileDialog, QGraphicsView, QGraphicsScene,
@@ -95,6 +95,7 @@ class ImageView(QGraphicsView):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self._drag_out_start = None  # NEW: start point for Shift+drag (external DnD)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
@@ -230,6 +231,14 @@ class ImageView(QGraphicsView):
             return (None, None)
 
     def mousePressEvent(self, ev):
+        # Shift + Left = begin external drag (file reference)
+        if (ev.button() == Qt.MouseButton.LeftButton
+                and (ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                and self._path):
+            self._drag_out_start = ev.position().toPoint()
+            ev.accept()
+            return
+
         if self._cropping and ev.button() == Qt.MouseButton.LeftButton and self.pix_item:
             pos_view = ev.position().toPoint()
 
@@ -263,6 +272,34 @@ class ImageView(QGraphicsView):
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
+        # External drag if Shift is held and we primed it
+        if (self._drag_out_start is not None
+                and (ev.buttons() & Qt.MouseButton.LeftButton)
+                and (ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                and self._path):
+            if (ev.position().toPoint() - self._drag_out_start).manhattanLength() >= QApplication.startDragDistance():
+                mime = QMimeData()
+                # browsers expect text/uri-list
+                mime.setUrls([QUrl.fromLocalFile(self._path)])
+                # optional: also set text
+                mime.setText(self._path)
+
+                drag = QDrag(self)
+                drag.setMimeData(mime)
+                # pretty drag pixmap if we have one
+                if self.pix_item:
+                    pm = self.pix_item.pixmap()
+                    if not pm.isNull():
+                        drag.setPixmap(pm.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio,
+                                                 Qt.TransformationMode.SmoothTransformation))
+                drag.exec(Qt.DropAction.CopyAction)
+                self._drag_out_start = None
+                ev.accept()
+                return
+            # don’t fall through into crop logic while Shift is held
+            ev.accept()
+            return
+
         if self._cropping and self.pix_item:
             pos_view = ev.position().toPoint()
 
@@ -334,6 +371,12 @@ class ImageView(QGraphicsView):
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev):
+        if (self._drag_out_start is not None
+                and ev.button() == Qt.MouseButton.LeftButton):
+            self._drag_out_start = None
+            ev.accept()
+            return
+
         if self._cropping and ev.button() == Qt.MouseButton.LeftButton and self.pix_item:
             # at the end of your custom branch, before return:
             self._drag_mode = None
