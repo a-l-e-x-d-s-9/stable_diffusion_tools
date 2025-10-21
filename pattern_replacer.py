@@ -20,9 +20,10 @@ from PyQt6.QtGui import QAction, QTextOption
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPlainTextEdit, QPushButton, QFileDialog,
-    QScrollArea, QFrame, QToolButton, QSplitter, QSizePolicy, QSpacerItem
+    QScrollArea, QFrame, QToolButton, QSplitter, QSizePolicy, QSpacerItem,
+    QComboBox, QMessageBox, QInputDialog
 )
-import hashlib
+import time, hashlib
 
 # ---------------------------- Processing helpers ----------------------------
 getcontext().prec = 50
@@ -177,8 +178,31 @@ def expand_sum_inc(match: re.Match) -> str:
                 return f"{name}{colon}{_fmt(step_down(base, kk), q)}"
         return _slot_pat.sub(_repl, template).strip()
 
-    lines = [render_with_k(k) for k in ks]
+    # --- RENDER & (optionally) SORT BY TOTAL SUM ---
+    # Allow overriding the sorting via attribute:
+    sort_mode = (attrs.get("sort") or "sum_asc").strip().lower()
+    inc_per_row = step_mag * Decimal(nslots)
+
+    def sum_for_k(k: int) -> Decimal:
+        # Works for positive/negative k; total sum changes by inc_per_row * k
+        return sum0 + inc_per_row * Decimal(k)
+
+    rows: list[tuple[Decimal, str]] = []
+    for k in ks:
+        rendered = render_with_k(k)
+        rows.append((sum_for_k(k), rendered))
+
+    if sort_mode in ("none", "off", "false", "0"):
+        # keep generation order
+        lines = [r for _, r in rows]
+    elif sort_mode in ("desc", "sum_desc"):
+        lines = [r for _, r in sorted(rows, key=lambda t: t[0], reverse=True)]
+    else:
+        # default: ascending by total sum
+        lines = [r for _, r in sorted(rows, key=lambda t: t[0])]
+
     return "\n".join(lines)
+
 
 
 _loop_re = re.compile(r'<loop_(\d+)>(.*?)</loop>', re.DOTALL)
@@ -276,6 +300,8 @@ class PairRow(QWidget):
 # --------------------------------- Window ----------------------------------
 class MainWindow(QMainWindow):
     DEFAULTS_PATH = Path.home() / ".pattern_replacer_qt6.json"
+    PATTERN_HISTORY_PATH = Path.home() / ".pattern_replacer_qt6_patterns.json"
+    DEFAULT_RING_SIZE = 11  # default_0..default_10
 
     def __init__(self):
         super().__init__()
@@ -291,10 +317,40 @@ class MainWindow(QMainWindow):
         top_lay.setContentsMargins(10, 10, 10, 6)
         top_lay.setSpacing(8)
 
-        top_lay.addWidget(QLabel("Pattern"))
+        # Pattern header row (title + history dropdown + actions)
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+
+        hdr.addWidget(QLabel("Pattern"))
+
+        self.pattern_combo = QComboBox()
+        self.pattern_combo.setEditable(True)  # to allow placeholder
+        self.pattern_combo.lineEdit().setReadOnly(True)
+        self.pattern_combo.lineEdit().setPlaceholderText("History…")
+        self.pattern_combo.setMinimumWidth(220)
+        self.pattern_combo.setToolTip("Pick a saved pattern from history")
+        self.pattern_combo.currentTextChanged.connect(self._on_pattern_combo_changed)
+        hdr.addWidget(self.pattern_combo, 1)  # stretch
+
+        self.btn_hist_save = QPushButton("Save")
+        self.btn_hist_save.setToolTip("Save current editor contents to this name (asks to overwrite if exists)")
+        self.btn_hist_save.clicked.connect(self._on_history_save)
+        hdr.addWidget(self.btn_hist_save)
+
+        self.btn_hist_save_as = QPushButton("Save As")
+        self.btn_hist_save_as.clicked.connect(self._on_history_save_as)
+        hdr.addWidget(self.btn_hist_save_as)
+
+        self.btn_hist_delete = QPushButton("Delete")
+        self.btn_hist_delete.clicked.connect(self._on_history_delete)
+        hdr.addWidget(self.btn_hist_delete)
+
+        top_lay.addLayout(hdr)
+
+        # CREATE the editor BEFORE adding it
         self.input_edit = QPlainTextEdit()
         self.input_edit.setPlaceholderText("Enter pattern text with tags here...")
-        self.input_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)  # wrap long lines
+        self.input_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.input_edit.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         self.input_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         top_lay.addWidget(self.input_edit, 1)
@@ -440,6 +496,26 @@ class MainWindow(QMainWindow):
 
         self.apply_dark_theme()
 
+        self._last_saved_digest: bytes | None = None
+
+        self._pattern_history: dict[str, str] = {}
+        self._last_pattern_hash: bytes | None = None
+        self._last_snapshot_hash: bytes | None = None
+        self._last_snapshot_len: int = 0
+        self._last_snapshot_ts: float = 0.0
+        self._default_ring_index: int = 0
+
+        # Load manual pattern history into combo
+        self._load_pattern_history()
+        self._refresh_pattern_combo()
+
+        # Take periodic “default_*” snapshots on meaningful changes
+        self.input_edit.textChanged.connect(self._schedule_snapshot)  # add this
+        self._snapshot_timer = QTimer(self)
+        self._snapshot_timer.setInterval(1200)
+        self._snapshot_timer.setSingleShot(True)
+        self._snapshot_timer.timeout.connect(self._snapshot_if_significant)
+
         # Auto-load defaults on start
         if self.DEFAULTS_PATH.exists():
             try:
@@ -447,7 +523,138 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        self._last_saved_digest: bytes | None = None
+
+
+    # ---------- Pattern history (manual) ----------
+    def _history_atomic_write(self, path: Path, data: dict):
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+
+    def _load_pattern_history(self):
+        try:
+            if self.PATTERN_HISTORY_PATH.exists():
+                data = json.loads(self.PATTERN_HISTORY_PATH.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self._pattern_history = {str(k): str(v) for k, v in data.get("patterns", {}).items()}
+            else:
+                self._pattern_history = {}
+        except Exception:
+            self._pattern_history = {}
+
+    def _save_pattern_history(self):
+        try:
+            self.PATTERN_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            self._history_atomic_write(self.PATTERN_HISTORY_PATH, {"patterns": self._pattern_history})
+        except Exception:
+            pass
+
+    def _refresh_pattern_combo(self, keep_selection: bool = False):
+        current = self.pattern_combo.currentText() if keep_selection else ""
+        self.pattern_combo.blockSignals(True)
+        self.pattern_combo.clear()
+
+        # Sort: non-default names first (alpha), then default_* (by index)
+        def _sort_key(k: str):
+            return (1, int(k.split("_")[1])) if k.startswith("default_") and k[8:].isdigit() else (0, k.lower())
+
+        for name in sorted(self._pattern_history.keys(), key=_sort_key):
+            self.pattern_combo.addItem(name)
+        if keep_selection and current:
+            idx = self.pattern_combo.findText(current)
+            if idx >= 0:
+                self.pattern_combo.setCurrentIndex(idx)
+        self.pattern_combo.blockSignals(False)
+
+    def _on_pattern_combo_changed(self, name: str):
+        if not name:
+            return
+        text = self._pattern_history.get(name, "")
+        if text:
+            self.input_edit.setPlainText(text)
+
+    def _on_history_save(self):
+        name = self.pattern_combo.currentText().strip()
+        if not name:
+            # no name selected -> ask for one
+            name, ok = QInputDialog.getText(self, "Save Pattern", "Name:")
+            if not ok or not name.strip():
+                return
+            name = name.strip()
+
+        content = self.input_edit.toPlainText()
+        if name in self._pattern_history and self._pattern_history[name] != content:
+            # confirm overwrite
+            resp = QMessageBox.question(self, "Overwrite?",
+                                        f"Pattern '{name}' exists. Overwrite?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+
+        self._pattern_history[name] = content
+        self._save_pattern_history()
+        self._refresh_pattern_combo(keep_selection=True)
+
+    def _on_history_save_as(self):
+        name, ok = QInputDialog.getText(self, "Save Pattern As", "New name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name in self._pattern_history:
+            resp = QMessageBox.question(self, "Overwrite?",
+                                        f"Pattern '{name}' exists. Overwrite?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+        self._pattern_history[name] = self.input_edit.toPlainText()
+        self._save_pattern_history()
+        self._refresh_pattern_combo(keep_selection=True)
+        idx = self.pattern_combo.findText(name)
+        if idx >= 0:
+            self.pattern_combo.setCurrentIndex(idx)
+
+    def _on_history_delete(self):
+        name = self.pattern_combo.currentText().strip()
+        if not name:
+            return
+        resp = QMessageBox.question(self, "Delete?",
+                                    f"Delete pattern '{name}' from history?",
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        if name in self._pattern_history:
+            del self._pattern_history[name]
+            self._save_pattern_history()
+            self._refresh_pattern_combo()
+
+    # ---------- Default_* rotating snapshots on significant change ----------
+    def _schedule_snapshot(self):
+        self._snapshot_timer.start()
+
+    def _snapshot_if_significant(self):
+        text = self.input_edit.toPlainText()
+        if not text:
+            return
+        h = hashlib.sha256(text.encode("utf-8")).digest()
+        now = time.time()
+        length = len(text)
+
+        # Heuristic for "significant" change:
+        #  - hash changed AND (size changed by >= 48 chars OR at least 90s since last snapshot)
+        size_changed = abs(length - (self._last_snapshot_len or 0)) >= 48
+        time_passed = (now - (self._last_snapshot_ts or 0)) >= 90.0
+        if (self._last_snapshot_hash == h) or (not size_changed and not time_passed):
+            return
+
+        slot = f"default_{self._default_ring_index % self.DEFAULT_RING_SIZE}"
+        self._pattern_history[slot] = text
+        self._save_pattern_history()
+        self._refresh_pattern_combo(keep_selection=True)
+        self._default_ring_index = (self._default_ring_index + 1) % self.DEFAULT_RING_SIZE
+
+        self._last_snapshot_hash = h
+        self._last_snapshot_len = length
+        self._last_snapshot_ts = now
 
     def _encode_state(self) -> bytes:
         """Stable JSON bytes for change detection."""
@@ -511,7 +718,7 @@ class MainWindow(QMainWindow):
     def _atomic_write(self, path: Path, data_bytes: bytes):
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_bytes(data_bytes)
-        tmp.replace(path)  # atomic on POSIX
+        tmp.replace(path)
 
     def on_save_defaults(self):
         data_bytes = self._encode_state()
@@ -543,10 +750,12 @@ class MainWindow(QMainWindow):
                 self._last_saved_digest = None
 
     def on_save_project(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save Project As", "pattern_project.json", "Project (*.json);;All Files (*)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save Project As", "pattern_project.json",
+                                              "Project (*.json);;All Files (*)")
         if not path:
             return
-        self._atomic_write(Path(path), json.dumps(self.serialize_state(), ensure_ascii=False, indent=2))
+        data = json.dumps(self.serialize_state(), ensure_ascii=False, indent=2).encode("utf-8")
+        self._atomic_write(Path(path), data)
 
     def on_load_project(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load Project", "", "Project (*.json);;All Files (*)")
