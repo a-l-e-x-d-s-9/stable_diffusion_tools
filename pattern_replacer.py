@@ -24,6 +24,8 @@ from PyQt6.QtWidgets import (
     QComboBox, QMessageBox, QInputDialog
 )
 import time, hashlib
+import math
+
 
 # ---------------------------- Processing helpers ----------------------------
 getcontext().prec = 50
@@ -75,22 +77,130 @@ def expand_sum_inc(match: re.Match) -> str:
     attrs = _parse_attrs(match.group(1) or "")
     template = match.group(2)
 
-    interval_s = attrs.get("interval")
+    # ----- parse slots (names & initial numbers) -----
+    slot_matches = list(_slot_pat.finditer(template))
+    nslots = len(slot_matches)
+    if nslots == 0:
+        return "[sum_inc note: no numeric slots name:value found]"
+    base_vals = [Decimal(m.group(3)) for m in slot_matches]
+
+    # attributes
     upper_s = attrs.get("upper") or attrs.get("upper_bound") or attrs.get("stop")
     lower_s = attrs.get("lower") or attrs.get("lower_bound") or attrs.get("min")
     order = (attrs.get("order") or "up_first").strip().lower()
 
+    # NEW: count-based mode detection (aka “interval count”)
+    count_s = attrs.get("count") or attrs.get("interval_count") or attrs.get("sums") or attrs.get("count_sums")
+    dist = (attrs.get("dist") or attrs.get("distribution") or "uniform").strip().lower()
+    sigma_s = attrs.get("sigma")
+
+    # decimal places / quantizer
+    def places_for_all():
+        return max(
+            max((_dec_places(m.group(3)) for m in slot_matches), default=0),
+            _dec_places(upper_s or ""),
+            _dec_places(lower_s or ""),
+            _dec_places(attrs.get("interval") or "")
+        )
+    q = _quantizer(places_for_all())
+
+    # helper for rendering with a provided vector of values
+    def render_with_values(vals: list[Decimal]) -> str:
+        i = 0
+        def _repl(m: re.Match) -> str:
+            nonlocal i
+            name, colon = m.group(1), m.group(2)
+            d = vals[i]; i += 1
+            return f"{name}{colon}{_fmt(d, q)}"
+        return _slot_pat.sub(_repl, template).strip()
+
+    # ----------------------------
+    # COUNT MODE (new feature)
+    # ----------------------------
+    if count_s is not None:
+        # require bounds
+        if not (upper_s and lower_s):
+            return "[sum_inc error: count-mode requires lower=... and upper=...]"
+        try:
+            count = int(count_s)
+            if count <= 0:
+                return "[sum_inc error: count must be > 0]"
+        except Exception:
+            return "[sum_inc error: bad count]"
+
+        try:
+            lower = Decimal(lower_s)
+            upper = Decimal(upper_s)
+        except Exception:
+            return "[sum_inc error: bad lower/upper]"
+        if upper < lower:
+            # allow reverse; we’ll still produce ascending sums
+            lower, upper = upper, lower
+
+        # build target sums, evenly spaced, inclusive
+        sums: list[Decimal] = []
+        if count == 1:
+            sums = [lower]
+        else:
+            step = (upper - lower) / Decimal(count - 1)
+            for i in range(count):
+                sums.append(lower + step * Decimal(i))
+
+        # distribution profiles -> weights over variables
+        if dist in ("uniform", "u"):
+            weights = [Decimal(1) / Decimal(nslots)] * nslots
+        else:
+            # normal_* modes
+            if dist in ("normal_center", "center", "normal", "gauss", "gauss_center"):
+                mu = (nslots - 1) / 2.0
+            elif dist in ("normal_start", "start", "gauss_start"):
+                mu = 0.0
+            elif dist in ("normal_end", "end", "gauss_end", "normal_send", "send"):
+                mu = float(nslots - 1)
+            else:
+                # fallback to uniform if unknown
+                weights = [Decimal(1) / Decimal(nslots)] * nslots
+                mu = None
+
+            if mu is not None:
+                try:
+                    sigma = float(sigma_s) if sigma_s is not None else max(0.8, (nslots - 1) / 3.0)
+                    sigma = max(sigma, 1e-6)
+                except Exception:
+                    sigma = max(0.8, (nslots - 1) / 3.0)
+
+                ws = []
+                for j in range(nslots):
+                    z = (j - mu) / sigma
+                    ws.append(math.exp(-0.5 * z * z))
+                total = sum(ws) or 1.0
+                weights = [Decimal(w / total) for w in ws]
+
+        # For each target sum, distribute across variables and render
+        lines = []
+        for S in sums:
+            raw = [S * w for w in weights]  # Decimal * Decimal
+            # round all but last, then fix the last to keep sum close
+            vals = [d.quantize(q, rounding=ROUND_HALF_UP) for d in raw]
+            # adjust minor rounding drift to the last slot to keep tighter sum
+            drift = S - sum(vals, Decimal(0))
+            if nslots > 0:
+                vals[-1] = (vals[-1] + drift).quantize(q, rounding=ROUND_HALF_UP)
+            lines.append(render_with_values(vals))
+
+        # default is already ascending by sum
+        return "\n".join(lines)
+
+    # ----------------------------
+    # ORIGINAL INTERVAL MODE (existing)
+    # ----------------------------
+    interval_s = attrs.get("interval")
     try:
         step_mag = abs(Decimal(interval_s))
     except Exception:
         return "[sum_inc error: bad interval]"
     if step_mag <= 0:
         return "[sum_inc error: interval must be > 0]"
-
-    base_vals = [Decimal(m.group(3)) for m in _slot_pat.finditer(template)]
-    nslots = len(base_vals)
-    if nslots == 0:
-        return "[sum_inc note: no numeric slots name:value found]"
 
     sum0 = sum(base_vals, Decimal(0))
 
@@ -109,19 +219,43 @@ def expand_sum_inc(match: re.Match) -> str:
     if upper is None and lower is None:
         return "[sum_inc error: need upper=... or lower=...]"
 
-    places = max(
-        max((_dec_places(m.group(3)) for m in _slot_pat.finditer(template)), default=0),
-        _dec_places(interval_s or ""),
-        _dec_places(upper_s or ""),
-        _dec_places(lower_s or "")
-    )
-    q = _quantizer(places)
-
     def step_up(base: Decimal, k: int) -> Decimal:
         return base + step_mag * Decimal(k)
 
     def step_down(base: Decimal, k: int) -> Decimal:
         return base - step_mag * Decimal(k)
+
+    def render_with_k(k: int) -> str:
+        if k >= 0:
+            def _repl(m: re.Match) -> str:
+                name, colon, val_s = m.group(1), m.group(2), m.group(3)
+                base = Decimal(val_s)
+                return f"{name}{colon}{_fmt(step_up(base, k), q)}"
+        else:
+            kk = -k
+            def _repl(m: re.Match) -> str:
+                name, colon, val_s = m.group(1), m.group(2), m.group(3)
+                base = Decimal(val_s)
+                return f"{name}{colon}{_fmt(step_down(base, kk), q)}"
+        return _slot_pat.sub(_repl, template).strip()
+
+    def _kmax_up(sum0: Decimal, step: Decimal, nslots: int, upper: Decimal) -> int:
+        if nslots == 0:
+            return -1
+        inc_per_row = step * Decimal(nslots)
+        if inc_per_row <= 0:
+            return -1
+        rem = (upper - sum0) / inc_per_row
+        return int(rem.to_integral_value(rounding=ROUND_FLOOR))
+
+    def _kmax_down(sum0: Decimal, step: Decimal, nslots: int, lower: Decimal) -> int:
+        if nslots == 0:
+            return -1
+        dec_per_row = step * Decimal(nslots)
+        if dec_per_row <= 0:
+            return -1
+        rem = (sum0 - lower) / dec_per_row
+        return int(rem.to_integral_value(rounding=ROUND_FLOOR))
 
     k_up_max = -1
     k_down_max = -1
@@ -164,41 +298,18 @@ def expand_sum_inc(match: re.Match) -> str:
     else:
         ks = list(range(0, -k_down_max - 1, -1))
 
-    def render_with_k(k: int) -> str:
-        if k >= 0:
-            def _repl(m: re.Match) -> str:
-                name, colon, val_s = m.group(1), m.group(2), m.group(3)
-                base = Decimal(val_s)
-                return f"{name}{colon}{_fmt(step_up(base, k), q)}"
-        else:
-            kk = -k
-            def _repl(m: re.Match) -> str:
-                name, colon, val_s = m.group(1), m.group(2), m.group(3)
-                base = Decimal(val_s)
-                return f"{name}{colon}{_fmt(step_down(base, kk), q)}"
-        return _slot_pat.sub(_repl, template).strip()
-
-    # --- RENDER & (optionally) SORT BY TOTAL SUM ---
-    # Allow overriding the sorting via attribute:
+    # Sorting by sum (optional attr: sort=none|desc)
     sort_mode = (attrs.get("sort") or "sum_asc").strip().lower()
-    inc_per_row = step_mag * Decimal(nslots)
-
+    inc_per_row = (abs(Decimal(attrs.get("interval") or "0")) * Decimal(nslots)) if nslots else Decimal(0)
     def sum_for_k(k: int) -> Decimal:
-        # Works for positive/negative k; total sum changes by inc_per_row * k
         return sum0 + inc_per_row * Decimal(k)
 
-    rows: list[tuple[Decimal, str]] = []
-    for k in ks:
-        rendered = render_with_k(k)
-        rows.append((sum_for_k(k), rendered))
-
+    rows = [(sum_for_k(k), render_with_k(k)) for k in ks]
     if sort_mode in ("none", "off", "false", "0"):
-        # keep generation order
         lines = [r for _, r in rows]
     elif sort_mode in ("desc", "sum_desc"):
         lines = [r for _, r in sorted(rows, key=lambda t: t[0], reverse=True)]
     else:
-        # default: ascending by total sum
         lines = [r for _, r in sorted(rows, key=lambda t: t[0])]
 
     return "\n".join(lines)
@@ -415,7 +526,11 @@ class MainWindow(QMainWindow):
             "  • <rand_float_0.1_0.9> → random float.\n"
             "  • <sum_inc interval=0.05 upper=1.15> a_:0.5,as,b_:0.35 </sum_inc>\n"
             "  • <sum_inc interval=0.05 lower=0.70> a_:0.50,as,b_:0.35 </sum_inc>\n"
-            "  • <sum_inc interval=0.05 upper=1.15 lower=0.70 order=center_out> ... </sum_inc>\n\n"
+            "  • <sum_inc interval=0.05 upper=1.15 lower=0.70 order=center_out> ... </sum_inc>\n"
+            "  • New: count-based sum mode\n"
+            "  •     <sum_inc count=5 lower=0.6 upper=1.1 dist=uniform> a:0,b:0,c:0 </sum_inc>\n"
+            "  •     <sum_inc count=7 lower=0.6 upper=1.25 dist=normal_center sigma=0.9> a:0,b:0,c:0,d:0 </sum_inc>\n"
+            "  •     dist = uniform | normal_center | normal_start | normal_end\n"
             "Pairs usage: After expansion, each row 'pattern' → 'replacement'."
         )
         pp_layout.addWidget(examples)
