@@ -15,7 +15,7 @@ import sys, re, json, random
 from pathlib import Path
 from decimal import Decimal, getcontext, ROUND_HALF_UP, ROUND_FLOOR
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSignalBlocker
 from PyQt6.QtGui import QAction, QTextOption
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -442,6 +442,10 @@ class MainWindow(QMainWindow):
         self.pattern_combo.setToolTip("Pick a saved pattern from history")
         self.pattern_combo.currentTextChanged.connect(self._on_pattern_combo_changed)
         hdr.addWidget(self.pattern_combo, 1)  # stretch
+        self.btn_hist_load = QPushButton("Load")
+        self.btn_hist_load.setToolTip("Load the selected history pattern into the editor")
+        self.btn_hist_load.clicked.connect(self._on_history_load)
+        hdr.addWidget(self.btn_hist_load)
 
         self.btn_hist_save = QPushButton("Save")
         self.btn_hist_save.setToolTip("Save current editor contents to this name (asks to overwrite if exists)")
@@ -612,6 +616,11 @@ class MainWindow(QMainWindow):
         self.apply_dark_theme()
 
         self._last_saved_digest: bytes | None = None
+        # track if the editor changed since last snapshot
+        self._edited_since_last_snapshot: bool = False
+        # history/snapshot flags
+        self._pending_snapshot_from_load: bool = False
+        self._last_default_key: str | None = None
 
         self._pattern_history: dict[str, str] = {}
         self._last_pattern_hash: bytes | None = None
@@ -626,6 +635,7 @@ class MainWindow(QMainWindow):
 
         # Take periodic “default_*” snapshots on meaningful changes
         self.input_edit.textChanged.connect(self._schedule_snapshot)  # add this
+        self.input_edit.textChanged.connect(self._mark_edited_since_snapshot)
         self._snapshot_timer = QTimer(self)
         self._snapshot_timer.setInterval(1200)
         self._snapshot_timer.setSingleShot(True)
@@ -637,7 +647,7 @@ class MainWindow(QMainWindow):
                 self.load_state(self.DEFAULTS_PATH)
             except Exception:
                 pass
-
+        self._load_last_default_on_start()  # load last default_* pattern (never a custom one)
 
 
     # ---------- Pattern history (manual) ----------
@@ -651,16 +661,34 @@ class MainWindow(QMainWindow):
             if self.PATTERN_HISTORY_PATH.exists():
                 data = json.loads(self.PATTERN_HISTORY_PATH.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
-                    self._pattern_history = {str(k): str(v) for k, v in data.get("patterns", {}).items()}
+                    self._pattern_history = {str(k): str(v) for k, v in (data.get("patterns") or {}).items()}
+                    meta = data.get("meta") or {}
+                    self._last_default_key = meta.get("last_default_key")
+
+                # initialize ring index to next slot after the highest existing default_*
+                try:
+                    defaults = [k for k in self._pattern_history.keys() if k.startswith("default_") and k[8:].isdigit()]
+                    if defaults:
+                        max_idx = max(int(k.split("_", 1)[1]) for k in defaults)
+                        self._default_ring_index = (max_idx + 1) % self.DEFAULT_RING_SIZE
+                except Exception:
+                    pass
+
             else:
                 self._pattern_history = {}
+                self._last_default_key = None
         except Exception:
             self._pattern_history = {}
+            self._last_default_key = None
 
     def _save_pattern_history(self):
         try:
+            payload = {
+                "patterns": self._pattern_history,
+                "meta": {"last_default_key": self._last_default_key},
+            }
             self.PATTERN_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self._history_atomic_write(self.PATTERN_HISTORY_PATH, {"patterns": self._pattern_history})
+            self._history_atomic_write(self.PATTERN_HISTORY_PATH, payload)
         except Exception:
             pass
 
@@ -679,6 +707,143 @@ class MainWindow(QMainWindow):
             idx = self.pattern_combo.findText(current)
             if idx >= 0:
                 self.pattern_combo.setCurrentIndex(idx)
+        self.pattern_combo.blockSignals(False)
+
+    def _apply_history_text(self, text: str):
+        # Make load snappy: block editor signals & stop snapshot timer so we don't churn
+        try:
+            self._snapshot_timer.stop()
+        except Exception:
+            pass
+        blocker = QSignalBlocker(self.input_edit)
+        try:
+            self.input_edit.setUpdatesEnabled(False)
+            self.input_edit.setPlainText(text)
+        finally:
+            self.input_edit.setUpdatesEnabled(True)
+            del blocker
+
+    def _on_history_load(self):
+        name = self.pattern_combo.currentText().strip()
+        if not name:
+            return
+        text = self._pattern_history.get(name, "")
+        if text == "":
+            return
+        self._apply_history_text(text)
+        # If user generates next, snapshot this into default_*
+        self._pending_snapshot_from_load = True
+
+    def _snapshot_to_default_ring(self, text: str):
+        """
+        Renumber defaults so the newest is always default_10:
+          - default_1 -> default_0
+          - ...
+          - default_10 -> default_9
+          - write new snapshot to default_10
+        Old default_0 (if any) is dropped.
+        """
+        # Start with all non-default entries untouched
+        new_hist = {k: v for k, v in self._pattern_history.items() if not k.startswith("default_")}
+
+        # Shift existing defaults down: 1->0, 2->1, ..., 10->9
+        for i in range(0, self.DEFAULT_RING_SIZE - 1):  # 0..9
+            src = f"default_{i + 1}"
+            dst = f"default_{i}"
+            if src in self._pattern_history:
+                new_hist[dst] = self._pattern_history[src]
+
+        # Store newest at default_10
+        new_hist[f"default_{self.DEFAULT_RING_SIZE - 1}"] = text  # default_10
+
+        # Commit & persist
+        self._pattern_history = new_hist
+        self._last_default_key = f"default_{self.DEFAULT_RING_SIZE - 1}"  # default_10
+        self._save_pattern_history()
+        self._refresh_pattern_combo(keep_selection=True)
+
+        # Update snapshot bookkeeping so subsequent checks compare against fresh state
+        h = hashlib.sha256(text.encode("utf-8")).digest()
+        self._last_snapshot_hash = h
+        self._last_snapshot_len = len(text)
+        self._last_snapshot_ts = time.time()
+        self._edited_since_last_snapshot = False
+
+    def _load_last_default_on_start(self):
+        # Prefer stored meta; fall back to highest-numbered default_*
+        key = self._last_default_key
+        if not key:
+            defaults = [k for k in self._pattern_history.keys() if k.startswith("default_")]
+            if defaults:
+                def _num(k: str):
+                    try:
+                        return int(k.split("_", 1)[1])
+                    except Exception:
+                        return -1
+
+                key = max(defaults, key=_num)
+        if not key:
+            return
+        text = self._pattern_history.get(key, "")
+        if not text:
+            return
+        self._apply_history_text(text)
+        # Reflect selection in combo (quietly)
+        self.pattern_combo.blockSignals(True)
+        idx = self.pattern_combo.findText(key)
+        if idx >= 0:
+            self.pattern_combo.setCurrentIndex(idx)
+        self.pattern_combo.blockSignals(False)
+
+    def _apply_history_text(self, text: str):
+        # Make load snappy: block editor signals & stop snapshot timer so we don't churn
+        try:
+            self._snapshot_timer.stop()
+        except Exception:
+            pass
+        blocker = QSignalBlocker(self.input_edit)
+        try:
+            self.input_edit.setUpdatesEnabled(False)
+            self.input_edit.setPlainText(text)
+        finally:
+            self.input_edit.setUpdatesEnabled(True)
+            del blocker
+
+    def _on_history_load(self):
+        name = self.pattern_combo.currentText().strip()
+        if not name:
+            return
+        text = self._pattern_history.get(name, "")
+        if text == "":
+            return
+        self._apply_history_text(text)
+        # If user generates next, snapshot this into default_*
+        self._pending_snapshot_from_load = True
+
+    def _load_last_default_on_start(self):
+        # Prefer stored meta; fall back to highest-numbered default_*
+        key = self._last_default_key
+        if not key:
+            defaults = [k for k in self._pattern_history.keys() if k.startswith("default_")]
+            if defaults:
+                def _num(k: str):
+                    try:
+                        return int(k.split("_", 1)[1])
+                    except Exception:
+                        return -1
+
+                key = max(defaults, key=_num)
+        if not key:
+            return
+        text = self._pattern_history.get(key, "")
+        if not text:
+            return
+        self._apply_history_text(text)
+        # Reflect selection in combo (quietly)
+        self.pattern_combo.blockSignals(True)
+        idx = self.pattern_combo.findText(key)
+        if idx >= 0:
+            self.pattern_combo.setCurrentIndex(idx)
         self.pattern_combo.blockSignals(False)
 
     def _on_pattern_combo_changed(self, name: str):
@@ -746,6 +911,9 @@ class MainWindow(QMainWindow):
     def _schedule_snapshot(self):
         self._snapshot_timer.start()
 
+    def _mark_edited_since_snapshot(self):
+        self._edited_since_last_snapshot = True
+
     def _snapshot_if_significant(self):
         text = self.input_edit.toPlainText()
         if not text:
@@ -765,11 +933,7 @@ class MainWindow(QMainWindow):
         self._pattern_history[slot] = text
         self._save_pattern_history()
         self._refresh_pattern_combo(keep_selection=True)
-        self._default_ring_index = (self._default_ring_index + 1) % self.DEFAULT_RING_SIZE
-
-        self._last_snapshot_hash = h
-        self._last_snapshot_len = length
-        self._last_snapshot_ts = now
+        self._snapshot_to_default_ring(text)  # bookkeeping handled inside
 
     def _encode_state(self) -> bytes:
         """Stable JSON bytes for change detection."""
@@ -892,6 +1056,19 @@ class MainWindow(QMainWindow):
 
     # -------------------------------- Actions --------------------------------
     def on_replace(self):
+        # If user loaded a history pattern and now generates, snapshot into default_*
+        if self._pending_snapshot_from_load:
+            self._snapshot_to_default_ring(self.input_edit.toPlainText())
+            self._pending_snapshot_from_load = False
+
+        # If the user edited the pattern since the last snapshot, snapshot now
+        if self._edited_since_last_snapshot:
+            current_text = self.input_edit.toPlainText()
+            # avoid duplicate snapshot if text is identical to last one
+            new_hash = hashlib.sha256(current_text.encode("utf-8")).digest()
+            if new_hash != (self._last_snapshot_hash or b""):
+                self._snapshot_to_default_ring(current_text)
+
         text = self.input_edit.toPlainText()
         out = process_text(text)
         for pat, rep in self.gather_pairs():
