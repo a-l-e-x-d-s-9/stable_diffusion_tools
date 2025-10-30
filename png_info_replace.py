@@ -73,37 +73,42 @@ def remove_header(value):
 def get_exif(image_path):
     try:
         with Image.open(image_path) as img:
-            #exif_data_raw = img.info.get("exif")
-            exif_data_raw = img.text
-
-            print(f"image_path: {image_path}, exif_data_raw: {exif_data_raw}")
-            if exif_data_raw:
-                exif_dict = piexif.load(exif_data_raw)
-                exif = {}
-                for ifd in exif_dict:
-                    if ifd == "thumbnail":
-                        continue
-                    for tag_id in exif_dict[ifd]:
-                        tag = TAGS.get(tag_id, tag_id)
-                        value = exif_dict[ifd][tag_id]
-                        if isinstance(value, bytes):
-                            try:
-                                value = value.decode("utf-8")
-                            except UnicodeDecodeError:
+            if img.format == "JPEG":
+                exif_data_raw = img.info.get("exif")
+                if exif_data_raw:
+                    exif_dict = piexif.load(exif_data_raw)
+                    exif = {}
+                    for ifd in exif_dict:
+                        if ifd == "thumbnail":
+                            continue
+                        for tag_id in exif_dict[ifd]:
+                            tag = TAGS.get(tag_id, tag_id)
+                            value = exif_dict[ifd][tag_id]
+                            if isinstance(value, bytes):
                                 try:
-                                    value = value.decode("iso-8859-1")
+                                    value = value.decode("utf-8")
                                 except UnicodeDecodeError:
-                                    value = value.decode("windows-1252")
-                        if tag == "UserComment":
-                            value = remove_header(value)
-                            # print("uni - remove")
-                            exif_dict[ifd][tag_id] = value.encode('utf-8')
+                                    try:
+                                        value = value.decode("iso-8859-1")
+                                    except UnicodeDecodeError:
+                                        value = value.decode("windows-1252")
+                            if tag == "UserComment":
+                                value = remove_header(value)
+                                exif_dict[ifd][tag_id] = value.encode("utf-8")
+                            exif[tag] = value
+                    return exif, exif_dict
+                else:
+                    return None, None
 
-                        exif[tag] = value
+            elif img.format == "PNG":
+                if hasattr(img, "text"):
+                    text_data = img.text
+                    return text_data, None
+                else:
+                    return None, None
 
-                return exif, exif_dict
             else:
-                print(f"None, None")
+                print(f"Unsupported image format: {img.format}")
                 return None, None
     except Exception as e:
         print(f"Error: {e}")
@@ -132,12 +137,39 @@ def get_image_files(input_folder):
             image_files.append(os.path.join(input_folder, file))
     return image_files
 
+def replace_strings_in_metadata(metadata, replace_pairs):
+    """
+    Replaces strings in metadata based on the replace_pairs dictionary.
+    :param metadata: Dictionary of metadata.
+    :param replace_pairs: Dictionary of strings to replace (key -> value).
+    :return: Modified metadata.
+    """
+    for key in metadata:
+        value = metadata[key]
+        if isinstance(value, str):
+            for old, new in replace_pairs.items():
+                value = re.sub(re.escape(old), new, value, flags=re.IGNORECASE)
+            metadata[key] = value
+    return metadata
+
+def parse_replace_argument(replace_arg):
+    """
+    Parses the replace argument into a dictionary of replacements.
+    :param replace_arg: String in the format "aaa11,bsdi12,old,new".
+    :return: Dictionary {old: new, ...}.
+    """
+    pairs = replace_arg.split(',')
+    if len(pairs) % 2 != 0:
+        raise ValueError("Replace argument must have an even number of entries.")
+    return dict(zip(pairs[::2], pairs[1::2]))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract and modify EXIF data from an image.")
     parser.add_argument("--input-folder", required=True, help="Path to the input folder containing images.")
     parser.add_argument("--output-folder", required=True, help="Path to the output folder for saving modified images.")
     parser.add_argument("--names-file", type=str, help="Path to the file containing names.")
+    parser.add_argument("--replace", type=str, help="Replace string pairs - separated with coma")
 
     args = parser.parse_args()
 
@@ -145,17 +177,24 @@ if __name__ == "__main__":
 
     image_files = get_image_files(args.input_folder)
     names = read_names(args.names_file) if args.names_file else []
+    replace_pairs = parse_replace_argument(args.replace) if args.replace else {}
+
 
     for image_path in image_files:
         exif_data, exif_dict = get_exif(image_path)
 
         if exif_data:
-            print("exif_data")
+            print(exif_dict["UserComment"])
             if names:
                 exif_dict = replace_exif_strings(exif_dict, names)
 
+            if replace_pairs:
+                exif_data = replace_strings_in_metadata(exif_data, replace_pairs)
+
+
             output_image_path = os.path.join(args.output_folder, os.path.basename(image_path))
             save_exif(image_path, output_image_path, exif_dict)
+
 
     # image_files = get_image_files(args.input_folder)
     # exif_data, exif_dict = get_exif(args.image_path)

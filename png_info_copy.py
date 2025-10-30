@@ -258,7 +258,7 @@ def _is_png(p: Path) -> bool:
 
 
 def _is_jpg(p: Path) -> bool:
-    return p.suffix.lower() in {".jpg", ".jpeg", ".jpe"}
+    return p.suffix.lower() in {".jpg", ".jpeg", ".jpe", ".webp"}
 
 
 # ---------------- extract ----------------

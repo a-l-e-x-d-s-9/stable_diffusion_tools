@@ -1,5 +1,4 @@
 cpbd
-cupy
 dash
 face_recognition
 huggingface_hub
@@ -15,10 +14,12 @@ plotly
 psutil
 PyQt6
 PyQt6_sip
-Requests
 scikit-image
 tiktoken
 tqdm
 tweepy
 brotli
 tweepy
+requests>=2.31.0
+tomli>=2.0.1; python_version<"3.11"
+tomli-w>=1.0.0; python_version<"3.11"
