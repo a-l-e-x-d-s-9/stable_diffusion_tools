@@ -146,6 +146,34 @@ class ImageView(QGraphicsView):
     def pending_selection(self) -> Optional[QRectF]:
         return self._pending_sel_scene
 
+    def set_selection_from_ratio(self, x: float, y: float, w: float, h: float) -> None:
+        """
+        Create a selection from normalized ratios in [0..1], relative to the
+        displayed pixmap bounding rect (already oriented via exif_transpose).
+        """
+        if not self.pix_item:
+            return
+        br = self.pix_item.boundingRect()
+        # clamp inputs
+        x = max(0.0, min(1.0, x))
+        y = max(0.0, min(1.0, y))
+        w = max(0.0, min(1.0 - x, w))
+        h = max(0.0, min(1.0 - y, h))
+
+        r = QRectF(
+            br.left() + x * br.width(),
+            br.top()  + y * br.height(),
+            max(1.0, w * br.width()),
+            max(1.0, h * br.height()),
+        )
+        r = self._clamp_rect_to_image(r)
+        self._pending_sel_scene = r
+        self._update_rubber_from_selection()
+        self.selectionChanged.emit(self.has_visible_selection())
+        # give proper cursor feedback when a box exists
+        self.setCursor(self._cursor_for_mode("move"))
+
+
     def clear_selection(self):
         self._pending_sel_scene = None
         self._drag_mode = None
@@ -649,6 +677,14 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self.config = load_config()
+
+        # last crop rectangle as ratios {x,y,w,h} persisted in config
+        lcr = self.config.get("last_crop_ratio")
+        self._last_crop_ratio: Optional[Dict[str, float]] = (
+            lcr if isinstance(lcr, dict) and all(k in lcr for k in ("x", "y", "w", "h")) else None
+        )
+
+
         # mapping = only digit keys 1..9 from config
         self.mapping = {k: v for k, v in self.config.items() if k.isdigit() and 1 <= int(k) <= 9}
 
@@ -819,8 +855,14 @@ class MainWindow(QMainWindow):
             return False
         sel_scene = self.view.pending_selection()
         if not sel_scene:
+            if self._last_crop_ratio and self.view.pix_item:
+                r = self._last_crop_ratio
+                self.view.set_selection_from_ratio(r["x"], r["y"], r["w"], r["h"])
+                self.status.showMessage("Applied last crop box. Press Crop As Copy again to save.", 3000)
+                return False
             self.status.showMessage("No selection to crop", 2500)
             return False
+
 
         path = self.files[self.index]
         dw = self.view.pix_item.pixmap().width()
@@ -836,7 +878,7 @@ class MainWindow(QMainWindow):
             return False
 
         ow, oh = im.width, im.height
-        sx = ow / dw;
+        sx = ow / dw
         sy = oh / dh
 
         left = max(0, min(ow, int(round(sel_scene.left() * sx))))
@@ -847,8 +889,15 @@ class MainWindow(QMainWindow):
             self.status.showMessage("Crop too small", 3000)
             return False
 
-        w = right - left;
+        w = right - left
         h = bottom - top
+
+        # persist last crop as ratios (relative to oriented original)
+        rx = left / float(ow)
+        ry = top / float(oh)
+        rw = w / float(ow)
+        rh = h / float(oh)
+        self._store_last_crop_ratio(rx, ry, rw, rh)
 
         try:
             fmt = (im.format or os.path.splitext(path)[1].lstrip(".")).upper()
@@ -915,8 +964,15 @@ class MainWindow(QMainWindow):
 
         sel_scene = self.view.pending_selection()
         if not sel_scene:
+            # If no selection yet, try to use the last saved crop rectangle
+            if self._last_crop_ratio and self.view.pix_item:
+                r = self._last_crop_ratio
+                self.view.set_selection_from_ratio(r["x"], r["y"], r["w"], r["h"])
+                self.status.showMessage("Applied last crop box. Press Crop again to apply.", 3000)
+                return False
             self.status.showMessage("No selection to crop", 2500)
             return False
+
 
         path = self.files[self.index]
         dw = self.view.pix_item.pixmap().width()
@@ -946,6 +1002,13 @@ class MainWindow(QMainWindow):
 
         w = right - left
         h = bottom - top
+
+        # persist last crop as ratios (relative to oriented original)
+        rx = left / float(ow)
+        ry = top / float(oh)
+        rw = w / float(ow)
+        rh = h / float(oh)
+        self._store_last_crop_ratio(rx, ry, rw, rh)
 
         # prepare save
         fmt = (im.format or os.path.splitext(path)[1].lstrip(".")).upper()
@@ -1122,6 +1185,17 @@ class MainWindow(QMainWindow):
         except Exception:
             # If piexif isn't available or parsing fails, keep original EXIF.
             return exif_bytes
+
+    def _store_last_crop_ratio(self, x: float, y: float, w: float, h: float) -> None:
+        """Persist last crop box as normalized ratios into config."""
+        ratio = {"x": float(x), "y": float(y), "w": float(w), "h": float(h)}
+        self._last_crop_ratio = ratio
+        self.config["last_crop_ratio"] = ratio
+        try:
+            save_config(self.config)
+        except Exception:
+            pass
+
 
     def _ensure_no_pending_crop(self) -> bool:
         """
@@ -1343,6 +1417,9 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+            # True oriented resolution
+            ow, oh = self.view._get_oriented_size()
+            res = f"{ow}×{oh}" if (ow and oh) else "?"
             self.status.showMessage(f"{res} [{self.index + 1}/{len(self.files)}] {path}")
 
             # persist last image path
