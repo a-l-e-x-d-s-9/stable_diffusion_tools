@@ -106,6 +106,18 @@ def build_table(rows3, roots, total, images_total=None, images_pct=None):
         lines.append(f"{t.ljust(type_w)}  {str(c).rjust(10)}  {format(pct, '.2f').rjust(8)}")
     return "\n".join(lines)
 
+
+def count_one_root(root: Path, exclude_hidden: bool, follow_symlinks: bool, ext_mode: str) -> tuple[Counter, int]:
+    c = Counter()
+    t = 0
+    for f in iter_files(root, exclude_hidden=exclude_hidden, follow_symlinks=follow_symlinks):
+        t += 1
+        ext = get_extension(f, ext_mode)
+        key = "(no extension)" if ext == "" else ext
+        c[key] += 1
+    return c, t
+
+
 def show_gui(text, rows_for_csv):
     try:
         import tkinter as tk
@@ -198,14 +210,18 @@ def main():
             continue
         roots.append(p)
 
-    counters = Counter()
+    # Per-root stats and combined
+    per_root_stats = []  # list of (root_str, Counter, total)
+    combined = Counter()
     total = 0
+
     for r in roots:
-        for f in iter_files(r, exclude_hidden=args.exclude_hidden, follow_symlinks=args.follow_symlinks):
-            total += 1
-            ext = get_extension(f, args.ext_mode)
-            key = "(no extension)" if ext == "" else ext
-            counters[key] += 1
+        c_i, t_i = count_one_root(r, args.exclude_hidden, args.follow_symlinks, args.ext_mode)
+        per_root_stats.append((str(r), c_i, t_i))
+        combined.update(c_i)
+        total += t_i
+
+    counters = combined
 
     # Add after counters/total are computed
     images_total = sum(
@@ -217,11 +233,39 @@ def main():
     rows_sorted = sorted(counters.items(), key=lambda kv: (-kv[1], kv[0]))
     rows_for_csv = [(t, c, (c / total * 100.0) if total else 0.0) for t, c in rows_sorted]
     table = build_table(rows_for_csv, roots, total, images_total, images_pct)
+    # Compose final text: combined first, then per-root breakdown if multiple inputs
+    final_text_parts = []
+
+    # Label for clarity
+    if len(roots) > 1:
+        final_text_parts.append("ALL ROOTS COMBINED")
+    final_text_parts.append(table)
+
+    # Per-directory breakdown
+    if len(roots) > 1:
+        final_text_parts.append("\n=== Per-directory breakdown ===\n")
+        for root_str, c_i, t_i in per_root_stats:
+            # Per-root images summary
+            images_total_i = sum(
+                c for ext, c in c_i.items()
+                if ext and ext != "(no extension)" and ext.lstrip(".") in IMAGE_EXTS
+            )
+            images_pct_i = (images_total_i / t_i * 100.0) if t_i else 0.0
+
+            rows_sorted_i = sorted(c_i.items(), key=lambda kv: (-kv[1], kv[0]))
+            rows_i = [(t, c, (c / t_i * 100.0) if t_i else 0.0) for t, c in rows_sorted_i]
+
+            # Reuse existing renderer; pass a single-root list so it prints "Root: <path>"
+            section = build_table(rows_i, [root_str], t_i, images_total_i, images_pct_i)
+            final_text_parts.append(section)
+
+    final_text = "\n\n".join(final_text_parts)
 
     if args.no_gui:
-        print(table)
+        print(final_text)
     else:
-        show_gui(table, rows_for_csv)
+        show_gui(final_text, rows_for_csv)  # CSV remains the combined view
+
 
 if __name__ == "__main__":
     main()
