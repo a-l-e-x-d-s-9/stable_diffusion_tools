@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.4.21
+// @version      2.5.11
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -96,8 +96,17 @@
   // Route epoch: bump on SPA navigation to cancel stale watchers/tasks
   let routeEpoch = 0;
 
-  let forceSeenThisPage = new Set(); // sha1s saved in current page/view when forcePage is on
+   let forceSeenThisPage = new Set(); // sha1s saved in current page/view when forcePage is on
+   let forceSeenVideoThisPage = new Set();
 
+       // in-flight download guards (page-scoped)
+    const inflightImgUrl = new Set();
+    const inflightImgSha1 = new Set();
+    const inflightVidUrl  = new Set();
+    const inflightVidSha1 = new Set();
+
+    // force mode: block duplicates within this page while a download is pending
+    const forceInflightThisPage = new Set();
 
     // ---- small async queues to avoid network overload ----
     const MAX_PARALLEL_FETCHES = 5;
@@ -126,29 +135,41 @@
 
     // Reset per-page state but keep global de-dupe (by signature)
     function resetPerPageState() {
-      // Mark the route for debugging/telemetry; active watchers self-cancel via routeEpoch checks
+      // mark route for debug; watchers cancel via epoch checks
       window.__GROK_ROUTE_KEY__ = normPath();
 
-      // Clear "watching" flags so new scans can pick items up again cleanly
-      document.querySelectorAll('[data-grok-watching="1"]').forEach(el => {
-        delete el.dataset.grokWatching;
-      });
+      // allow re-watching
+      document.querySelectorAll('[data-grok-watching="1"]').forEach(el => { delete el.dataset.grokWatching; });
 
-      // Clear stale done/doneForce so reused nodes are eligible again
+      // allow re-download on this page
       document.querySelectorAll('[data-grok-done],[data-grok-done-force]').forEach(el => {
         delete el.dataset.grokDone;
         delete el.dataset.grokDoneForce;
       });
 
-      // Clear any previous-page "fav" markers & first-seen timers
-      document.querySelectorAll('[data-grok-fav], [data-grok-first-seen]').forEach(el => {
+      // clear page-scoped "saving" latches that might have stuck
+      document.querySelectorAll('[data-grok-saving]').forEach(el => { delete el.dataset.grokSaving; });
+
+      // clear first-seen timers and any fav labels
+      document.querySelectorAll('[data-grok-fav],[data-grok-first-seen]').forEach(el => {
         delete el.dataset.grokFav;
         delete el.dataset.grokFirstSeen;
       });
 
-      // NEW: clear per-page force dedupe
+      // clear per-page dedupe sets
       forceSeenThisPage = new Set();
+      forceSeenVideoThisPage = new Set();
+
+      // clear in-flight guards so items are eligible again this page
+      try {
+        inflightImgUrl.clear();
+        inflightImgSha1.clear();
+        inflightVidUrl.clear();
+        inflightVidSha1.clear();
+        forceInflightThisPage.clear();
+      } catch {}
     }
+
 
 
 
@@ -325,11 +346,20 @@
     updateIndicator();
     if (autoOn) { scanImages(); scanVideos(); }
   }
-  function toggleForcePage() {
-    forcePage = !forcePage;
-    try { GM_notification({ title: "Grok downloader", text: `Force downloads ${forcePage ? "ENABLED" : "DISABLED"} (this page)`, timeout: 1200 }); } catch {}
-    updateIndicator();
-  }
+    function toggleForcePage() {
+      forcePage = !forcePage;
+      try {
+        GM_notification({ title: "Grok downloader", text: `Force downloads ${forcePage ? "ENABLED" : "DISABLED"} (this page)`, timeout: 1200 });
+      } catch {}
+      updateIndicator();
+
+      // reset per-page so previously marked nodes become eligible again
+      resetPerPageState();
+
+      // kick fresh scans now
+      if (autoOn && onAllowedRoute()) { scanImages(); scanVideos(); }
+    }
+
   function updateIndicator() {
     indicator.textContent = `Grok auto-download: ${autoOn ? "ON" : "OFF"}${forcePage ? " · FORCE" : ""}`;
   }
@@ -381,7 +411,7 @@
       document.querySelectorAll(q).forEach(img => {
         if (img.dataset.grokWatching === "1") return;
         // On Favorites, process even if off-screen; elsewhere still require visibility
-        const requireVisible = !onFavoritesRoute();
+        const requireVisible = !(onFavoritesRoute() || forcePage);
         if (requireVisible && !isEffectivelyVisible(img)) return;
 
         if (isVideoPosterImage(img)) return;             // skip video thumbnails
@@ -462,223 +492,160 @@
 
 
 
-async function tryDownloadImageIfFinal(imgEl) {
-  if (imgEl.dataset.grokSaving === "1") return; // already saving this node
 
-  const myEpoch = Number(imgEl.dataset.grokEpoch || routeEpoch);
-  if (myEpoch !== routeEpoch || !imgEl.isConnected) return;
-  if (!autoOn) return;
-  if (!onFavoritesRoute() && !isEffectivelyVisible(imgEl)) return; // allow off-screen on Favorites
-  if (!forcePage && imgEl.dataset.grokDone === "1") return;
-  if (forcePage && imgEl.dataset.grokDoneForce === "1") return;
-  if (isVideoPosterImage(imgEl)) return; // keep skipping posters
+    async function tryDownloadImageIfFinal(imgEl) {
+      let sha1 = null;
+      if (imgEl.dataset.grokSaving === "1") return;
 
-  const card        = elementCard(imgEl);
-  const onFavorites = onFavoritesRoute() ||
-                      isFavoritedCard(card) ||
-                      (onFavoritesRoute() && !!card?.querySelector('button[aria-label="Make video"]'));
 
-  const src = imgEl.getAttribute("src") || "";
-  const finalByHost = /imagine-public\.x\.ai\/imagine-public\/images\//.test(src);
+      const myEpoch = Number(imgEl.dataset.grokEpoch || routeEpoch);
+      if (myEpoch !== routeEpoch || !imgEl.isConnected) return;
+      if (!autoOn) return;
+      if (!(onFavoritesRoute() || forcePage) && !isEffectivelyVisible(imgEl)) return;
+      if (!forcePage && imgEl.dataset.grokDone === "1") return;
+      if (forcePage && imgEl.dataset.grokDoneForce === "1") return;
+      if (isVideoPosterImage(imgEl)) return;
 
-  let scheme = "";
-  if (src.startsWith("data:")) scheme = "data";
-  else if (src.startsWith("blob:")) scheme = "blob";
-  else if (src.startsWith("https://")) scheme = "https";
-  else return;
+      const card        = elementCard(imgEl);
+      const onFavorites = onFavoritesRoute()
+                       || isFavoritedCard(card)
+                       || (onFavoritesRoute() && !!card?.querySelector('button[aria-label="Make video"]'));
 
-  // Acquire bytes + best-effort mime detection
-  let bytes = null;
-  let mime  = "jpeg"; // default; corrected below where possible
+      const src = imgEl.getAttribute("src") || "";
+      const normSrc = normalizeUrl(src);
+      const finalByHost = /imagine-public\.x\.ai\/imagine-public\/images\//.test(src);
 
-  if (scheme === "data") {
-    const m = src.match(/^data:image\/(jpeg|jpg|png);base64,(.*)$/i);
-    if (!m) return;
-    mime = m[1].toLowerCase();
-    const b64 = m[2];
-    if (b64.length < QUICK_SKIP_IMG_B64LEN) return;
-    bytes = b64ToUint8Array(b64);
-  } else if (scheme === "blob") {
-    const abuf = await withRetry(() => fetchQ(async () => (await fetch(src)).arrayBuffer()));
-    bytes = new Uint8Array(abuf);
-    if (/\.jpe?g(\?|#|$)/i.test(src)) mime = "jpeg";
-    else if (/\.png(\?|#|$)/i.test(src)) mime = "png";
-  } else if (scheme === "https") {
-    const abuf = await withRetry(() => fetchQ(() => gmFetchArrayBuffer(src)));
-    bytes = new Uint8Array(abuf);
-    if (/\.jpe?g(\?|#|$)/i.test(src)) mime = "jpeg";
-    else if (/\.png(\?|#|$)/i.test(src)) mime = "png";
-  }
+      // NEW: page-scope in-flight URL guard
+      // Lock as late as possible (after cheap early returns), but before any bytes fetch.
+      if (inflightImgUrl.has(normSrc)) return;
+      inflightImgUrl.add(normSrc);
 
-  // --- Poster grace: if we’re NOT on Favorites and EXIF isn’t final, wait briefly to see if a <video> arrives.
-  imgEl.dataset.grokFirstSeen ??= String(Date.now());
-  const firstSeen = Number(imgEl.dataset.grokFirstSeen) || Date.now();
-  const POSTER_GRACE_MS = 1400;
+      let scheme = "";
+      if (src.startsWith("data:")) scheme = "data";
+      else if (src.startsWith("blob:")) scheme = "blob";
+      else if (src.startsWith("https://")) scheme = "https";
+      else { inflightImgUrl.delete(normSrc); return; }
 
-  if (!onFavorites && scheme !== "data") {
-    const hasVideoNow = !!card?.querySelector("video");
-    const isFinalExifNow = false; // we haven’t computed meta yet
-    if (!hasVideoNow && Date.now() - firstSeen < POSTER_GRACE_MS) {
-      // Defer – the periodic timer / mutation observer will retry
-      return;
-    }
-  }
+      let bytes = null;
+      let mime  = "jpeg"; // default
 
-  // Decide if this is a final image
-  let meta = {};
-  try {
-    // exifr works on JPEG; on PNG it may return little (that's fine).
-    meta = await exifr.parse(bytes.buffer, { userComment: true });
-  } catch {}
-
-  const isFinalExif    = isGrokFinal(meta);
-  const isFinalEnough  = isFinalExif || onFavorites || forcePage || finalByHost;
-
-  // For inline data: keep the strict check to avoid blur previews.
-  if (scheme === "data" && !isFinalExif) return;
-  // For https/blob: allow favorites (and force) even if EXIF missing.
-  if ((scheme === "https" || scheme === "blob") && !isFinalEnough) return;
-
-  // Signature (if present in EXIF) + SHA1 for dedupe/filenames
-  const sig = extractSignature(meta);
-  const sha1 = await sha1Hex(bytes);
-
-  if (!forcePage) {
-    if (sig && seenSig.has(sig)) { imgEl.dataset.grokDone = "1"; return; }
-    if (seenImg.has(sha1))       { imgEl.dataset.grokDone = "1"; return; }
-  } else {
-    if (forceSeenThisPage.has(sha1)) {
-      imgEl.dataset.grokDone = "1";
-      imgEl.dataset.grokDoneForce = "1";
-      return;
-    }
-    forceSeenThisPage.add(sha1);
-  }
-
-  // ---------- ALWAYS SAVE AS JPG ----------
-  // Build filename
-  const prompt = getPromptNearestToNode(imgEl) || lastSeenPrompt || "";
-  const artist = typeof meta?.Artist === "string" ? meta.Artist.trim() : "";
-  const stamp  = isoStamp(new Date());
-  const dims   = dimStringFromImage(imgEl, meta);
-  const short  = sig ? "sig" + sig.slice(0, 10) : "h" + sha1.slice(0, 10);
-  const slug   = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
-  const filename = ["grok", stamp, short, dims, slug].filter(Boolean).join("_") + ".jpg";
-
-  // Helper: transcode bytes -> JPEG dataURL via canvas (works for JPEG or PNG input)
-  async function bytesToJpegDataURL(u8, inputMime) {
-    return new Promise((resolve, reject) => {
       try {
-        const blob = new Blob([u8], { type: /png/i.test(inputMime) ? "image/png" : "image/jpeg" });
-        const objUrl = URL.createObjectURL(blob);
-        const im = new Image();
-        // For blob: no need crossOrigin. (Blob is same-origin)
-        im.onload = () => {
-          try {
-            const canvas = document.createElement("canvas");
-            canvas.width  = im.naturalWidth;
-            canvas.height = im.naturalHeight;
-            const ctx = canvas.getContext("2d");
-            ctx.drawImage(im, 0, 0);
-            const dataUrl = canvas.toDataURL("image/jpeg", 0.92); // quality 92%
-            URL.revokeObjectURL(objUrl);
-            resolve(dataUrl);
-          } catch (e) {
-            URL.revokeObjectURL(objUrl);
-            reject(e);
+        if (scheme === "data") {
+          const m = src.match(/^data:image\/(jpeg|jpg|png);base64,(.*)$/i);
+          if (!m) return;
+          mime = m[1].toLowerCase();
+          const b64 = m[2];
+          if (b64.length < QUICK_SKIP_IMG_B64LEN) return;
+          bytes = b64ToUint8Array(b64);
+        } else if (scheme === "blob") {
+          const abuf = await withRetry(() => fetchQ(async () => (await fetch(src)).arrayBuffer()));
+          bytes = new Uint8Array(abuf);
+          if (/\.jpe?g(\?|#|$)/i.test(src)) mime = "jpeg";
+          else if (/\.png(\?|#|$)/i.test(src)) mime = "png";
+        } else {
+          const abuf = await withRetry(() => fetchQ(() => gmFetchArrayBuffer(src)));
+          bytes = new Uint8Array(abuf);
+          if (/\.jpe?g(\?|#|$)/i.test(src)) mime = "jpeg";
+          else if (/\.png(\?|#|$)/i.test(src)) mime = "png";
+        }
+
+        // Poster grace for https/blob
+        imgEl.dataset.grokFirstSeen ??= String(Date.now());
+        const firstSeen = Number(imgEl.dataset.grokFirstSeen) || Date.now();
+        const POSTER_GRACE_MS = 1400;
+        if (!onFavorites && scheme !== "data") {
+          const hasVideoNow = !!card?.querySelector("video");
+          if (!hasVideoNow && Date.now() - firstSeen < POSTER_GRACE_MS) return;
+        }
+
+        let meta = {};
+        try {
+          meta = await exifr.parse(bytes.buffer, { userComment: true });
+        } catch {}
+        const isFinalExif   = isGrokFinal(meta);
+        const isFinalEnough = isFinalExif || onFavorites || forcePage || finalByHost;
+
+        if (scheme === "data" && !isFinalExif) return;
+        if ((scheme === "https" || scheme === "blob") && !isFinalEnough) return;
+
+        const sig  = extractSignature(meta);
+        sha1 = await sha1Hex(bytes);
+
+        // NEW: in-flight SHA1 guard (now that we have bytes)
+        if (inflightImgSha1.has(sha1)) return;
+        inflightImgSha1.add(sha1);
+
+        // Global dedupe (only when not forced)
+        if (!forcePage) {
+          if (sig && seenSig.has(sig)) { imgEl.dataset.grokDone = "1"; return; }
+          if (seenImg.has(sha1))       { imgEl.dataset.grokDone = "1"; return; }
+        } else {
+          // NEW: force-mode page-scope guard to prevent multiples during this view
+          if (forceSeenThisPage.has(sha1) || forceInflightThisPage.has(sha1)) {
+            imgEl.dataset.grokDone = "1";
+            imgEl.dataset.grokDoneForce = "1";
+            return;
           }
-        };
-        im.onerror = () => {
-          URL.revokeObjectURL(objUrl);
-          reject(new Error("image decode failed"));
-        };
-        im.src = objUrl;
-      } catch (e) {
-        reject(e);
+          forceInflightThisPage.add(sha1);
+        }
+
+        // ---- Save as JPEG always ----
+        // block re-entry on this node while saving
+        imgEl.dataset.grokSaving = "1";
+        const dims    = await imageDims(bytes).catch(() => ({ w: 0, h: 0 }));
+        const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : "";
+        const prompt  = getPromptNearestToNode(imgEl) || lastSeenPrompt || "";
+        const stamp   = isoStamp(new Date());
+        const short   = sig ? ("sig" + sig.slice(0, 10)) : ("h" + sha1.slice(0, 10));
+        const slug    = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
+        const fname   = ["grok", stamp, short, sizeStr || null, slug].filter(Boolean).join("_") + ".jpg";
+
+        try {
+          // transcode to jpeg with comment
+            const jpegU8 = await pngOrJpegBytesToJpegWithComment(bytes, {
+              signature: sig || "",
+              prompt,
+              dims: sizeStr,
+              artist: "",
+              pageUrl: location.href,
+              sha1,
+              src
+            });
+
+          const blob   = new Blob([jpegU8], { type: "image/jpeg" });
+          const urlObj = URL.createObjectURL(blob);
+          anchorDownload(urlObj, fname, myEpoch);
+          setTimeout(() => URL.revokeObjectURL(urlObj), 30000);
+
+          // Persist dedupe ONLY after success
+          if (sig) seenSig.add(sig);
+          seenImg.add(sha1);
+          persistSeen();
+
+          // Page-scope forced dedupe: move from in-flight to seen
+          if (forcePage) {
+            forceInflightThisPage.delete(sha1);
+            forceSeenThisPage.add(sha1);
+          }
+
+          imgEl.dataset.grokDone = "1";
+          if (forcePage) imgEl.dataset.grokDoneForce = "1";
+
+          console.log("[Grok downloader][IMG]", forcePage ? "saved (FORCED)" : "saved", fname);
+          imgEl.dataset.grokSaving = "0";
+        } catch (e) {
+          console.warn("[Grok downloader][IMG] save failed:", e);
+          imgEl.dataset.grokSaving = "0";
+          // On failure: do NOT persist to seen; also clear force in-flight lock
+          if (forcePage) forceInflightThisPage.delete(sha1);
+        }
+      } finally {
+        // Always clear in-flight locks
+        inflightImgUrl.delete(normSrc);
+        if (sha1) inflightImgSha1.delete(sha1);
       }
-    });
-  }
-
-  // Prepare a JPEG data URL (convert if needed)
-  let jpegDataUrl;
-  try {
-    if (scheme === "data" && /^data:image\/jpe?g;base64,/i.test(src)) {
-      // already JPEG data URL
-      jpegDataUrl = src;
-    } else {
-      jpegDataUrl = await bytesToJpegDataURL(bytes, mime);
     }
-  } catch (e) {
-    console.warn("[Grok downloader][IMG] PNG→JPG transcode failed; saving original as .jpg name:", e);
-    // Last-resort fallback: save original URL; name still ends with .jpg
-    // (Content may still be PNG; user requested JPG naming always.)
-    imgEl.dataset.grokSaving = "1";
-    try {
-      await dlQ(() => new Promise((resolve, reject) => {
-        if (myEpoch !== routeEpoch) { resolve(); return; }
-        GM_download({
-          url: src,
-          name: filename,
-          saveAs: false,
-          onload: resolve,
-          onerror: err => reject(err?.error || "download error"),
-          ontimeout: () => reject("timeout"),
-        });
-      }));
-      if (sig) seenSig.add(sig);
-      seenImg.add(sha1);
-      persistSeen();
-      imgEl.dataset.grokDone = "1";
-      if (forcePage) imgEl.dataset.grokDoneForce = "1";
-      console.log("[Grok downloader][IMG] saved (fallback)", filename);
-    } finally {
-      delete imgEl.dataset.grokSaving;
-    }
-    return;
-  }
 
-  // Try to inject EXIF into the JPEG data URL (safe because it's now JPEG)
-  let outUrl = jpegDataUrl;
-  try {
-    outUrl = injectMetaIntoJpeg(jpegDataUrl, {
-      signature: sig || "",
-      prompt:    prompt || "",
-      dims:      dims || "",
-      artist:    artist || "",
-      pageUrl:   location.href,
-      sha1:      sha1
-    });
-  } catch (e) {
-    console.warn("JPEG EXIF inject failed; downloading JPG without EXIF:", e);
-  }
-
-  // Save (only mark seen/done AFTER success)
-  imgEl.dataset.grokSaving = "1";
-  try {
-    await dlQ(() => new Promise((resolve, reject) => {
-      if (myEpoch !== routeEpoch) { resolve(); return; }
-      GM_download({
-        url: outUrl,
-        name: filename,
-        saveAs: false,
-        onload: resolve,
-        onerror: err => reject(err?.error || "download error"),
-        ontimeout: () => reject("timeout"),
-      });
-    }));
-
-    if (sig) seenSig.add(sig);
-    seenImg.add(sha1);
-    persistSeen();
-
-    imgEl.dataset.grokDone = "1";
-    if (forcePage) imgEl.dataset.grokDoneForce = "1";
-
-    console.log("[Grok downloader][IMG] saved", filename);
-  } finally {
-    delete imgEl.dataset.grokSaving;
-  }
-}
 
   // ---------------- Videos ----------------
     function scanVideos() {
@@ -686,7 +653,7 @@ async function tryDownloadImageIfFinal(imgEl) {
 
       document.querySelectorAll("video").forEach(v => {
         if (v.dataset.grokWatching === "1") return;
-        const requireVisible = !onFavoritesRoute();
+        const requireVisible = !(onFavoritesRoute() || forcePage);
         if (requireVisible && !isEffectivelyVisible(v)) return;
 
         if (!forcePage && v.dataset.grokDone === "1") return;
@@ -703,121 +670,151 @@ async function tryDownloadImageIfFinal(imgEl) {
     }
 
 
-async function tryDownloadVideoIfFinal(videoEl) {
-  const myEpoch = Number(videoEl.dataset.grokEpoch || routeEpoch);
-  if (myEpoch !== routeEpoch || !videoEl.isConnected) return;
-  if (!autoOn) return;
-  if (!forcePage && videoEl.dataset.grokDone === "1") return;
-  if (forcePage && videoEl.dataset.grokDoneForce === "1") return;
+    async function tryDownloadVideoIfFinal(videoEl) {
+      const myEpoch = Number(videoEl.dataset.grokEpoch || routeEpoch);
+      if (myEpoch !== routeEpoch || !videoEl.isConnected) return;
+      if (!autoOn) return;
+      if (!forcePage && videoEl.dataset.grokDone === "1") return;
+      if (forcePage && videoEl.dataset.grokDoneForce === "1") return;
 
-  const url = getVideoUrl(videoEl);
-  if (!url) return;
-  const normUrl = normalizeUrl(url);
+      const url = getVideoUrl(videoEl);
+      if (!url) return;
 
-  // Decide if we will inspect bytes (to read signature/sha1)
-  let abuf = null;
-  let canInspect = true;
+      const normUrl = normalizeUrl(url);
+      const vKey = (normUrl || url).split("#")[0];
 
-  if (url.startsWith("data:")) {
-    const m = url.match(/^data:video\/mp4;base64,(.*)$/i);
-    if (!m) return;
-    const b64 = m[1];
-    if (b64.length < QUICK_SKIP_VID_B64LEN) return;
-    abuf = b64ToUint8Array(b64).buffer;
-  } else if (url.startsWith("blob:")) {
-    const resp = await fetch(url);
-    abuf = await resp.arrayBuffer();
-  } else if (url.startsWith("https://")) {
-    if (forcePage) {
-      canInspect = false; // avoid cross-origin fetch in forced mode
-    } else {
-      if (!TRUST_HTTPS_VIDEO) return;
-      abuf = await withRetry(() => fetchQ(() => gmFetchArrayBuffer(url)));
-    }
-  } else {
-    return;
-  }
+      // page-scope in-flight guard for video URL
+      if (inflightVidUrl.has(normUrl)) return;
+      inflightVidUrl.add(normUrl);
 
-  let signature = null;
-  let sha1 = null;
+      // we need these in outer scope for catch/finally
+      let signature = null;
+      let sha1 = null;
+      let sha1Locked = false;
 
-  if (canInspect && abuf) {
-    const u8 = new Uint8Array(abuf);
-    signature = findSignatureAscii(u8);
-    sha1 = await sha1Hex(u8);
-
-    if (!forcePage && (seenVid.has(sha1) || seenVidUrls.has(url) || seenVidUrlsNorm.has(normUrl))) {
-      videoEl.dataset.grokDone = "1";
-      return;
-    }
-    // For data: require signature to avoid previews
-    if (!signature && url.startsWith("data:")) return;
-  } else {
-    // Force mode + https URL path (no bytes read)
-    if (!forcePage && (seenVidUrls.has(url) || seenVidUrlsNorm.has(normUrl))) {
-      videoEl.dataset.grokDone = "1";
-      return;
-    }
-  }
-
-  // Filename parts
-  const dims = await videoDims(videoEl);
-  const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : "";
-  const prompt = getPromptNearestToNode(videoEl) || lastSeenPrompt || "";
-
-  const stamp = isoStamp(new Date());
-  const short =
-    signature ? ("sig" + signature.slice(0, 10)) :
-    sha1       ? ("h"   + sha1.slice(0, 10))    :
-                 ("u"   + hashOfString(normUrl).slice(0, 10));
-  const slug  = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
-  const filename = ["grokvid", stamp, short, sizeStr || null, slug].filter(Boolean).join("_") + ".mp4";
-
-  // ---- Save video (no MP4 comment embedding right now) ----
-  try {
-    if (!WRITE_MP4_COMMENT) {
-      await simpleDownload(url, filename, myEpoch);
-    } else {
-      const vidMeta = {
-        signature: signature || "",
-        prompt,
-        size: sizeStr || "",
-        artist: "",
-        model:  "",
-        page: location.href,
-        src: url
-      };
-      const comment = buildVideoCommentLines(vidMeta);
       try {
-        await ensureMp4Box();
-        const u8 = await fetchMp4Bytes(url);           // Uint8Array
-        const out = await embedMp4Comment(u8, comment); // Uint8Array with ©cmt
-        const blob = new Blob([out], { type: "video/mp4" });
-        const objUrl = URL.createObjectURL(blob);
-        anchorDownload(objUrl, filename, myEpoch);
-        setTimeout(() => URL.revokeObjectURL(objUrl), 30000);
+        // Per-page dedupe for Force mode (before any heavy work)
+        if (forcePage && forceSeenVideoThisPage.has(vKey)) {
+          videoEl.dataset.grokDone = "1";
+          videoEl.dataset.grokDoneForce = "1";
+          return;
+        }
+
+        // Decide if we will inspect bytes (to read signature/sha1)
+        let abuf = null;
+        let canInspect = true;
+
+        if (url.startsWith("data:")) {
+          const m = url.match(/^data:video\/mp4;base64,(.*)$/i);
+          if (!m) return;
+          const b64 = m[1];
+          if (b64.length < QUICK_SKIP_VID_B64LEN) return;
+          abuf = b64ToUint8Array(b64).buffer;
+        } else if (url.startsWith("blob:")) {
+          const resp = await fetch(url);
+          abuf = await resp.arrayBuffer();
+        } else if (url.startsWith("https://")) {
+          if (forcePage) {
+            canInspect = false; // avoid cross-origin fetch in forced mode
+          } else {
+            if (!TRUST_HTTPS_VIDEO) return;
+            abuf = await withRetry(() => fetchQ(() => gmFetchArrayBuffer(url)));
+          }
+        } else {
+          return;
+        }
+
+        if (canInspect && abuf) {
+          const u8 = new Uint8Array(abuf);
+          signature = findSignatureAscii(u8);
+          sha1 = await sha1Hex(u8);
+
+          // sha1 in-flight guard: prevents parallel saves of identical bytes
+          if (sha1 && inflightVidSha1.has(sha1)) return;
+          if (sha1) { inflightVidSha1.add(sha1); sha1Locked = true; }
+
+          if (!forcePage && (seenVid.has(sha1) || seenVidUrls.has(url) || seenVidUrlsNorm.has(normUrl))) {
+            videoEl.dataset.grokDone = "1";
+            return;
+          }
+          // For data: require signature to avoid previews
+          if (!signature && url.startsWith("data:")) return;
+        } else {
+          // Force mode + https URL path (no bytes read)
+          if (!forcePage && (seenVidUrls.has(url) || seenVidUrlsNorm.has(normUrl))) {
+            videoEl.dataset.grokDone = "1";
+            return;
+          }
+        }
+
+        // Filename parts
+        const dims = await videoDims(videoEl);
+        const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : "";
+        const prompt = getPromptNearestToNode(videoEl) || lastSeenPrompt || "";
+
+        const stamp = isoStamp(new Date());
+        const short =
+          signature ? ("sig" + signature.slice(0, 10)) :
+          sha1       ? ("h"   + sha1.slice(0, 10))    :
+                       ("u"   + hashOfString(normUrl).slice(0, 10));
+        const slug  = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
+        const filename = ["grokvid", stamp, short, sizeStr || null, slug].filter(Boolean).join("_") + ".mp4";
+
+        // Block re-entry on this node while saving
+        videoEl.dataset.grokSaving = "1";
+
+        // In Force mode, register this page-view key right before we start saving
+        if (forcePage) forceSeenVideoThisPage.add(vKey);
+
+        if (!WRITE_MP4_COMMENT) {
+          await simpleDownload(url, filename, myEpoch);
+        } else {
+          const vidMeta = {
+            signature: signature || "",
+            prompt,
+            size: sizeStr || "",
+            artist: "",
+            model:  "",
+            page: location.href,
+            src: url
+          };
+          const comment = buildVideoCommentLines(vidMeta);
+          try {
+            await ensureMp4Box();
+            const u8 = await fetchMp4Bytes(url);            // Uint8Array
+            const out = await embedMp4Comment(u8, comment); // Uint8Array with ©cmt
+            const blob = new Blob([out], { type: "video/mp4" });
+            const objUrl = URL.createObjectURL(blob);
+            anchorDownload(objUrl, filename, myEpoch);
+            setTimeout(() => URL.revokeObjectURL(objUrl), 30000);
+          } catch (e) {
+            console.warn("[Grok downloader][VID] MP4 comment embed failed; falling back:", e);
+            await simpleDownload(url, filename, myEpoch);
+          }
+        }
+
+        // Only after successful save, persist global de-dupe
+        if (sha1) seenVid.add(sha1);
+        seenVidUrls.add(url);
+        seenVidUrlsNorm.add(normUrl);
+        persistSeen();
+
+        videoEl.dataset.grokSaving = "0";
+        videoEl.dataset.grokDone = "1";
+        if (forcePage) videoEl.dataset.grokDoneForce = "1";
+
+        console.log("[Grok downloader][VID]", forcePage ? "saved (FORCED)" : "saved", filename);
       } catch (e) {
-        console.warn("[Grok downloader][VID] MP4 comment embed failed; falling back:", e);
-        await simpleDownload(url, filename, myEpoch);
+        console.warn("[Grok downloader][VID] save failed:", e);
+        // Do not mark done on failure
+        videoEl.dataset.grokSaving = "0";
+        // Let a later retry occur in this page/view
+        if (forcePage) forceSeenVideoThisPage.delete(vKey);
+      } finally {
+        if (sha1Locked && sha1) inflightVidSha1.delete(sha1);
+        inflightVidUrl.delete(normUrl);
       }
     }
-
-    // ---- Only AFTER successful save, persist de-dupe ----
-    if (sha1) seenVid.add(sha1);
-    seenVidUrls.add(url);
-    seenVidUrlsNorm.add(normUrl);
-    persistSeen();
-
-    // Mark done so we don't hammer the same <video> again
-    videoEl.dataset.grokDone = "1";
-    if (forcePage) videoEl.dataset.grokDoneForce = "1";
-
-    console.log("[Grok downloader][VID]", forcePage ? "saved (FORCED)" : "saved", filename);
-  } catch (e) {
-    console.warn("[Grok downloader][VID] save failed:", e);
-    // no persistSeen(), no grokDone here
-  }
-}
 
 
     function isVideoPosterImage(imgEl) {
@@ -878,6 +875,29 @@ async function tryDownloadVideoIfFinal(videoEl) {
     });
     return { w: videoEl.videoWidth || 0, h: videoEl.videoHeight || 0 };
   }
+
+  async function imageDims(u8) {
+      try {
+        const blob = new Blob([u8], { type: "image/*" });
+        const url  = URL.createObjectURL(blob);
+        try {
+          const img = new Image();
+          await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = reject;
+            img.src = url;
+          });
+          const w = img.naturalWidth  || img.width  || 0;
+          const h = img.naturalHeight || img.height || 0;
+          return { w, h };
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      } catch {
+        return { w: 0, h: 0 };
+      }
+    }
+
 
   // Find "Signature: <base64>" as ASCII anywhere in MP4
   function findSignatureAscii(uint8) {
@@ -1002,6 +1022,53 @@ function injectMetaIntoJpeg(dataUrl, info) {
   const exifBytes = piexif.dump(exifObj);
   return piexif.insert(exifBytes, dataUrl);
 }
+
+async function pngOrJpegBytesToJpegWithComment(u8, info) {
+  // Detect JPEG magic FF D8
+  const isJpeg = u8 && u8.length > 2 && u8[0] === 0xFF && u8[1] === 0xD8;
+
+  let jpegDataUrl;
+  if (isJpeg) {
+    // Already JPEG -> data URL directly
+    jpegDataUrl = bytesToDataURL("image/jpeg", u8);
+  } else {
+    // Likely PNG or other -> transcode via canvas
+    const blob = new Blob([u8], { type: "image/png" });
+    const url  = URL.createObjectURL(blob);
+    try {
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = url;
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width  = img.naturalWidth  || img.width  || 0;
+      canvas.height = img.naturalHeight || img.height || 0;
+      const ctx = canvas.getContext("2d", { alpha: true, willReadFrequently: false });
+      ctx.drawImage(img, 0, 0);
+      // Quality 0.92 by default. Adjust if you like.
+      jpegDataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  // Build EXIF in a JPEG-safe way
+  const annotated = injectMetaIntoJpeg(jpegDataUrl, {
+    signature: info.signature || "",
+    prompt:    info.prompt    || "",
+    dims:      info.dims      || "",
+    artist:    info.artist    || "",
+    pageUrl:   info.pageUrl   || "",
+    sha1:      info.sha1      || ""
+  });
+
+  // Return raw bytes for saving
+  const b64 = annotated.split(",")[1];
+  return b64ToUint8Array(b64);
+}
+
 
 
   // ---------- Net / misc helpers ----------
