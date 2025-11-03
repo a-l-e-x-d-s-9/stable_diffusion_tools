@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.5.11
+// @version      2.5.13
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -346,19 +346,36 @@
     updateIndicator();
     if (autoOn) { scanImages(); scanVideos(); }
   }
+
     function toggleForcePage() {
-      forcePage = !forcePage;
-      try {
-        GM_notification({ title: "Grok downloader", text: `Force downloads ${forcePage ? "ENABLED" : "DISABLED"} (this page)`, timeout: 1200 });
-      } catch {}
-      updateIndicator();
+        forcePage = !forcePage;
+        try {
+            GM_notification({ title: "Grok downloader", text: `Force downloads ${forcePage ? "ENABLED" : "DISABLED"} (this page)`, timeout: 1200 });
+        } catch {}
+        updateIndicator();
 
-      // reset per-page so previously marked nodes become eligible again
-      resetPerPageState();
+        if (forcePage) {
+            // Mark everything currently on the page so Force will ignore it.
+            const imgSel = 'img[alt="Generated image"], img[src^="data:image/"], img[src*="imagine-public.x.ai/imagine-public/images/"]';
+            document.querySelectorAll(imgSel).forEach(el => { el.dataset.grokPreForce = "1"; });
+            document.querySelectorAll("video").forEach(el => { el.dataset.grokPreForce = "1"; });
+            window.__GROK_FORCE_SINCE__ = Date.now();
+        } else {
+            // Leaving Force: clear markers so normal behavior resumes.
+            // dataset.grokPreForce maps to attribute: data-grok-pre-force
+            document.querySelectorAll("[data-grok-pre-force]").forEach(el => { delete el.dataset.grokPreForce; });
+            window.__GROK_FORCE_SINCE__ = 0;
+        }
 
-      // kick fresh scans now
-      if (autoOn && onAllowedRoute()) { scanImages(); scanVideos(); }
+
+        // Reset per-page state so new loads are watched fresh
+        resetPerPageState();
+
+        // Kick fresh scans
+        if (autoOn && onAllowedRoute()) { scanImages(); scanVideos(); }
     }
+
+
 
   function updateIndicator() {
     indicator.textContent = `Grok auto-download: ${autoOn ? "ON" : "OFF"}${forcePage ? " · FORCE" : ""}`;
@@ -413,6 +430,8 @@
         // On Favorites, process even if off-screen; elsewhere still require visibility
         const requireVisible = !(onFavoritesRoute() || forcePage);
         if (requireVisible && !isEffectivelyVisible(img)) return;
+        // In Force mode, ignore anything that existed before Force was toggled on
+        if (forcePage && img.dataset.grokPreForce === "1") return;
 
         if (isVideoPosterImage(img)) return;             // skip video thumbnails
 
@@ -505,6 +524,9 @@
       if (!forcePage && imgEl.dataset.grokDone === "1") return;
       if (forcePage && imgEl.dataset.grokDoneForce === "1") return;
       if (isVideoPosterImage(imgEl)) return;
+      // Force mode: skip items that were present before Force toggle
+      if (forcePage && imgEl.dataset.grokPreForce === "1") return;
+
 
       const card        = elementCard(imgEl);
       const onFavorites = onFavoritesRoute()
@@ -655,6 +677,9 @@
         if (v.dataset.grokWatching === "1") return;
         const requireVisible = !(onFavoritesRoute() || forcePage);
         if (requireVisible && !isEffectivelyVisible(v)) return;
+        // In Force mode, ignore anything that existed before Force was toggled on
+        if (forcePage && v.dataset.grokPreForce === "1") return;
+
 
         if (!forcePage && v.dataset.grokDone === "1") return;
         if (forcePage && v.dataset.grokDoneForce === "1") return;
@@ -676,6 +701,8 @@
       if (!autoOn) return;
       if (!forcePage && videoEl.dataset.grokDone === "1") return;
       if (forcePage && videoEl.dataset.grokDoneForce === "1") return;
+      // Force mode: skip items that were present before Force toggle
+      if (forcePage && videoEl.dataset.grokPreForce === "1") return;
 
       const url = getVideoUrl(videoEl);
       if (!url) return;
