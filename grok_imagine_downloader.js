@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.5.13
+// @version      2.5.18
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -55,6 +55,11 @@
   const QUICK_SKIP_IMG_B64LEN  = 80000;
   const QUICK_SKIP_VID_B64LEN  = 120000;
   const TRUST_HTTPS_VIDEO      = true;
+
+
+  // New: hard dimension gates for real finals
+  const MIN_IMG_SHORT_SIDE = 448;     // skip small previews like 171x256
+  const MIN_IMG_AREA       = 250000;  // width*height, extra safety
 
   // Safe selector for the masonry card / list item (escape the slash!)
   const CARD_SELECTOR = '.group\\/media-post-masonry-card, [role="listitem"], .relative';
@@ -580,15 +585,25 @@
           if (!hasVideoNow && Date.now() - firstSeen < POSTER_GRACE_MS) return;
         }
 
+        // Dimension gate: skip small preview tiles even if byte-size looks big (e.g., PNG data URLs)
+        const dimsGate = await imageDims(bytes).catch(() => ({ w: 0, h: 0 }));
+        const areaGate = (dimsGate.w || 0) * (dimsGate.h || 0);
+        const dimsOk   = Math.min(dimsGate.w || 0, dimsGate.h || 0) >= MIN_IMG_SHORT_SIDE
+                      && areaGate >= MIN_IMG_AREA;
+
+        // console.log("[Grok downloader][IMG] dims:", `${dimsGate.w}x${dimsGate.h}`, "area:", areaGate, "dimsOk:", dimsOk);
+
+        if (!dimsOk) {
+          // Too small visually -> likely a cloud/progress tile. Do not mark done; let a later retry pick up the final.
+          return;
+        }
+
+        // We only parse EXIF after passing size gate, for signature/metadata purposes.
         let meta = {};
         try {
           meta = await exifr.parse(bytes.buffer, { userComment: true });
         } catch {}
-        const isFinalExif   = isGrokFinal(meta);
-        const isFinalEnough = isFinalExif || onFavorites || forcePage || finalByHost;
-
-        if (scheme === "data" && !isFinalExif) return;
-        if ((scheme === "https" || scheme === "blob") && !isFinalEnough) return;
+        const isFinalExif = isGrokFinal(meta); // used for signature extraction and naming only
 
         const sig  = extractSignature(meta);
         sha1 = await sha1Hex(bytes);
