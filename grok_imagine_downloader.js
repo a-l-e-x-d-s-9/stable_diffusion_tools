@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.5.18
+// @version      2.5.23
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -63,6 +63,46 @@
 
   // Safe selector for the masonry card / list item (escape the slash!)
   const CARD_SELECTOR = '.group\\/media-post-masonry-card, [role="listitem"], .relative';
+
+// === Upscale meta persistence ===
+function loadVidMetaByUrlNorm() {
+  try { return JSON.parse(localStorage.getItem("grok_vid_meta_by_url_norm") || "{}"); }
+  catch (_) { return {}; }
+}
+function saveVidMetaByUrlNorm(obj) {
+  try { localStorage.setItem("grok_vid_meta_by_url_norm", JSON.stringify(obj)); }
+  catch (_) {}
+}
+let vidMetaByUrlNorm = loadVidMetaByUrlNorm();
+
+// HEAD Content-Length via GM_xhr if available, else fetch HEAD (may be blocked by CORS)
+async function headContentLength(u) {
+  return new Promise((resolve) => {
+    if (typeof GM_xmlhttpRequest === "function") {
+      try {
+        GM_xmlhttpRequest({
+          method: "HEAD",
+          url: u,
+          onload: (res) => {
+            const m = /content-length:\s*(\d+)/i.exec(res.responseHeaders || "");
+            resolve(m ? parseInt(m[1], 10) : 0);
+          },
+          onerror: () => resolve(0),
+          ontimeout: () => resolve(0)
+        });
+      } catch (_) { resolve(0); }
+    } else {
+      fetch(u, { method: "HEAD" })
+        .then(r => {
+          const v = r.headers.get("content-length");
+          resolve(v ? parseInt(v, 10) : 0);
+        })
+        .catch(() => resolve(0));
+    }
+  });
+}
+
+
 
     // --- Card & visibility helpers ---
     function elementCard(el) {
@@ -637,6 +677,7 @@
         const slug    = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
         const fname   = ["grok", stamp, short, sizeStr || null, slug].filter(Boolean).join("_") + ".jpg";
 
+        imgEl.dataset.grokSavedDims = sizeStr;
         try {
           // transcode to jpeg with comment
             const jpegU8 = await pngOrJpegBytesToJpegWithComment(bytes, {
@@ -713,8 +754,44 @@
     async function tryDownloadVideoIfFinal(videoEl) {
       const myEpoch = Number(videoEl.dataset.grokEpoch || routeEpoch);
       if (myEpoch !== routeEpoch || !videoEl.isConnected) return;
-      if (!autoOn) return;
-      if (!forcePage && videoEl.dataset.grokDone === "1") return;
+
+        if (!autoOn) return;
+
+        // Same-URL upscale check: if already marked done, allow re-download only if size grew.
+        // If no stored size, treat as not upscaled and keep the existing "done".
+        if (!forcePage && videoEl.dataset.grokDone === "1") {
+          const dimsNow = await videoDims(videoEl);
+          const curStr = `${dimsNow.w}x${dimsNow.h}`;
+
+          // 1) Compare with element-local saved dims (same page/view)
+          const prevElStr = videoEl.dataset.grokSavedDims || "";
+          const parseDims = s => {
+            const [w, h] = String(s || "").split("x").map(n => parseInt(n, 10) || 0);
+            return { w, h };
+          };
+          const prevEl = parseDims(prevElStr);
+          const grewVsEl = (dimsNow.w * dimsNow.h > prevEl.w * prevEl.h) ||
+                           (Math.max(dimsNow.w, dimsNow.h) > Math.max(prevEl.w, prevEl.h));
+
+          // 2) Compare with persisted per-URL dims (survives reloads)
+          const url0 = getVideoUrl(videoEl) || "";
+          const k = url0 ? normalizeUrlVideo(url0) : "";
+          const stored = k ? vidMetaByUrlNorm[k] : null;
+          const grewVsStored = !!stored && (
+            (dimsNow.w * dimsNow.h > (stored.w || 0) * (stored.h || 0)) ||
+            (Math.max(dimsNow.w, dimsNow.h) > Math.max(stored.w || 0, stored.h || 0))
+          );
+
+          if (grewVsEl || grewVsStored) {
+            delete videoEl.dataset.grokDone;
+            delete videoEl.dataset.grokDoneForce;
+          } else {
+            return;
+          }
+        }
+
+
+
       if (forcePage && videoEl.dataset.grokDoneForce === "1") return;
       // Force mode: skip items that were present before Force toggle
       if (forcePage && videoEl.dataset.grokPreForce === "1") return;
@@ -722,8 +799,8 @@
       const url = getVideoUrl(videoEl);
       if (!url) return;
 
-      const normUrl = normalizeUrl(url);
-      const vKey = (normUrl || url).split("#")[0];
+      const normUrl = normalizeUrlVideo(url);
+      const vKey = normUrl;
 
       // page-scope in-flight guard for video URL
       if (inflightVidUrl.has(normUrl)) return;
@@ -775,19 +852,30 @@
           if (sha1 && inflightVidSha1.has(sha1)) return;
           if (sha1) { inflightVidSha1.add(sha1); sha1Locked = true; }
 
-          if (!forcePage && (seenVid.has(sha1) || seenVidUrls.has(url) || seenVidUrlsNorm.has(normUrl))) {
-            videoEl.dataset.grokDone = "1";
-            return;
+          if (!forcePage && seenVid.has(sha1)) {
+              videoEl.dataset.grokDone = "1";
+              return;
           }
           // For data: require signature to avoid previews
           if (!signature && url.startsWith("data:")) return;
         } else {
           // Force mode + https URL path (no bytes read)
           if (!forcePage && (seenVidUrls.has(url) || seenVidUrlsNorm.has(normUrl))) {
-            videoEl.dataset.grokDone = "1";
-            return;
+            // Allow re-download only if stored size exists and the current size grew
+            const dimsNow = await videoDims(videoEl);
+            const stored = vidMetaByUrlNorm[normUrl];
+            const grewVsStored = !!stored && (
+              (dimsNow.w * dimsNow.h > (stored.w || 0) * (stored.h || 0)) ||
+              (Math.max(dimsNow.w, dimsNow.h) > Math.max(stored.w || 0, stored.h || 0))
+            );
+            if (!grewVsStored) {
+              videoEl.dataset.grokDone = "1";
+              return;
+            }
+            // else: fall through and save the upscaled version
           }
         }
+
 
         // Filename parts
         const dims = await videoDims(videoEl);
@@ -844,6 +932,19 @@
         videoEl.dataset.grokSaving = "0";
         videoEl.dataset.grokDone = "1";
         if (forcePage) videoEl.dataset.grokDoneForce = "1";
+
+        // Persist per-URL dimensions so future loads can detect upscales
+        try {
+          const dims = await videoDims(videoEl);
+          const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : "";
+          videoEl.dataset.grokSavedDims = sizeStr;
+          const k = normalizeUrlVideo(getVideoUrl(videoEl));
+          if (k) {
+            vidMetaByUrlNorm[k] = { w: dims.w || 0, h: dims.h || 0, sizeStr };
+            saveVidMetaByUrlNorm(vidMetaByUrlNorm);
+          }
+        } catch (_) {}
+
 
         console.log("[Grok downloader][VID]", forcePage ? "saved (FORCED)" : "saved", filename);
       } catch (e) {
@@ -965,6 +1066,15 @@
       return x.toString();
     } catch { return u; }
   }
+
+    function normalizeUrlVideo(u) {
+      try {
+        const x = new URL(u, location.href);
+        x.hash = "";               // keep query, drop hash
+        return x.toString();
+      } catch { return u; }
+    }
+
 
   function getPromptNearestToNode(el) {
     const chips = collectNearbyChips(el, 6);
