@@ -19,6 +19,10 @@ from collections import defaultdict
 from huggingface_hub import HfApi, CommitOperationAdd
 from tqdm import tqdm
 
+# ANSI colors for terminal highlighting
+RED = "\033[31m"
+RESET = "\033[0m"
+
 # ------------- Logging -------------
 
 def setup_logging(verbose: bool) -> None:
@@ -803,6 +807,22 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any], totals: Dict
 
     pbar.close()
 
+    # Determine files that failed in all destinations
+    completely_failed_files = []
+    for local_path, counters in delete_tracker.items():
+        # A "completely failed" file is one that was planned for upload
+        # but never succeeded in any destination.
+        if counters["planned"] > 0 and counters["succeeded"] == 0 and local_path in failed_files:
+            completely_failed_files.append(local_path)
+
+    if completely_failed_files:
+        logging.error(RED + f"Files that failed in all destinations: {len(completely_failed_files)}" + RESET)
+        for lp in sorted(completely_failed_files):
+            logging.error(RED + f"FAILED file: {lp}" + RESET)
+
+    # Attach list of failed files to results for main() / exit code
+    results["failed_files"] = completely_failed_files
+
     # Removal rules
     # 1) Remove originals that were uploaded raw when cfg.remove is True
     if remove_after:
@@ -843,6 +863,7 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any], totals: Dict
             logging.debug(f"tmpdir cleanup warning: {e}")
 
     return results
+
 
 # ------------- CLI -------------
 
@@ -914,6 +935,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Execute
     results = execute_plans(plans, cfg, totals)
 
+    failed_files = results.get("failed_files", []) or []
+    failed_file_count = len(failed_files)
+
     # Summary
     summary = {
         "uploaded_files": results["uploaded"],
@@ -922,8 +946,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         "planned_files": totals["files_planned"],
         "planned_bytes": totals["bytes_planned"],
         "skipped_planned": totals.get("skipped_planned", 0),
+        "failed_files": failed_file_count
     }
     print(json.dumps(summary, indent=2))
+
+    # Highlight failed-files count in the terminal
+    if failed_file_count > 0:
+        logging.error(RED + f"FAILED FILES (all destinations): {failed_file_count}" + RESET)
+    else:
+        logging.info("FAILED FILES (all destinations): 0")
 
     # Redact tokens before writing manifest
     safe_plans = []
@@ -941,7 +972,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as e:
         logging.warning(f"Failed to write manifest: {e}")
 
+    # Exit code: non-zero if any file completely failed
+    if failed_file_count > 0:
+        return 4
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
