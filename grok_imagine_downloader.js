@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.5.23
+// @version      2.6.01
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -25,10 +25,12 @@
 (function () {
   "use strict";
 
-  // Prompt chips (generator + viewer)
-  const PROMPT_SELECTOR_GEN  = "div.border.border-border-l2.bg-surface-l1.rounded-3xl";
-  const PROMPT_SELECTOR_VIEW = "div.border.border-border-l2.bg-surface-l1.truncate.rounded-full";
-  const PROMPT_SELECTOR = `${PROMPT_SELECTOR_GEN}, ${PROMPT_SELECTOR_VIEW}`;
+  // Prompt chips (generator + viewer, including new sticky pill on viewer)
+  const PROMPT_SELECTOR_GEN    = "div.border.border-border-l2.bg-surface-l1.rounded-3xl";
+  const PROMPT_SELECTOR_VIEW   = "div.border.border-border-l2.bg-surface-l1.truncate.rounded-full";
+  const PROMPT_SELECTOR_STICKY = "div.bg-surface-l1.truncate.rounded-full.sticky";
+  const PROMPT_SELECTOR        = `${PROMPT_SELECTOR_GEN}, ${PROMPT_SELECTOR_VIEW}, ${PROMPT_SELECTOR_STICKY}`;
+
 
   // Behavior & storage keys
   const STATE_KEY              = "grok_auto_on";
