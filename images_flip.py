@@ -22,19 +22,33 @@ def flip_image(image_path: str, h_flip_chance: float, v_flip_chance: float, make
             was_flipped = True
 
         # Decide the path to save the image
+        base, ext = os.path.splitext(image_path)
+        ext_lower = ext.lower()
+
         if make_copy and was_flipped:
-            base, ext = os.path.splitext(image_path)
             save_path = f"{base}_f{ext}"
         else:
             save_path = image_path
 
+        # If saving as JPEG, make sure mode is compatible
+        if ext_lower in (".jpg", ".jpeg") and img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
         # Save the flipped image
         img.save(save_path)
 
-    except Exception as e:
-        print(f'Error processing {image_path}: {e}')
+        return was_flipped
 
-    return was_flipped
+    except Exception as e:
+        print(f"Error processing {image_path}: {e}")
+        # If we were writing a copy and it ended up as an empty file, delete it
+        try:
+            if "save_path" in locals() and save_path != image_path:
+                if os.path.exists(save_path) and os.path.getsize(save_path) == 0:
+                    os.remove(save_path)
+        except Exception:
+            pass
+        return False
 
 
 if __name__ == '__main__':
