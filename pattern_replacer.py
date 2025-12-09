@@ -114,6 +114,11 @@ def expand_sum_inc(match: re.Match) -> str:
             return f"{name}{colon}{_fmt(d, q)}"
         return _slot_pat.sub(_repl, template).strip()
 
+    # slot names and logging flag (default on; set log=0|false|off to silence)
+    slot_names = [m.group(1) for m in slot_matches]
+    log_flag = (attrs.get("log") is None) or (str(attrs.get("log")).strip().lower() not in ("0", "false", "off", "no"))
+
+
     # ----------------------------
     # COUNT MODE (new feature)
     # ----------------------------
@@ -187,6 +192,13 @@ def expand_sum_inc(match: re.Match) -> str:
             if nslots > 0:
                 vals[-1] = (vals[-1] + drift).quantize(q, rounding=ROUND_HALF_UP)
             lines.append(render_with_values(vals))
+
+            if log_flag:
+                print(
+                    "[sum_inc] count S=" + _fmt(S, q) + " -> "
+                    + ", ".join(f"{slot_names[i]}=" + _fmt(vals[i], q) for i in range(nslots))
+                    + " | sum=" + _fmt(sum(vals, Decimal(0)), q)
+                )
 
         # default is already ascending by sum
         return "\n".join(lines)
@@ -304,15 +316,47 @@ def expand_sum_inc(match: re.Match) -> str:
     def sum_for_k(k: int) -> Decimal:
         return sum0 + inc_per_row * Decimal(k)
 
-    rows = [(sum_for_k(k), render_with_k(k)) for k in ks]
-    if sort_mode in ("none", "off", "false", "0"):
-        lines = [r for _, r in rows]
-    elif sort_mode in ("desc", "sum_desc"):
-        lines = [r for _, r in sorted(rows, key=lambda t: t[0], reverse=True)]
-    else:
-        lines = [r for _, r in sorted(rows, key=lambda t: t[0])]
+    # Build rows with explicit per-slot values so we can log accurately
+    def _vals_for_k(k: int) -> list[Decimal]:
+        vals: list[Decimal] = []
+        if k >= 0:
+            for m in slot_matches:
+                base = Decimal(m.group(3))
+                vals.append((base + step_mag * Decimal(k)).quantize(q, rounding=ROUND_HALF_UP))
+        else:
+            kk = -k
+            for m in slot_matches:
+                base = Decimal(m.group(3))
+                vals.append((base - step_mag * Decimal(kk)).quantize(q, rounding=ROUND_HALF_UP))
+        return vals
 
+    rows = []
+    for k in ks:
+        vals = _vals_for_k(k)
+        total = sum(vals, Decimal(0))
+        rendered = render_with_values(vals)
+        rows.append((total, rendered, vals, k))
+
+    # Sorting by sum (optional attr: sort=none|desc)
+    sort_mode = (attrs.get("sort") or "sum_asc").strip().lower()
+    if sort_mode in ("none", "off", "false", "0"):
+        sorted_rows = rows
+    elif sort_mode in ("desc", "sum_desc"):
+        sorted_rows = sorted(rows, key=lambda t: t[0], reverse=True)
+    else:
+        sorted_rows = sorted(rows, key=lambda t: t[0])
+
+    # Log per-row details in final (sorted) order
+    if log_flag:
+        for total, _rendered, vals, k in sorted_rows:
+            print(
+                "[sum_inc] k=" + (f"{k:+d}") + " sum=" + _fmt(total, q) + " -> "
+                + ", ".join(f"{slot_names[i]}=" + _fmt(vals[i], q) for i in range(nslots))
+            )
+
+    lines = [r[1] for r in sorted_rows]
     return "\n".join(lines)
+
 
 
 
