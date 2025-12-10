@@ -105,14 +105,26 @@ def merge_archive(top: Dict[str, Any], src: Optional[Dict[str, Any]], dst: Optio
             out[k] = v
     return out
 
-def discover_folders_by_glob(base: Path, glob_pat: str) -> List[str]:
+def discover_folders_by_glob(base: Path, glob_pat) -> List[str]:
     import glob as _glob
-    out = []
-    for p in _glob.glob(str(base / glob_pat), recursive=True):
-        pp = Path(p)
-        if pp.is_dir():
-            out.append(str(pp))
+    out: List[str] = []
+
+    # Allow string or list/tuple of patterns
+    if isinstance(glob_pat, (list, tuple, set)):
+        patterns = list(glob_pat)
+    else:
+        patterns = [glob_pat]
+
+    for pat in patterns:
+        if not pat:
+            continue
+        for p in _glob.glob(str(base / pat), recursive=True):
+            pp = Path(p)
+            if pp.is_dir():
+                out.append(str(pp))
+
     return out
+
 
 def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     # Top-level defaults and options
