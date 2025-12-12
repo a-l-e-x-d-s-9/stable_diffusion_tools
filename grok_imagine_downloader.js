@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.01
+// @version      2.6.02
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -835,12 +835,10 @@ async function headContentLength(u) {
           const resp = await fetch(url);
           abuf = await resp.arrayBuffer();
         } else if (url.startsWith("https://")) {
-          if (forcePage) {
-            canInspect = false; // avoid cross-origin fetch in forced mode
-          } else {
-            if (!TRUST_HTTPS_VIDEO) return;
-            abuf = await withRetry(() => fetchQ(() => gmFetchArrayBuffer(url)));
-          }
+          // Do not XHR videos anymore - Grok started blocking GM_xmlhttpRequest
+          // for most video URLs. We skip byte inspection and rely on
+          // URL/dimension based dedupe instead.
+          canInspect = false;
         } else {
           return;
         }
