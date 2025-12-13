@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.02
+// @version      2.6.04
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -692,27 +692,33 @@ async function headContentLength(u) {
               src
             });
 
-          const blob   = new Blob([jpegU8], { type: "image/jpeg" });
-          const urlObj = URL.createObjectURL(blob);
-          anchorDownload(urlObj, fname, myEpoch);
-          setTimeout(() => URL.revokeObjectURL(urlObj), 30000);
+            // --- Save (verified) ---
+            const blob = new Blob([jpegU8], { type: "image/jpeg" });
+            const objUrl = URL.createObjectURL(blob);
 
-          // Persist dedupe ONLY after success
-          if (sig) seenSig.add(sig);
-          seenImg.add(sha1);
-          persistSeen();
+            try {
+              // Verified download: resolves only on GM_download onload
+              await simpleDownload(objUrl, filename, myEpoch);
+            } catch (e) {
+              // Fallback: some TM builds dislike blob: URLs
+              const dataUrl = bytesToDataURL("image/jpeg", jpegU8);
+              await simpleDownload(dataUrl, fname, myEpoch);
+            } finally {
+              URL.revokeObjectURL(objUrl);
+            }
 
-          // Page-scope forced dedupe: move from in-flight to seen
-          if (forcePage) {
-            forceInflightThisPage.delete(sha1);
-            forceSeenThisPage.add(sha1);
-          }
+            // Only after successful save, persist de-dupe + mark done
+            if (sig) seenSig.add(sig);
+            seenImg.add(sha1);
+            persistSeen();
 
-          imgEl.dataset.grokDone = "1";
-          if (forcePage) imgEl.dataset.grokDoneForce = "1";
+            imgEl.dataset.grokDone = "1";
+            if (forcePage) imgEl.dataset.grokDoneForce = "1";
+            if (forcePage) forceSeenThisPage.add(sha1);
 
-          console.log("[Grok downloader][IMG]", forcePage ? "saved (FORCED)" : "saved", fname);
-          imgEl.dataset.grokSaving = "0";
+            console.log("[Grok downloader][IMG]", forcePage ? "saved (FORCED)" : "saved", fname);
+
+            imgEl.dataset.grokSaving = "0";
         } catch (e) {
           console.warn("[Grok downloader][IMG] save failed:", e);
           imgEl.dataset.grokSaving = "0";
@@ -915,7 +921,7 @@ async function headContentLength(u) {
             const out = await embedMp4Comment(u8, comment); // Uint8Array with ©cmt
             const blob = new Blob([out], { type: "video/mp4" });
             const objUrl = URL.createObjectURL(blob);
-            anchorDownload(objUrl, filename, myEpoch);
+            await simpleDownload(objUrl, filename, myEpoch);
             setTimeout(() => URL.revokeObjectURL(objUrl), 30000);
           } catch (e) {
             console.warn("[Grok downloader][VID] MP4 comment embed failed; falling back:", e);
@@ -1317,20 +1323,26 @@ function toLatin1(str) {
     throw new Error("Unsupported video URL scheme");
   }
 
-  function simpleDownload(url, filename, myEpoch) {
-    if (url.startsWith("blob:") || url.startsWith("data:")) {
-      anchorDownload(url, filename, myEpoch);
-      return Promise.resolve();
+    function simpleDownload(url, filename, myEpoch) {
+      return dlQ(() => new Promise((resolve, reject) => {
+        // If navigation happened, silently ignore late work
+        if (typeof myEpoch === "number" && myEpoch !== routeEpoch) return resolve();
+
+        try {
+          GM_download({
+            url,
+            name: filename,
+            saveAs: false,
+            onload: () => resolve(),
+            onerror: (e) => reject((e && e.error) ? e.error : "download error"),
+            ontimeout: () => reject("timeout")
+          });
+        } catch (e) {
+          reject(e);
+        }
+      }));
     }
-    return dlQ(() => new Promise((resolve, reject) => {
-      GM_download({
-        url, name: filename, saveAs: false,
-        onload: resolve,
-        onerror: e => reject(e?.error || "download error"),
-        ontimeout: () => reject("timeout")
-      });
-    }));
-  }
+
 
 
   function hashOfString(s) {
