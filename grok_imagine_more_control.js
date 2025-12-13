@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Prompt Manager Panel
 // @namespace    alexds9.scripts
-// @version      1.2.0
+// @version      1.2.1
 // @description  Draggable prompt panel with persistent seconds, prompt, and prompt history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -18,6 +18,7 @@
   const K_PROMPTS = LS_PREFIX + "prompts";
   const K_SELECTED = LS_PREFIX + "selectedIndex";
   const K_AR = LS_PREFIX + "aspectRatio";
+  const K_FOLDED = LS_PREFIX + "folded";
 
   function lsGet(key, fallback) {
     try {
@@ -168,6 +169,7 @@
     const savedPrompt = lsGet(K_CURRENT_PROMPT, "");
     const savedSelected = parseInt(lsGet(K_SELECTED, "-1"), 10);
     const savedAR = lsGet(K_AR, "");
+    const savedFolded = lsGet(K_FOLDED, "0") === "1";
 
     const panel = css(el("div"), [
       "position: fixed",
@@ -186,10 +188,7 @@
 
     panel.id = "grok-prompt-mgr";
 
-    if (savedPos && typeof savedPos.left === "number" && typeof savedPos.top === "number") {
-      panel.style.left = savedPos.left + "px";
-      panel.style.top = savedPos.top + "px";
-    }
+    let lastPos = null;
 
     const header = css(el("div"), [
       "display: flex",
@@ -207,11 +206,30 @@
     const hideBtn = css(el("button", { textContent: "Hide" }), "background: none; border: 1px solid #333; color: #bbb; padding: 3px 8px; border-radius: 7px; cursor: pointer; font-size: 12px;");
     const contentWrap = css(el("div"), "display: block;");
 
+    let isFolded = false;
+
+    function applyFoldState(folded, persist) {
+      isFolded = !!folded;
+
+      contentWrap.style.display = isFolded ? "none" : "block";
+      hideBtn.textContent = isFolded ? "Show" : "Hide";
+
+      // Smaller when folded
+      header.style.marginBottom = isFolded ? "0px" : "10px";
+      panel.style.paddingBottom = isFolded ? "8px" : "12px";
+
+      if (persist) {
+        lsSet(K_FOLDED, isFolded ? "1" : "0");
+        // Keep anchored after height change
+        const pos = lastPos || normalizePos(loadJson(K_POS, null));
+        if (pos) applyPosFromRatios(pos);
+      }
+    }
+
     hideBtn.onclick = () => {
-      const isHidden = contentWrap.style.display === "none";
-      contentWrap.style.display = isHidden ? "block" : "none";
-      hideBtn.textContent = isHidden ? "Hide" : "Show";
+      applyFoldState(!isFolded, true);
     };
+
 
     btnRow.appendChild(hideBtn);
     header.appendChild(title);
@@ -388,6 +406,87 @@
     panel.appendChild(contentWrap);
     document.body.appendChild(panel);
 
+    function maxLeft() {
+      return Math.max(0, window.innerWidth - panel.offsetWidth);
+    }
+
+    function maxTop() {
+      return Math.max(0, window.innerHeight - panel.offsetHeight);
+    }
+
+    function normalizePos(posObj) {
+      if (posObj && typeof posObj.x === "number" && typeof posObj.y === "number") {
+        return { x: clamp(posObj.x, 0, 1), y: clamp(posObj.y, 0, 1) };
+      }
+
+      // Legacy migration: { left, top } px -> { x, y } ratios
+      if (posObj && typeof posObj.left === "number" && typeof posObj.top === "number") {
+        const ml = maxLeft();
+        const mt = maxTop();
+        const x = ml ? clamp(posObj.left / ml, 0, 1) : 0;
+        const y = mt ? clamp(posObj.top / mt, 0, 1) : 0;
+        return { x, y };
+      }
+
+      return null;
+    }
+
+    function applyPosFromRatios(pos) {
+      if (!pos) return;
+      const ml = maxLeft();
+      const mt = maxTop();
+      const left = Math.round(clamp(pos.x, 0, 1) * ml);
+      const top = Math.round(clamp(pos.y, 0, 1) * mt);
+
+      panel.style.left = left + "px";
+      panel.style.top = top + "px";
+      panel.style.right = "auto";
+    }
+
+    function savePosFromCurrentRect() {
+      const rect = panel.getBoundingClientRect();
+      const ml = maxLeft();
+      const mt = maxTop();
+
+      const x = ml ? clamp(rect.left / ml, 0, 1) : 0;
+      const y = mt ? clamp(rect.top / mt, 0, 1) : 0;
+
+      lastPos = { x, y };
+      saveJson(K_POS, lastPos);
+      return lastPos;
+    }
+
+    function restorePos() {
+      const raw = loadJson(K_POS, null);
+      const pos = normalizePos(raw);
+
+      if (pos) {
+        lastPos = pos;
+        saveJson(K_POS, pos); // ensures migration from legacy {left,top}
+        applyPosFromRatios(pos);
+        return;
+      }
+
+      // No saved pos yet: derive ratios from current computed position and start saving ratios
+      savePosFromCurrentRect();
+      applyPosFromRatios(lastPos);
+    }
+
+    // Init folded state + position (needs DOM for offsetWidth/offsetHeight)
+    applyFoldState(savedFolded, false);
+    restorePos();
+
+    // Keep relative position when the viewport size changes
+    let resizeRaf = 0;
+    window.addEventListener("resize", () => {
+      if (resizeRaf) cancelAnimationFrame(resizeRaf);
+      resizeRaf = requestAnimationFrame(() => {
+        const pos = lastPos || normalizePos(loadJson(K_POS, null));
+        if (pos) applyPosFromRatios(pos);
+      });
+    });
+
+
     // Draggable behavior (header as handle), persist position
     let dragging = false;
     let startX = 0, startY = 0, startLeft = 0, startTop = 0;
@@ -409,11 +508,7 @@
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
 
-      const left = parseInt(panel.style.left, 10);
-      const top = parseInt(panel.style.top, 10);
-      if (Number.isFinite(left) && Number.isFinite(top)) {
-        saveJson(K_POS, { left, top });
-      }
+      savePosFromCurrentRect();
     }
 
     header.addEventListener("mousedown", (e) => {
