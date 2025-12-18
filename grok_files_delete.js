@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Grok Files - Bulk Delete (Fast, Robust)
-// @namespace    aixfun
+// @namespace    alexds9
 // @version      0.7.0
 // @description  Adds a small control panel and bulk-deletes items on https://grok.com/files
 // @match        https://grok.com/files*
