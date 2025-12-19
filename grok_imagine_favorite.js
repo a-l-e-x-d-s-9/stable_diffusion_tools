@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Quick Favorite (Heart) Button
 // @namespace    grok_imagine_favorite
-// @version      0.37.0
+// @version      0.38.0
 // @description  Adds a heart button on media tiles. Better per-tile UUID detection + debug dump of all candidate UUIDs/URLs.
 // @match        https://grok.com/imagine*
 // @match        https://www.grok.com/imagine*
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.37.0';
+  const VERSION = '0.38.0';
 
   // Main debug toggle
   const DEBUG = true;
@@ -741,7 +741,7 @@
       }
 
       if (onFavPage) {
-        // Favorites page: everything is already liked. Only allow unlike here - no create.
+        // Favorites page: toggle like/unlike by id only - never call create.
         const idToUse =
           (scanEl.dataset && UUID_ONE.test(scanEl.dataset.grokPostId || '')) ? scanEl.dataset.grokPostId :
           (btn.dataset && UUID_ONE.test(btn.dataset.postId || '')) ? btn.dataset.postId :
@@ -750,12 +750,13 @@
 
         if (!idToUse) throw new Error('Could not resolve post id on favorites page');
 
-        const res = await likeUnlike(idToUse, true);
-        if (!res.ok) throw new Error('Unlike failed: ' + res.status + ' ' + (res.text || '').slice(0, 200));
+        const doUnlike = liked; // if currently liked, unlike; else like
+        const res = await likeUnlike(idToUse, doUnlike);
+        if (!res.ok) throw new Error((doUnlike ? 'Unlike' : 'Like') + ' failed: ' + res.status + ' ' + (res.text || '').slice(0, 200));
 
-        btn.setState(false);
-        setLikedCached(idToUse, false);
-        log('Unliked (favorites):', idToUse);
+        btn.setState(!doUnlike);
+        setLikedCached(idToUse, !doUnlike);
+        log((doUnlike ? 'Unliked' : 'Liked') + ' (favorites):', idToUse);
         return;
       }
 
