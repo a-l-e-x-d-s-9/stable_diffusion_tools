@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Quick Favorite (Heart) Button
 // @namespace    grok_imagine_favorite
-// @version      0.38.0
+// @version      0.41.0
 // @description  Adds a heart button on media tiles. Better per-tile UUID detection + debug dump of all candidate UUIDs/URLs.
 // @match        https://grok.com/imagine*
 // @match        https://www.grok.com/imagine*
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.38.0';
+  const VERSION = '0.41.0';
 
   // Main debug toggle
   const DEBUG = true;
@@ -529,7 +529,21 @@
   function extractCandidateId(cardEl, mediaUrl) {
     if (!cardEl) return null;
 
-    const mediaUuid = mediaUrl ? (String(mediaUrl).match(UUID_ONE) ? String(mediaUrl).match(UUID_ONE)[0] : null) : null;
+     const mediaUuid = (() => {
+      if (!mediaUrl) return null;
+      const s = String(mediaUrl);
+
+      // assets.grok.com/users/<userId>/generated/<postId>/image.jpg
+      const mGen = s.match(/\/generated\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+      if (mGen) return mGen[1];
+
+      // Some CDNs use /share-images/<postId>.jpg style
+      const mShare = s.match(/\/share-images\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+      if (mShare) return mShare[1];
+
+      const m = s.match(UUID_ONE);
+      return m ? m[0] : null;
+    })();
 
     // Cached by our intercept or by React post pick.
     const cached = cardEl.dataset && cardEl.dataset.grokPostId ? String(cardEl.dataset.grokPostId) : null;
@@ -572,11 +586,40 @@
     return false;
   }
 
+
+
+  // Normalize mediaUrl before calling /create so the created post matches native behavior
+  // (no "?cache=1" or other query/hash parts that can break downstream actions like video generation).
+  function normalizeMediaUrlForCreate(u) {
+    const s = String(u || '');
+    if (!s) return s;
+
+    // Do not touch non-network URLs
+    if (/^(data|blob):/i.test(s)) return s;
+
+    try {
+      const url = new URL(s, location.origin);
+      if (!url.search && !url.hash) return url.toString();
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    } catch {
+      // Fallback: strip at first ? or #
+      return s.split('?')[0].split('#')[0];
+    }
+  }
+
   // -----------------------------
   // API flow: create -> like/unlike
   // -----------------------------
   async function createPost(mediaType, mediaUrl) {
-    const res = await apiPost('/rest/media/post/create', { mediaType, mediaUrl }, { referrer: location.href });
+    const cleanUrl = normalizeMediaUrlForCreate(mediaUrl);
+
+    const res = await apiPost(
+      '/rest/media/post/create',
+      { mediaType, mediaUrl: cleanUrl },
+      { referrer: location.href }
+    );
     if (!res) return { ok: false, status: 0, postId: null, text: 'no response' };
 
     const txt = await res.text().catch(() => '');
@@ -585,12 +628,19 @@
     try {
       const j = txt ? JSON.parse(txt) : {};
       const postId = j && j.post && j.post.id ? String(j.post.id) : null;
-      if (mediaUrl && postId) mediaUrlToPostId.set(mediaUrl, postId);
+
+      // Keep cache compatibility: store both the clean and original URL keys (if different).
+      if (postId) {
+        if (cleanUrl) mediaUrlToPostId.set(cleanUrl, postId);
+        if (mediaUrl && mediaUrl !== cleanUrl) mediaUrlToPostId.set(mediaUrl, postId);
+      }
+
       return { ok: true, status: res.status, postId, text: txt };
     } catch {
       return { ok: true, status: res.status, postId: null, text: txt };
     }
   }
+
 
   async function likeUnlike(postId, doUnlike) {
     const endpoint = doUnlike ? '/rest/media/post/unlike' : '/rest/media/post/like';
@@ -743,12 +793,14 @@
       if (onFavPage) {
         // Favorites page: toggle like/unlike by id only - never call create.
         const idToUse =
-          (scanEl.dataset && UUID_ONE.test(scanEl.dataset.grokPostId || '')) ? scanEl.dataset.grokPostId :
-          (btn.dataset && UUID_ONE.test(btn.dataset.postId || '')) ? btn.dataset.postId :
           (UUID_ONE.test(candidateId || '')) ? candidateId :
+          (btn.dataset && UUID_ONE.test(btn.dataset.postId || '')) ? btn.dataset.postId :
+          (scanEl.dataset && UUID_ONE.test(scanEl.dataset.grokPostId || '')) ? scanEl.dataset.grokPostId :
           null;
 
         if (!idToUse) throw new Error('Could not resolve post id on favorites page');
+        scanEl.dataset.grokPostId = idToUse;
+        btn.dataset.postId = idToUse;
 
         const doUnlike = liked; // if currently liked, unlike; else like
         const res = await likeUnlike(idToUse, doUnlike);
