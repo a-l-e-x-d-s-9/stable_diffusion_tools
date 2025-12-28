@@ -185,7 +185,6 @@ def main() -> int:
         if not rels:
             continue
 
-        # Skip ones already matched by relpath logic
         uncovered = [r for r in rels if r not in to_delete_rel]
         if not uncovered:
             continue
@@ -199,8 +198,10 @@ def main() -> int:
             else:
                 ambiguous_skipped[bn] = uncovered
 
-    delete_abs = [local_rel_to_abs[r] for r in sorted(to_delete_rel)]
-    deleted_count, errors = delete_files(delete_abs, dry_run=args.dry_run)
+    delete_rel_sorted = sorted(to_delete_rel)
+    delete_abs_sorted = [local_rel_to_abs[r] for r in delete_rel_sorted]
+
+    deleted_count, errors = delete_files(delete_abs_sorted, dry_run=args.dry_run)
 
     # Local files that remain
     not_deleted_rel = sorted(local_rel_set.difference(to_delete_rel))
@@ -214,13 +215,26 @@ def main() -> int:
     if skipped_symlink_files:
         print(f"Skipped symlinked local .safetensors (never deleted): {skipped_symlink_files}")
     if args.dry_run:
-        print(f"Would delete: {deleted_count}")
+        print(f"Would delete: {len(delete_abs_sorted)}")
     else:
         print(f"Deleted: {deleted_count}")
     if errors:
         print(f"Delete errors: {len(errors)}")
     if ambiguous_skipped and not args.allow_ambiguous_basenames:
         print(f"Ambiguous basenames skipped: {len(ambiguous_skipped)}")
+
+    print("")
+    if args.dry_run:
+        print("Would delete local safetensors (full paths):")
+        print("-----------------------------------------")
+    else:
+        print("Deleted local safetensors (full paths):")
+        print("-------------------------------------")
+    if delete_abs_sorted:
+        for p in delete_abs_sorted:
+            print(p)
+    else:
+        print("(none)")
 
     print("")
     print("Not deleted local safetensors (full paths):")
