@@ -8,10 +8,10 @@ from typing import Dict, Set, Tuple, List, DefaultDict
 from collections import defaultdict
 
 
-# Your simple basename extractor (captures only "file.safetensors")
+# Your requested simple extractor: captures only basename "file.safetensors"
 BASENAME_RE = re.compile(r'[\/"]([^\/"]+\.safetensors)', re.IGNORECASE)
 
-# Optional: if a Hugging Face-like path exists, capture the repo-relative path (keeps nested folders)
+# Optional: capture a repo/local relative path when present (keeps nested folders)
 RESOLVE_PATH_RE = re.compile(
     r"/resolve/[^/\s\"]+/(?P<path>[^\"\s]+?\.safetensors)",
     re.IGNORECASE,
@@ -24,46 +24,42 @@ WGET_P_RE = re.compile(r'-P\s+"([^"]+)"')
 def normalize_relpath(p: str) -> str:
     p = p.replace("\\", "/").strip()
     p = p.lstrip("./")
-    # Do not allow absolute paths
-    p = p.lstrip("/")
+    p = p.lstrip("/")  # prevent absolute
     return p
 
 
-def extract_safetensors_targets(text: str) -> Tuple[Set[str], Set[str]]:
+def extract_targets_from_text(text: str) -> Tuple[Set[str], Set[str]]:
     """
     Returns:
-      - relpaths: possible repo/local relative paths like "FolderA/x.safetensors"
+      - relpaths: possible relative paths like "FolderA/x.safetensors"
       - basenames: filenames only like "x.safetensors"
-    We do not assume the text is clean or HF-valid.
+    No assumptions about Hugging Face correctness.
     """
     relpaths: Set[str] = set()
     basenames: Set[str] = set()
 
-    # 1) Capture any resolve-style repo path if present
+    # 1) If resolve-style path exists, capture it
     for m in RESOLVE_PATH_RE.finditer(text):
         p = normalize_relpath(m.group("path"))
         if p.lower().endswith(".safetensors"):
             relpaths.add(p)
 
-    # 2) Capture basenames using your regex
+    # 2) Basename extraction (your regex)
     for m in BASENAME_RE.finditer(text):
         bn = m.group(1).strip()
         if bn.lower().endswith(".safetensors"):
             basenames.add(bn)
 
-    # 3) Reconstruct relpaths from lines like:
-    #    #wget ... -P "Five_Stars_6.0" "....../Five_Stars_6.0.safetensors"
+    # 3) Reconstruct relpaths using wget -P "folder" + basename on same line
     for line in text.splitlines():
         pm = WGET_P_RE.search(line)
         if not pm:
             continue
-        folder = pm.group(1).strip()
+        folder = normalize_relpath(pm.group(1).strip())
         if not folder:
             continue
-        folder = normalize_relpath(folder)
-        # Find basenames on that same line (your regex)
-        line_bns = [m.group(1).strip() for m in BASENAME_RE.finditer(line)]
-        for bn in line_bns:
+        for m in BASENAME_RE.finditer(line):
+            bn = m.group(1).strip()
             if not bn.lower().endswith(".safetensors"):
                 continue
             if folder in (".", ""):
@@ -82,12 +78,15 @@ def is_symlink(path: str) -> bool:
         return False
 
 
-def scan_local_safetensors(root_dir: str) -> Tuple[Dict[str, str], Dict[str, List[str]], List[str]]:
+def scan_local_safetensors(root_dir: str) -> Tuple[Dict[str, str], Dict[str, List[str]], int]:
     """
     Returns:
       - relpath_posix -> abs_path
       - basename -> list of relpaths (for ambiguity detection)
-      - skipped_symlinks: list of symlinked .safetensors abs paths that were skipped
+      - skipped_symlink_files_count
+    Notes:
+      - os.walk(..., followlinks=False) means we do not traverse symlinked dirs.
+      - We also skip symlinked .safetensors files.
     """
     root = Path(root_dir).expanduser().resolve()
     if not root.exists():
@@ -97,10 +96,10 @@ def scan_local_safetensors(root_dir: str) -> Tuple[Dict[str, str], Dict[str, Lis
 
     rel_to_abs: Dict[str, str] = {}
     base_to_rels: DefaultDict[str, List[str]] = defaultdict(list)
-    skipped_symlinks: List[str] = []
+    skipped_symlink_files = 0
 
     for dirpath, dirnames, filenames in os.walk(str(root), topdown=True, followlinks=False):
-        # prune symlinked dirs explicitly
+        # prune symlinked dirs explicitly (extra safety/clarity)
         pruned = []
         for d in dirnames:
             full_d = os.path.join(dirpath, d)
@@ -116,7 +115,7 @@ def scan_local_safetensors(root_dir: str) -> Tuple[Dict[str, str], Dict[str, Lis
 
             # skip symlinked files (do not delete through links)
             if is_symlink(full_f):
-                skipped_symlinks.append(full_f)
+                skipped_symlink_files += 1
                 continue
 
             rel = os.path.relpath(full_f, str(root))
@@ -126,7 +125,7 @@ def scan_local_safetensors(root_dir: str) -> Tuple[Dict[str, str], Dict[str, Lis
                 rel_to_abs[rel_posix] = full_f
                 base_to_rels[Path(rel_posix).name].append(rel_posix)
 
-    return rel_to_abs, dict(base_to_rels), skipped_symlinks
+    return rel_to_abs, dict(base_to_rels), skipped_symlink_files
 
 
 def delete_files(abs_paths: List[str], dry_run: bool) -> Tuple[int, List[Tuple[str, str]]]:
@@ -136,7 +135,7 @@ def delete_files(abs_paths: List[str], dry_run: bool) -> Tuple[int, List[Tuple[s
         try:
             if not dry_run:
                 os.remove(p)
-            deleted += 1 if not dry_run else 0
+            deleted += 1
         except Exception as e:
             errors.append((p, str(e)))
     return deleted, errors
@@ -144,11 +143,11 @@ def delete_files(abs_paths: List[str], dry_run: bool) -> Tuple[int, List[Tuple[s
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Delete local .safetensors that are referenced in a messy text file (regex-based; no symlink traversal)."
+        description="Delete local .safetensors referenced in a messy text file (regex-based). Only reports local results."
     )
-    ap.add_argument("--root", required=True, help="Local root folder to scan (recursive, followlinks=False)")
+    ap.add_argument("--root", required=True, help="Local root folder to scan (recursive, no symlink traversal)")
     ap.add_argument("--text", required=True, help="Text file to parse (e.g. the commented wget script output)")
-    ap.add_argument("--dry-run", action="store_true", help="Do not delete, just report")
+    ap.add_argument("--dry-run", action="store_true", help="Do not delete, only report what would be deleted")
     ap.add_argument(
         "--allow-ambiguous-basenames",
         action="store_true",
@@ -164,72 +163,64 @@ def main() -> int:
         return 2
 
     text = text_path.read_text(encoding="utf-8", errors="replace")
-    target_relpaths, target_basenames = extract_safetensors_targets(text)
+    target_relpaths, target_basenames = extract_targets_from_text(text)
 
     if not target_relpaths and not target_basenames:
         print("ERROR: did not find any .safetensors references in the text file.", file=sys.stderr)
         return 3
 
-    local_rel_to_abs, local_base_to_rels, skipped_symlinks = scan_local_safetensors(str(root))
+    local_rel_to_abs, local_base_to_rels, skipped_symlink_files = scan_local_safetensors(str(root))
     local_rel_set = set(local_rel_to_abs.keys())
 
-    # 1) Exact relpath deletes (preferred, preserves nested folders)
-    relpath_matches = sorted(local_rel_set.intersection(target_relpaths))
-    to_delete_rel: Set[str] = set(relpath_matches)
+    # Decide what to delete
+    to_delete_rel: Set[str] = set()
 
-    # 2) Basename-based deletes (only if not already covered by relpath match)
-    ambiguous_basenames: Dict[str, List[str]] = {}
-    basename_used: Set[str] = set()
+    # 1) Prefer exact relpath match (preserves folder structure)
+    to_delete_rel.update(local_rel_set.intersection(target_relpaths))
 
-    for bn in sorted(target_basenames):
+    # 2) Basename match only when safe (or if forced)
+    ambiguous_skipped: Dict[str, List[str]] = {}
+    for bn in target_basenames:
         rels = local_base_to_rels.get(bn, [])
         if not rels:
             continue
-        # If exact relpath match already covers them, skip
+
+        # Skip ones already matched by relpath logic
         uncovered = [r for r in rels if r not in to_delete_rel]
         if not uncovered:
             continue
 
         if len(uncovered) == 1:
             to_delete_rel.add(uncovered[0])
-            basename_used.add(bn)
         else:
-            ambiguous_basenames[bn] = uncovered
             if args.allow_ambiguous_basenames:
                 for r in uncovered:
                     to_delete_rel.add(r)
-                basename_used.add(bn)
+            else:
+                ambiguous_skipped[bn] = uncovered
 
     delete_abs = [local_rel_to_abs[r] for r in sorted(to_delete_rel)]
     deleted_count, errors = delete_files(delete_abs, dry_run=args.dry_run)
 
-    # Not deleted local safetensors (print full paths)
+    # Local files that remain
     not_deleted_rel = sorted(local_rel_set.difference(to_delete_rel))
 
-    # Optional: targets referenced in text but not found locally
-    missing_local_rel = sorted(target_relpaths.difference(local_rel_set))
-
-    # Report
-    root_resolved = Path(args.root).expanduser().resolve()
+    # Report (local only)
     print("")
     print("Summary")
     print("-------")
-    print(f"Root: {root_resolved}")
-    print(f"Targets extracted: relpaths={len(target_relpaths)} basenames={len(target_basenames)}")
+    print(f"Root: {Path(args.root).expanduser().resolve()}")
     print(f"Local .safetensors found (non-symlink): {len(local_rel_to_abs)}")
-    if skipped_symlinks:
-        print(f"Skipped symlinked local .safetensors: {len(skipped_symlinks)}")
-    print(f"Would delete: {len(delete_abs)}")
+    if skipped_symlink_files:
+        print(f"Skipped symlinked local .safetensors (never deleted): {skipped_symlink_files}")
     if args.dry_run:
-        print("Deleted: 0 (dry-run)")
+        print(f"Would delete: {deleted_count}")
     else:
         print(f"Deleted: {deleted_count}")
     if errors:
         print(f"Delete errors: {len(errors)}")
-    if ambiguous_basenames and not args.allow_ambiguous_basenames:
-        print(f"Ambiguous basenames skipped: {len(ambiguous_basenames)}")
-    if missing_local_rel:
-        print(f"Referenced relpaths not found locally: {len(missing_local_rel)}")
+    if ambiguous_skipped and not args.allow_ambiguous_basenames:
+        print(f"Ambiguous basenames skipped: {len(ambiguous_skipped)}")
 
     print("")
     print("Not deleted local safetensors (full paths):")
@@ -240,11 +231,11 @@ def main() -> int:
     else:
         print("(none)")
 
-    if ambiguous_basenames and not args.allow_ambiguous_basenames:
+    if ambiguous_skipped and not args.allow_ambiguous_basenames:
         print("")
         print("Ambiguous basenames (not deleted). Use --allow-ambiguous-basenames to delete all matches:")
         print("--------------------------------------------------------------------------------------")
-        for bn, rels in sorted(ambiguous_basenames.items(), key=lambda x: x[0].lower()):
+        for bn, rels in sorted(ambiguous_skipped.items(), key=lambda x: x[0].lower()):
             print(f"{bn}:")
             for r in rels:
                 print(f"  {local_rel_to_abs[r]}")
@@ -255,20 +246,6 @@ def main() -> int:
         print("-----------------------------")
         for p, e in errors:
             print(f"{p} -> {e}")
-
-    if skipped_symlinks:
-        print("")
-        print("Skipped symlinked safetensors (not deleted):")
-        print("------------------------------------------")
-        for p in sorted(skipped_symlinks):
-            print(p)
-
-    if missing_local_rel:
-        print("")
-        print("Referenced relpaths not found locally (maybe already deleted/moved):")
-        print("-------------------------------------------------------------------")
-        for p in missing_local_rel:
-            print(p)
 
     return 0
 
