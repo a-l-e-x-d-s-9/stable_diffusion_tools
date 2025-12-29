@@ -75,6 +75,47 @@ def strip_components(path_str: str, n: int) -> str:
         return "/".join(parts) if n <= 0 else parts[-1] if parts else ""
     return "/".join(parts[n:])
 
+def sanitize_arcname(arc: str, sanitize_cfg: Optional[Dict[str, Any]]) -> str:
+    """
+    Option B: sanitize zip internal path (arcname) by applying regex rewrites
+    to each path component separately.
+
+    sanitize_cfg example:
+      {"component_rewrites": [{"pattern": "^\\.+", "replace": ""}]}
+    """
+    if not sanitize_cfg:
+        return arc
+
+    rewrites = sanitize_cfg.get("component_rewrites") or []
+    if not rewrites:
+        return arc
+
+    import re
+
+    parts = [p for p in arc.replace("\\", "/").split("/") if p not in ("", ".")]
+    out_parts: List[str] = []
+
+    for part in parts:
+        new = part
+        for r in rewrites:
+            pat = r.get("pattern")
+            rep = r.get("replace", "")
+            if not pat:
+                continue
+            new = re.sub(pat, rep, new)
+
+        # Avoid empty or special components after rewrite
+        if new in ("", ".", ".."):
+            new = "_"
+
+        out_parts.append(new)
+
+    if not out_parts:
+        return "_"
+
+    return "/".join(out_parts)
+
+
 # ------------- Config Normalization -------------
 
 class ConfigError(ValueError):
@@ -93,8 +134,10 @@ DEFAULT_ARCHIVE = {
     # add to DEFAULT_ARCHIVE
     "folders_glob": None,       # e.g. "**/sample"
     "preserve_repo_tree": False, # if True, zip lands under the folder's relative path in the repo
-    "exclude_globs": []
-
+    "exclude_globs": [],
+    # Option B: rewrite zip internal paths (arcname) per path component
+    # Example: {"component_rewrites": [{"pattern": "^\\.+", "replace": ""}]}
+    "sanitize_arcname": None,
 }
 
 def merge_archive(top: Dict[str, Any], src: Optional[Dict[str, Any]], dst: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -207,11 +250,52 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 raise ConfigError("exists must be one of skip|overwrite|fail")
             commit_message = d.get("commit_message", default_commit_message)
 
+            # Destination override for repo path prefix (falls back to source-level path_in_repository)
+            dest_path_in_repo = d.get("path_in_repository", path_in_repo)
+            if dest_path_in_repo is None:
+                dest_path_in_repo = ""
+
             effective_archive = merge_archive(archive_defaults, source_archive, d.get("archive"))
             # Validate zip_folders
             if effective_archive["mode"] == "zip_folders":
                 if not effective_archive.get("folders") and not effective_archive.get("folders_glob"):
                     raise ConfigError("archive.mode=zip_folders requires 'folders' or 'folders_glob'")
+
+            # Validate sanitize_arcname
+            sanitize = effective_archive.get("sanitize_arcname")
+            if sanitize is not None:
+                if not isinstance(sanitize, dict):
+                    raise ConfigError("archive.sanitize_arcname must be an object")
+
+                rew = sanitize.get("component_rewrites") or []
+                if not isinstance(rew, list):
+                    raise ConfigError("archive.sanitize_arcname.component_rewrites must be a list")
+
+                import re as _re
+
+                norm_rew = []
+                for i, rr in enumerate(rew, start=1):
+                    if not isinstance(rr, dict):
+                        raise ConfigError(f"archive.sanitize_arcname.component_rewrites[{i}] must be an object")
+
+                    pat = rr.get("pattern")
+                    rep = rr.get("replace", "")
+
+                    if not isinstance(pat, str) or not pat:
+                        raise ConfigError(f"archive.sanitize_arcname.component_rewrites[{i}].pattern must be a non-empty string")
+                    if not isinstance(rep, str):
+                        raise ConfigError(f"archive.sanitize_arcname.component_rewrites[{i}].replace must be a string")
+
+                    try:
+                        _re.compile(pat)
+                    except Exception as e:
+                        raise ConfigError(f"invalid regex in archive.sanitize_arcname.component_rewrites[{i}].pattern: {e}")
+
+                    norm_rew.append({"pattern": pat, "replace": rep})
+
+                sanitize2 = dict(sanitize)
+                sanitize2["component_rewrites"] = norm_rew
+                effective_archive["sanitize_arcname"] = sanitize2
 
             norm_dests.append({
                 "repository": repo_id,
@@ -221,8 +305,10 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "create_pr": create_pr,
                 "exists": exists_policy,
                 "commit_message": commit_message,
+                "path_in_repository": dest_path_in_repo,
                 "archive": effective_archive,
             })
+
 
         normalized_sources.append({
             "source_base": source_base,
@@ -349,7 +435,9 @@ def render_name_template(tpl: str, file: Optional[Path], source_base: Path, fold
     }
     return tpl.format(**d)
 
-def build_zip_per_file(files: List[Path], source_base: Path, tmpdir: Path, name_tpl: str, preserve_tree_inside: bool, strip_n: int, level: int) -> Dict[str, Path]:
+def build_zip_per_file(files: List[Path], source_base: Path, tmpdir: Path, name_tpl: str,
+                       preserve_tree_inside: bool, strip_n: int, level: int,
+                       sanitize_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Path]:
     out: Dict[str, Path] = {}
     for f in files:
         name = render_name_template(name_tpl, f, source_base, None)
@@ -366,11 +454,14 @@ def build_zip_per_file(files: List[Path], source_base: Path, tmpdir: Path, name_
             else:
                 arc = f.name
             arc = strip_components(arc, strip_n) if strip_n else arc
+            arc = sanitize_arcname(arc, sanitize_cfg)
             zf.write(f, arcname=arc)
         out[str(f)] = zpath
     return out
 
-def build_zip_source(files: List[Path], source_base: Path, tmpdir: Path, name_tpl: str, preserve_tree_inside: bool, strip_n: int, level: int) -> Path:
+def build_zip_source(files: List[Path], source_base: Path, tmpdir: Path, name_tpl: str,
+                     preserve_tree_inside: bool, strip_n: int, level: int,
+                     sanitize_cfg: Optional[Dict[str, Any]] = None) -> Path:
     name = render_name_template(name_tpl, None, source_base, None)
     zpath = tmpdir / name
     zpath.parent.mkdir(parents=True, exist_ok=True)
@@ -385,10 +476,12 @@ def build_zip_source(files: List[Path], source_base: Path, tmpdir: Path, name_tp
             else:
                 arc = f.name
             arc = strip_components(arc, strip_n) if strip_n else arc
+            arc = sanitize_arcname(arc, sanitize_cfg)
             zf.write(f, arcname=arc)
     return zpath
 
-def build_zip_folders(folders, source_base, tmpdir, name_tpl, preserve_tree_inside, strip_n, level, exclude_globs=None):
+def build_zip_folders(folders, source_base, tmpdir, name_tpl, preserve_tree_inside, strip_n, level,
+                      exclude_globs=None, sanitize_cfg: Optional[Dict[str, Any]] = None):
     import fnmatch
     exclude_globs = exclude_globs or []
     out: Dict[str, Path] = {}
@@ -421,6 +514,7 @@ def build_zip_folders(folders, source_base, tmpdir, name_tpl, preserve_tree_insi
                         rel2 = fp.relative_to(folder_path)
                         arc = str(PurePosixPath(str(rel2).replace("\\\\", "/").replace("\\", "/")))
                     arc = strip_components(arc, strip_n) if strip_n else arc
+                    arc = sanitize_arcname(arc, sanitize_cfg)
                     zf.write(fp, arcname=arc)
         out[str(folder_path)] = zpath
     return out
@@ -487,6 +581,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                     preserve_tree_inside=base_archive.get("preserve_tree_inside", True),
                     strip_n=int(base_archive.get("strip_components", 0)),
                     level=int(base_archive.get("level", 6)),
+                    sanitize_cfg=base_archive.get("sanitize_arcname"),
                 )
 
             if any(d["archive"]["mode"] == "zip_source" for d in src["destinations"]):
@@ -499,6 +594,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                     preserve_tree_inside=base_archive.get("preserve_tree_inside", True),
                     strip_n=int(base_archive.get("strip_components", 0)),
                     level=int(base_archive.get("level", 6)),
+                    sanitize_cfg=base_archive.get("sanitize_arcname"),
                 )
 
             if any(d["archive"]["mode"] == "zip_folders" for d in src["destinations"]):
@@ -524,6 +620,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                     strip_n=int(base_archive.get("strip_components", 0)),
                     level=int(base_archive.get("level", 6)),
                     exclude_globs=exclude_globs,
+                    sanitize_cfg=base_archive.get("sanitize_arcname"),
                 )
 
         for dest in src["destinations"]:
@@ -539,6 +636,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
             exists_policy = dest["exists"]
             commit_message_tpl = dest["commit_message"]
             arch = dest["archive"]
+            dest_path_prefix = dest.get("path_in_repository", path_prefix)
 
             key = (repo_id, repo_type, token)
             plan_idx = dest_cache_key_map.get(key)
@@ -572,7 +670,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
             artifacts: List[Tuple[str, str, int, Optional[str]]] = []  # (local_path, repo_path, size, sha)
             if arch["mode"] == "none":
                 for f in files:
-                    repo_path = build_repo_path(path_prefix, preserve_tree, base, f)
+                    repo_path = build_repo_path(dest_path_prefix, preserve_tree, base, f)
                     size = f.stat().st_size if not dry_run else 0
                     artifacts.append((str(f), repo_path, size, None))
             elif arch["mode"] == "zip_per_file":
@@ -587,7 +685,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                         repo_name = render_name_template(dest["archive"]["name_template"] or "{stem}.zip", f, Path(base), None)
                         size = f.stat().st_size if f.exists() else 0
                         zpath = Path("/tmp") / repo_name  # placeholder path, not used
-                    repo_path = to_posix(path_prefix, repo_name)
+                    repo_path = to_posix(dest_path_prefix, repo_name)
                     artifacts.append((str(zpath), repo_path, size, None))
                 source_archive_plan_counts[s_idx] += 1
             elif arch["mode"] == "zip_source":
@@ -598,7 +696,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                     zpath = Path("/tmp") / render_name_template(dest["archive"]["name_template"] or "{source_basename}_{timestamp}.zip", None, Path(base), None)
                     size = sum(fp.stat().st_size for fp in files if fp.exists())
                 repo_name = Path(zpath).name
-                repo_path = to_posix(path_prefix, repo_name)
+                repo_path = to_posix(dest_path_prefix, repo_name)
                 artifacts.append((str(zpath), repo_path, size, None))
                 source_archive_plan_counts[s_idx] += 1
             elif arch["mode"] == "zip_folders":
@@ -614,12 +712,12 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                             # put the zip under the folder's relative path
                             try:
                                 rel_folder = Path(fpath).relative_to(base)  # relative to source_base
-                                repo_path = to_posix(path_prefix, str(PurePosixPath(str(rel_folder))), zip_name)
+                                repo_path = to_posix(dest_path_prefix, str(PurePosixPath(str(rel_folder))), zip_name)
                             except Exception:
                                 # fallback to flat
-                                repo_path = to_posix(path_prefix, zip_name)
+                                repo_path = to_posix(dest_path_prefix, zip_name)
                         else:
-                            repo_path = to_posix(path_prefix, zip_name)
+                            repo_path = to_posix(dest_path_prefix, zip_name)
                         artifacts.append((str(zpath), repo_path, zpath.stat().st_size, None))
                 else:
                     # dry-run estimation: expand folders from folders and folders_glob
@@ -637,11 +735,11 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                         if preserve_repo_tree:
                             try:
                                 rel_folder = folder_p.relative_to(base)
-                                repo_path = to_posix(path_prefix, str(PurePosixPath(str(rel_folder))), zip_name)
+                                repo_path = to_posix(dest_path_prefix, str(PurePosixPath(str(rel_folder))), zip_name)
                             except Exception:
-                                repo_path = to_posix(path_prefix, zip_name)
+                                repo_path = to_posix(dest_path_prefix, zip_name)
                         else:
-                            repo_path = to_posix(path_prefix, zip_name)
+                            repo_path = to_posix(dest_path_prefix, zip_name)
                         artifacts.append((str(Path("/tmp") / zip_name), repo_path, 0, None))
 
                 source_archive_plan_counts[s_idx] += 1

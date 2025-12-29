@@ -1,29 +1,41 @@
 {
+  "_notes": [
+    "Example configuration for huggingface_upload.py (multi-destination, per-destination path_in_repository, archiving, sanitize_arcname).",
+    "This is JSON: no comments. Edit fields as needed.",
+    "CLI: python3 huggingface_upload.py --configurations /path/to/this.json --dry_run --verbose"
+  ],
   "repository": "owner/main-repo",
+  "repo_type": "model",
   "token_file": "/home/alex/.hf_token_main",
+  "token_env": null,
   "threads": 4,
+  "max_inflight_per_repo": 2,
   "remove": false,
   "dry_run": true,
   "default_exists": "skip",
   "default_commit_message": "batch upload {timestamp}",
   "use_checksum": false,
   "progress_colour": "yellow",
-  "max_inflight_per_repo": 2,
-
   "archive_defaults": {
     "mode": "none",
     "name_template": "{source_basename}_{timestamp}.zip",
     "preserve_tree_inside": true,
     "strip_components": 0,
+    "preserve_repo_tree": false,
+    "folders_glob": null,
+    "exclude_globs": [],
     "remove_archives_after_upload": false,
     "remove_originals_after_archive": false,
-    "level": 6
+    "level": 6,
+    "sanitize_arcname": null
   },
-
   "source_base": "/data",
-
   "sources": [
     {
+      "_notes": [
+        "Raw upload, preserve folder tree, multi-destination with different tokens.",
+        "Destination 2 overrides token_file and commit_message."
+      ],
       "path_in_repository": "SetA",
       "include": [
         "setA/**/*.safetensors",
@@ -42,21 +54,22 @@
         {
           "repository": "partnerOrg/mirror-repo",
           "token_file": "/home/alex/.hf_token_partner",
+          "create_pr": false,
           "exists": "skip",
-          "commit_message": "mirror: {timestamp}",
-          "archive": {
-            "mode": "zip_per_file",
-            "name_template": "{stem}.zip"
-          }
+          "commit_message": "mirror: {timestamp}"
         }
       ]
     },
-
     {
+      "_notes": [
+        "Raw upload, flat layout, includes an absolute path + a glob under a per-source base.",
+        "This source overrides source_base only for itself."
+      ],
+      "source_base": "/data/setB",
       "path_in_repository": "FlatB",
       "include": [
         "/absolute/path/to/some/file.safetensors",
-        "setB/**/*.safetensors"
+        "**/*.safetensors"
       ],
       "exclude": [],
       "preserve_tree": false,
@@ -64,37 +77,100 @@
         "repository": "owner/main-repo"
       }
     },
-
     {
+      "_notes": [
+        "Single zip for the whole selection (zip_source).",
+        "sanitize_arcname removes leading dots from each path component inside the zip (example: '.p01' -> 'p01')."
+      ],
       "path_in_repository": "Bundles",
       "include": [
-        "setA/**/*.safetensors"
+        "setA/**/p[0-9][0-9]/**",
+        "setA/**/videos_individual_[0-9][0-9]/**",
+        "setA/**/.p[0-9][0-9]/**",
+        "setA/**/.videos_individual_[0-9][0-9]/**",
+        "setA/**/..p[0-9][0-9]/**",
+        "setA/**/..videos_individual_[0-9][0-9]/**"
       ],
       "archive": {
         "mode": "zip_source",
-        "name_template": "setA_{timestamp}.zip",
-        "preserve_tree_inside": true
+        "name_template": "Examples_{timestamp}.zip",
+        "preserve_tree_inside": true,
+        "strip_components": 0,
+        "exclude_globs": [
+          "**/*.tmp",
+          "**/*.cache"
+        ],
+        "sanitize_arcname": {
+          "component_rewrites": [
+            {
+              "pattern": "^\\.+",
+              "replace": ""
+            }
+          ]
+        }
       },
       "destinations": [
-        { "repository": "owner/main-repo" }
+        {
+          "repository": "owner/main-repo",
+          "path_in_repository": "model_001_Z-Image_Turbo"
+        },
+        {
+          "repository": "owner/secondary-repo",
+          "token_env": "HF_TOKEN_SECONDARY",
+          "path_in_repository": ""
+        }
       ]
     },
-
     {
+      "_notes": [
+        "Zip per folder discovered via folders_glob (zip_folders).",
+        "folders_glob supports string or list of patterns.",
+        "preserve_repo_tree uploads each zip under the same relative folder path in the repo."
+      ],
       "path_in_repository": "SetA",
       "include": [
         "setA/**/*"
       ],
       "archive": {
         "mode": "zip_folders",
-        "folders_glob": "setA/**/sample",
+        "folders_glob": [
+          "setA/**/sample",
+          "setA/**/samples"
+        ],
         "name_template": "{folder_name}.zip",
         "preserve_repo_tree": true,
         "preserve_tree_inside": true,
+        "strip_components": 0,
+        "level": 6
+      },
+      "destinations": [
+        {
+          "repository": "owner/main-repo",
+          "exists": "overwrite"
+        }
+      ]
+    },
+    {
+      "_notes": [
+        "Zip each matched file separately (zip_per_file).",
+        "Useful for bundling big artifacts while keeping selection logic in include/exclude."
+      ],
+      "path_in_repository": "PerFileZips",
+      "include": [
+        "setA/**/*.safetensors"
+      ],
+      "archive": {
+        "mode": "zip_per_file",
+        "name_template": "{stem}.zip",
+        "preserve_tree_inside": false,
         "strip_components": 0
       },
       "destinations": [
-        { "repository": "owner/main-repo" }
+        {
+          "repository": "owner/main-repo",
+          "create_pr": true,
+          "commit_message": "per-file zips: {timestamp}"
+        }
       ]
     }
   ]
