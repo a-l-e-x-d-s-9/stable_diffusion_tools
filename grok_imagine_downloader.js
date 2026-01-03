@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.05
+// @version      2.6.06
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -403,8 +403,15 @@ async function headContentLength(u) {
 
         if (forcePage) {
             // Mark everything currently on the page so Force will ignore it.
-            const q = 'img[alt="Generated image"], img[src^="data:image/"], img[src*="imagine-public.x.ai/imagine-public/images/"], img[src*="imagine-public.x.ai/imagine-public/share-images/"], img[data-grok-cdn-src]';
-            document.querySelectorAll(imgSel).forEach(el => { el.dataset.grokPreForce = "1"; });
+            const q = [
+              'img[alt="Generated image"]',
+              'img[src^="data:image/"]',
+              'img[src*="imagine-public.x.ai/imagine-public/images/"]',
+              'img[src*="imagine-public.x.ai/imagine-public/share-images/"]',
+              'img[data-grok-cdn-src]',
+              'img[src*="assets.grok.com/users/"][src*="/generated/"][src*="/image.jpg"]'
+            ].join(", ");
+            document.querySelectorAll(q).forEach(el => { el.dataset.grokPreForce = "1"; });
             document.querySelectorAll("video").forEach(el => { el.dataset.grokPreForce = "1"; });
             window.__GROK_FORCE_SINCE__ = Date.now();
         } else {
@@ -440,12 +447,12 @@ async function headContentLength(u) {
       const obs = new MutationObserver(async (muts) => {
         if (myEpoch !== routeEpoch || !imgEl.isConnected) return;
         for (const m of muts) {
-          if (m.type === "attributes" && m.attributeName === "src") {
+          if (m.type === "attributes" && (m.attributeName === "src" || m.attributeName === "data-grok-cdn-src")) {
             try { await tryDownloadImageIfFinal(imgEl); } catch {}
           }
         }
       });
-      obs.observe(imgEl, { attributes: true, attributeFilter: ["src"] });
+      obs.observe(imgEl, { attributes: true, attributeFilter: ["src", "data-grok-cdn-src"] });
 
       // Initial attempt
       try { await tryDownloadImageIfFinal(imgEl); } catch {}
@@ -471,7 +478,14 @@ async function headContentLength(u) {
     function scanImages() {
       if (!onAllowedRoute()) return;
 
-      const q = 'img[alt="Generated image"], img[src^="data:image/"], img[src*="imagine-public.x.ai/imagine-public/images/"]';
+      const q = [
+    'img[alt="Generated image"]',
+    'img[src^="data:image/"]',
+    'img[src*="imagine-public.x.ai/imagine-public/images/"]',
+    'img[src*="imagine-public.x.ai/imagine-public/share-images/"]',
+    'img[data-grok-cdn-src]',
+    'img[src*="assets.grok.com/users/"][src*="/generated/"][src*="/image.jpg"]'
+  ].join(", ");
       document.querySelectorAll(q).forEach(img => {
         // Skip tiny thumbnail buttons (edited variants strip on the left)
         try {
