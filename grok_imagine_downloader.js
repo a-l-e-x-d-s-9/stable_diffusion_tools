@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.06
+// @version      2.6.08
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -487,15 +487,23 @@ async function headContentLength(u) {
     'img[src*="assets.grok.com/users/"][src*="/generated/"][src*="/image.jpg"]'
   ].join(", ");
       document.querySelectorAll(q).forEach(img => {
-        // Skip tiny thumbnail buttons (edited variants strip on the left)
+        // Tiny <button> thumbnails are usually UI elements.
+        // Exception: edited-variant thumbnails on the left strip - those point to full images and should be downloaded.
+        let isEditedThumb = false;
         try {
           const r = img.getBoundingClientRect();
-          if (img.closest("button") && r.width <= 90 && r.height <= 90) return;
+          if (img.closest("button") && r.width <= 90 && r.height <= 90) {
+            const cdn = img.getAttribute("data-grok-cdn-src") || "";
+            const raw = img.getAttribute("src") || "";
+            const cand = cdn || raw;
+            isEditedThumb = /\/generated\//i.test(cand) && /\/image\.(jpg|jpeg|png)(\?|$)/i.test(cand);
+            if (!isEditedThumb) return;
+          }
         } catch (_) {}
 
         if (img.dataset.grokWatching === "1") return;
-        // On Favorites, process even if off-screen; elsewhere still require visibility
-        const requireVisible = !(onFavoritesRoute() || forcePage);
+        // On Favorites and edited-variant thumbs, process even if off-screen; elsewhere still require visibility
+        const requireVisible = !(onFavoritesRoute() || forcePage || isEditedThumb);
         if (requireVisible && !isEffectivelyVisible(img)) return;
         // In Force mode, ignore anything that existed before Force was toggled on
         if (forcePage && img.dataset.grokPreForce === "1") return;
@@ -587,7 +595,19 @@ async function headContentLength(u) {
       const myEpoch = Number(imgEl.dataset.grokEpoch || routeEpoch);
       if (myEpoch !== routeEpoch || !imgEl.isConnected) return;
       if (!autoOn) return;
-      if (!(onFavoritesRoute() || forcePage) && !isEffectivelyVisible(imgEl)) return;
+      const isEditedThumb = (() => {
+        try {
+          const r = imgEl.getBoundingClientRect();
+          if (!(imgEl.closest("button") && r.width <= 90 && r.height <= 90)) return false;
+          const cdn = imgEl.getAttribute("data-grok-cdn-src") || "";
+          const raw = imgEl.getAttribute("src") || "";
+          const cand = cdn || raw;
+          return /\/generated\//i.test(cand) && /\/image\.(jpg|jpeg|png)(\?|$)/i.test(cand);
+        } catch (_) {
+          return false;
+        }
+      })();
+      if (!(onFavoritesRoute() || forcePage || isEditedThumb) && !isEffectivelyVisible(imgEl)) return;
       if (!forcePage && imgEl.dataset.grokDone === "1") return;
       if (forcePage && imgEl.dataset.grokDoneForce === "1") return;
       if (isVideoPosterImage(imgEl)) return;
@@ -602,9 +622,25 @@ async function headContentLength(u) {
 
       const srcRaw = imgEl.getAttribute("src") || "";
       const cdnSrc = imgEl.getAttribute("data-grok-cdn-src") || "";
-      const src = (cdnSrc && /^https?:\/\//i.test(cdnSrc)) ? cdnSrc : srcRaw;
+      const src =
+        cdnSrc &&
+        /^https?:\/\//i.test(cdnSrc) &&
+        /assets\.grok\.com\/users\//i.test(cdnSrc)
+          ? cdnSrc
+          : srcRaw;
+      if (!src) return;
 
       const normSrc = normalizeUrl(src);
+
+      // Avoid downloading Grok's built-in example media on /imagine.
+      // Only allow user-like sources unless we are in Favorites or Force mode.
+      if (!forcePage && !onFavorites) {
+        const looksLikeUser =
+          src.startsWith("data:image/") ||
+          /assets\.grok\.com\/users\//i.test(src) ||
+          /imagine-public\.x\.ai\/imagine-public\/images\//.test(src);
+        if (!looksLikeUser) return;
+      }
       const finalByHost = /imagine-public\.x\.ai\/imagine-public\/images\//.test(src);
 
       // NEW: page-scope in-flight URL guard
@@ -1345,16 +1381,16 @@ function toLatin1(str) {
     function simpleDownload(url, filename, myEpoch) {
       return dlQ(() => new Promise((resolve, reject) => {
         // If navigation happened, silently ignore late work
-        if (typeof myEpoch === "number" && myEpoch !== routeEpoch) return resolve();
+        if (typeof myEpoch === "number" && myEpoch !== routeEpoch) return reject("epoch changed");
 
         try {
           GM_download({
             url,
             name: filename,
             saveAs: false,
-            onload: () => resolve(),
-            onerror: (e) => reject((e && e.error) ? e.error : "download error"),
-            ontimeout: () => reject("timeout")
+            onload: () => (typeof myEpoch === "number" && myEpoch !== routeEpoch ? reject("epoch changed") : resolve()),
+            onerror: (e) => (typeof myEpoch === "number" && myEpoch !== routeEpoch ? reject("epoch changed") : reject((e && e.error) ? e.error : "download error")),
+            ontimeout: () => (typeof myEpoch === "number" && myEpoch !== routeEpoch ? reject("epoch changed") : reject("timeout"))
           });
         } catch (e) {
           reject(e);
