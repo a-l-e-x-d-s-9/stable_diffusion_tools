@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.04
+// @version      2.6.05
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -403,7 +403,7 @@ async function headContentLength(u) {
 
         if (forcePage) {
             // Mark everything currently on the page so Force will ignore it.
-            const imgSel = 'img[alt="Generated image"], img[src^="data:image/"], img[src*="imagine-public.x.ai/imagine-public/images/"]';
+            const q = 'img[alt="Generated image"], img[src^="data:image/"], img[src*="imagine-public.x.ai/imagine-public/images/"], img[src*="imagine-public.x.ai/imagine-public/share-images/"], img[data-grok-cdn-src]';
             document.querySelectorAll(imgSel).forEach(el => { el.dataset.grokPreForce = "1"; });
             document.querySelectorAll("video").forEach(el => { el.dataset.grokPreForce = "1"; });
             window.__GROK_FORCE_SINCE__ = Date.now();
@@ -473,6 +473,12 @@ async function headContentLength(u) {
 
       const q = 'img[alt="Generated image"], img[src^="data:image/"], img[src*="imagine-public.x.ai/imagine-public/images/"]';
       document.querySelectorAll(q).forEach(img => {
+        // Skip tiny thumbnail buttons (edited variants strip on the left)
+        try {
+          const r = img.getBoundingClientRect();
+          if (img.closest("button") && r.width <= 90 && r.height <= 90) return;
+        } catch (_) {}
+
         if (img.dataset.grokWatching === "1") return;
         // On Favorites, process even if off-screen; elsewhere still require visibility
         const requireVisible = !(onFavoritesRoute() || forcePage);
@@ -580,7 +586,10 @@ async function headContentLength(u) {
                        || isFavoritedCard(card)
                        || (onFavoritesRoute() && !!card?.querySelector('button[aria-label="Make video"]'));
 
-      const src = imgEl.getAttribute("src") || "";
+      const srcRaw = imgEl.getAttribute("src") || "";
+      const cdnSrc = imgEl.getAttribute("data-grok-cdn-src") || "";
+      const src = (cdnSrc && /^https?:\/\//i.test(cdnSrc)) ? cdnSrc : srcRaw;
+
       const normSrc = normalizeUrl(src);
       const finalByHost = /imagine-public\.x\.ai\/imagine-public\/images\//.test(src);
 
@@ -698,7 +707,7 @@ async function headContentLength(u) {
 
             try {
               // Verified download: resolves only on GM_download onload
-              await simpleDownload(objUrl, filename, myEpoch);
+              await simpleDownload(objUrl, fname, myEpoch);
             } catch (e) {
               // Fallback: some TM builds dislike blob: URLs
               const dataUrl = bytesToDataURL("image/jpeg", jpegU8);
@@ -984,11 +993,7 @@ async function headContentLength(u) {
 
       const src = imgEl.src || "";
 
-      // 1) hard skip known poster host/patterns (these are video thumbnails, not finals)
-      if (/imagine-public\.x\.ai\/imagine-public\/share-images\//.test(src)) return true;
-      if (/\/content(\?|#|$)/.test(src)) return true;
-
-      // 2) if a <video> exists in the same card and its poster equals this <img>, skip
+      // Only treat as a poster if there is a <video> in the same card
       const vid = card.querySelector && card.querySelector('video');
       if (!vid) return false;
 
