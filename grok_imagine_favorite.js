@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Quick Favorite (Heart) Button
 // @namespace    grok_imagine_favorite
-// @version      0.41.3
+// @version      0.41.4
 // @description  Adds a heart button on media tiles. Better per-tile UUID detection + debug dump of all candidate UUIDs/URLs.
 // @match        https://grok.com/imagine*
 // @match        https://www.grok.com/imagine*
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.41.0';
+  const VERSION = '0.41.4';
 
   // Main debug toggle
   const DEBUG = true;
@@ -786,7 +786,16 @@
     btn.dataset.liked = '0';
     btn.setState = (liked) => {
       btn.dataset.liked = liked ? '1' : '0';
-      btn.style.background = liked ? 'rgba(34, 197, 94, 0.85)' : 'rgba(0,0,0,0.45)';
+      const offBg = (btn.dataset.uiMode === 'toolbar')
+        ? 'rgba(85,85,85,0.75)'
+        : 'rgba(0,0,0,0.45)';
+      btn.style.background = liked ? 'rgba(34, 197, 94, 0.85)' : offBg;
+
+      // Toolbar buttons on edit page are borderless
+      btn.style.border = (btn.dataset.uiMode === 'toolbar')
+        ? '0'
+        : '1px solid rgba(255,255,255,0.25)';
+
       const svg = btn.querySelector('svg');
       if (svg) svg.setAttribute('fill', liked ? 'currentColor' : 'none');
     };
@@ -852,6 +861,96 @@
       btn.style.left = leftPx + 'px';
       btn.style.right = 'auto';
     } catch {}
+  }
+
+  function findEditTopBarForGrid(gridEl) {
+    if (!gridEl) return null;
+
+    // The edit/post viewer is inside a wrapper with a top absolute bar that contains "More options".
+    const wrapper = gridEl.closest('.group.relative') || gridEl.parentElement;
+    if (!wrapper) return null;
+
+    const moreBtn =
+      wrapper.querySelector('button[aria-label="More options"]') ||
+      wrapper.querySelector('button[aria-haspopup="menu"]');
+
+    if (!moreBtn) return null;
+
+    // Walk up a few parents to find the absolute-positioned top bar container.
+    let p = moreBtn.parentElement;
+    const wRect = wrapper.getBoundingClientRect();
+
+    for (let i = 0; i < 8 && p; i++) {
+      if (p.tagName === 'DIV') {
+        const cs = getComputedStyle(p);
+        if (cs && cs.position === 'absolute') {
+          const r = p.getBoundingClientRect();
+          // Must be near the top edge of the wrapper
+          if (Math.abs(r.top - wRect.top) < 60) {
+            return { wrapper, bar: p };
+          }
+        }
+      }
+      p = p.parentElement;
+    }
+
+    return null;
+  }
+
+  function applyToolbarModeStyle(btn, barEl) {
+    if (!btn) return;
+
+    btn.dataset.uiMode = 'toolbar';
+
+    // Stop being an absolute overlay. Become a normal flex child.
+    btn.style.position = 'relative';
+    btn.style.top = 'auto';
+    btn.style.right = 'auto';
+    btn.style.left = 'auto';
+    btn.style.margin = '0';
+    btn.style.flex = '0 0 auto';
+
+    // Match size/radius from one of the native buttons in the bar (h-10 w-10).
+    try {
+      const ref =
+        (barEl && (barEl.querySelector('button[data-slot="button"]') || barEl.querySelector('button'))) || null;
+
+      if (ref) {
+        const rr = ref.getBoundingClientRect();
+        const w = Math.round(rr.width) || 40;
+        const h = Math.round(rr.height) || 40;
+        btn.style.width = w + 'px';
+        btn.style.height = h + 'px';
+
+        const rs = getComputedStyle(ref);
+        if (rs && rs.borderRadius) btn.style.borderRadius = rs.borderRadius;
+
+        // Toolbar buttons are borderless on this page
+        btn.style.border = '0';
+
+        const svg = btn.querySelector('svg');
+        if (svg) {
+          const icon = Math.max(16, Math.min(24, Math.round(w * 0.56)));
+          svg.setAttribute('width', String(icon));
+          svg.setAttribute('height', String(icon));
+        }
+      } else {
+        // Fallback if we fail to find a reference
+        btn.style.width = '40px';
+        btn.style.height = '40px';
+        btn.style.borderRadius = '999px';
+        btn.style.border = '0';
+
+        const svg = btn.querySelector('svg');
+        if (svg) {
+          svg.setAttribute('width', '20');
+          svg.setAttribute('height', '20');
+        }
+      }
+    } catch {}
+
+    // Keep our blur look consistent with the page
+    btn.style.backdropFilter = 'blur(6px)';
   }
 
 
@@ -1001,32 +1100,72 @@ function initButtonState(cardEl, btn) {
   function inject(cardEl) {
     if (!isMediaCard(cardEl)) return;
 
-    const target =
+    // Default target: overlay inside the tile/card
+    let target =
       cardEl.querySelector('[class*="group/media-post-masonry-card"]') ||
       cardEl.querySelector('.relative.group\\/media-post-masonry-card') ||
       cardEl.querySelector('.relative') ||
       cardEl;
 
-    const cs = getComputedStyle(target);
-    if (cs.position === 'static') target.style.position = 'relative';
+    // Special case: edit/post viewer (cardEl is usually div.grid). Native buttons are in a sibling top bar.
+    let toolbar = null;
+    let wrapper = null;
 
-    // Reuse an existing button if present (important for post-view switching)
-    let btn = target.querySelector('.grok-fav-btn');
+    if (cardEl && cardEl.classList && cardEl.classList.contains('grid')) {
+      const found = findEditTopBarForGrid(cardEl);
+      if (found && found.bar) {
+        toolbar = found.bar;
+        wrapper = found.wrapper;
+      }
+    }
+
+    // Ensure our overlay target is position:relative when we use overlay mode
+    if (!toolbar) {
+      const cs = getComputedStyle(target);
+      if (cs.position === 'static') target.style.position = 'relative';
+    }
+
+    // Where to look for an existing heart:
+    // - toolbar mode: search inside wrapper (not inside grid) so we reuse and move it
+    // - overlay mode: search inside target
+    const searchRoot = toolbar ? wrapper : target;
+
+    let btn = searchRoot ? searchRoot.querySelector('.grok-fav-btn') : null;
+
     if (!btn) {
       btn = makeButton();
-      btn.addEventListener('click', (e) => onHeartClick(e, target, btn));
+      btn.addEventListener('click', (e) => onHeartClick(e, toolbar ? (wrapper || target) : target, btn));
       btn.__grokFavBound = 1;
-      target.appendChild(btn);
     } else if (!btn.__grokFavBound) {
-      btn.addEventListener('click', (e) => onHeartClick(e, target, btn));
+      btn.addEventListener('click', (e) => onHeartClick(e, toolbar ? (wrapper || target) : target, btn));
       btn.__grokFavBound = 1;
     }
 
-    initButtonState(target, btn);
+    // Place button
+    if (toolbar) {
+      // Move into toolbar as the leftmost item so it never overlaps "More options"
+      if (btn.parentElement !== toolbar) {
+        toolbar.insertBefore(btn, toolbar.firstChild);
+      }
 
-    // Align next to the native top-right buttons
-    alignFavButtonToTopRightControls(target, btn);
-    requestAnimationFrame(() => alignFavButtonToTopRightControls(target, btn));
+      applyToolbarModeStyle(btn, toolbar);
+
+      // State should be computed from the real media in the viewer (grid)
+      initButtonState(cardEl, btn);
+    } else {
+      // Overlay mode
+      btn.dataset.uiMode = 'overlay';
+
+      if (btn.parentElement !== target) {
+        target.appendChild(btn);
+      }
+
+      initButtonState(target, btn);
+
+      // Align next to native buttons when they are inside the same target (masonry tiles etc)
+      alignFavButtonToTopRightControls(target, btn);
+      requestAnimationFrame(() => alignFavButtonToTopRightControls(target, btn));
+    }
   }
 
 
