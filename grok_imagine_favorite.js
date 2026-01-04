@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Quick Favorite (Heart) Button
 // @namespace    grok_imagine_favorite
-// @version      0.41.0
+// @version      0.41.1
 // @description  Adds a heart button on media tiles. Better per-tile UUID detection + debug dump of all candidate UUIDs/URLs.
 // @match        https://grok.com/imagine*
 // @match        https://www.grok.com/imagine*
@@ -172,6 +172,12 @@
     const m = s.match(UUID_RE);
     return m ? Array.from(new Set(m.map(x => x.toLowerCase()))) : [];
   }
+
+    function firstUuidInUrl(u) {
+      if (!u) return null;
+      const m = String(u).match(UUID_ONE);
+      return m ? String(m[0]).toLowerCase() : null;
+    }
 
   function isBadMediaUrl(u) {
     if (!u) return true;
@@ -469,55 +475,86 @@
   // -----------------------------
   // Media resolving
   // -----------------------------
-  function pickBestMediaUrl(cardEl) {
-    if (!cardEl) return null;
 
-    const cached = cardEl.dataset && cardEl.dataset.grokMediaUrl ? cardEl.dataset.grokMediaUrl : null;
-    if (cached && isAllowedMediaUrl(unwrapNextImageUrl(cached))) return unwrapNextImageUrl(cached);
+  function pickBestMediaUrl(tileEl) {
+    if (!tileEl) return null;
 
     const candidates = [];
+    const seen = new Set();
 
-    for (const img of Array.from(cardEl.querySelectorAll('img'))) {
-      if (img.dataset && img.dataset.grokCdnSrc) candidates.push(img.dataset.grokCdnSrc);
+    const push = (u) => {
+      if (!u) return;
+      const real = unwrapNextImageUrl(u);
+      if (!real || isBadMediaUrl(real)) return;
+      if (seen.has(real)) return;
+      seen.add(real);
+      candidates.push(real);
+    };
 
-      const src = img.currentSrc || img.src || img.getAttribute('src');
-      if (src) candidates.push(src);
+    const imgs = Array.from(tileEl.querySelectorAll('img'));
+    for (const img of imgs) {
+      const src = img.getAttribute('src') || '';
+      const cdn = img.dataset.grokCdnSrc || img.getAttribute('data-grok-cdn-src') || '';
 
-      const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset') || '';
-      candidates.push(...parseSrcset(srcset));
+      const srcIsGen = src.includes('/generated/') && UUID_ONE.test(src);
+      const cdnIsContent = /\/content(\?|$)/i.test(cdn);
+      const cdnIsGen = cdn.includes('/generated/') && UUID_ONE.test(cdn);
+
+      // IMPORTANT: On the edit page, Grok often sets data-grok-cdn-src to the SOURCE image (..../content)
+      // while src points to the NEW edited result (..../generated/<id>/image.jpg). Prefer the result.
+    if (srcIsGen && cdnIsContent && !cdnIsGen) {
+      push(src);
+      push(cdn);
+    } else {
+      const realSrc = unwrapNextImageUrl(src);
+      const realCdn = unwrapNextImageUrl(cdn);
+
+      const srcOk = isAllowedMediaUrl(realSrc);
+      const cdnOk = isAllowedMediaUrl(realCdn);
+
+      // If both look valid but point to different UUIDs, prefer what is actually displayed (src/currentSrc).
+      if (srcOk && cdnOk) {
+        const us = firstUuidInUrl(realSrc);
+        const uc = firstUuidInUrl(realCdn);
+        if (us && uc && us !== uc) {
+          push(src);
+          push(cdn);
+        } else {
+          push(cdn);
+          push(src);
+        }
+      } else {
+        push(cdn);
+        push(src);
+      }
     }
 
-    for (const s of Array.from(cardEl.querySelectorAll('video source'))) {
-      const src = s.src || s.getAttribute('src');
-      if (src) candidates.push(src);
+
+      const srcset = img.getAttribute('srcset') || '';
+      for (const u of parseSrcset(srcset)) push(u);
+
+      const dataSrc = img.dataset.src || img.getAttribute('data-src') || '';
+      push(dataSrc);
     }
 
-    for (const v of Array.from(cardEl.querySelectorAll('video'))) {
-      const poster = v.poster || v.getAttribute('poster');
-      if (poster) candidates.push(poster);
+    const norm = candidates.filter(isAllowedMediaUrl);
+    if (!norm.length) {
+      // React fallback (some pages do not expose direct media URLs on the DOM).
+      const react = getReactProps(tileEl);
+      const reactMedia = react && pickFromReactProps(react);
+      if (reactMedia && isAllowedMediaUrl(reactMedia)) return reactMedia;
+      return null;
     }
 
-    const norm = candidates
-      .map(unwrapNextImageUrl)
-      .filter(Boolean)
-      .filter(isAllowedMediaUrl);
+    // Prefer stable/public share-image URLs when available (works for both direct and cdn-cgi wrappers).
+    const preferred = norm.find(s =>
+      s.includes('/imagine-public/share-images/') ||
+      s.includes('/imagine-public/images/')
+    );
 
-    const preferred = norm.find(u => String(u).includes('imagine-public.x.ai/imagine-public/'));
-    if (preferred) return preferred;
-    if (norm[0]) return norm[0];
-
-    // React fallback, but now we pick a *post object* (id + mediaUrl) and can match by dims.
-    const r = findBestPostViaReact(cardEl);
-    if (r && r.post && r.post.mediaUrl) {
-      try {
-        cardEl.dataset.grokMediaUrl = r.post.mediaUrl;
-        cardEl.dataset.grokPostId = r.post.id;
-      } catch {}
-      return r.post.mediaUrl;
-    }
-
-    return null;
+    return preferred || norm[0] || null;
   }
+
 
   function inferMediaTypeFromUrl(u, cardEl) {
     const s = String(u || '');
@@ -870,63 +907,85 @@
 
 
 
-  function initButtonState(cardEl, btn) {
-    if (!btn) return;
+function initButtonState(cardEl, btn) {
+  if (!btn) return;
 
-    // Favorites page: everything starts as liked (unlike should not call create).
-    if (pageIsFavorites()) {
-      btn.setState(true);
-      return;
-    }
-
-    // Try to resolve a stable id for cache lookup.
-    let id = null;
-
-    if (cardEl && cardEl.dataset && UUID_ONE.test(cardEl.dataset.grokPostId || '')) {
-      id = cardEl.dataset.grokPostId;
-    } else if (btn.dataset && UUID_ONE.test(btn.dataset.postId || '')) {
-      id = btn.dataset.postId;
-    }
-
-    const mediaUrl = pickBestMediaUrl(cardEl);
-
-    if (!id && mediaUrl && mediaUrlToPostId.has(mediaUrl)) {
-      id = mediaUrlToPostId.get(mediaUrl);
-    }
-
-    if (!id) {
-      const candidateId = extractCandidateId(cardEl, mediaUrl);
-      if (UUID_ONE.test(candidateId || '')) id = candidateId;
-    }
-
-    if (id && isLikedCached(id)) {
-      btn.setState(true);
-    }
+  // Favorites page: everything starts as liked (unlike should not call create).
+  if (pageIsFavorites()) {
+    btn.setState(true);
+    return;
   }
+
+  const mediaUrl = pickBestMediaUrl(cardEl);
+
+  // Prefer the mapping we learned from /create (most reliable).
+  let id = null;
+  if (mediaUrl && mediaUrlToPostId.has(mediaUrl)) id = mediaUrlToPostId.get(mediaUrl);
+
+  // Then fall back to DOM/react-derived candidates (includes stale-dataset protection).
+  if (!id) {
+    const candidateId = extractCandidateId(cardEl, mediaUrl);
+    if (UUID_ONE.test(candidateId || '')) id = candidateId;
+  }
+
+  if (id && UUID_ONE.test(id)) {
+    btn.dataset.postId = id;
+    btn.setState(isLikedCached(id));
+  } else {
+    btn.dataset.postId = '';
+    btn.setState(false);
+  }
+}
 
 function inject(cardEl) {
-    if (!isMediaCard(cardEl)) return;
-    if (cardEl.querySelector('.grok-fav-btn')) return;
+  if (!isMediaCard(cardEl)) return;
 
-    const target =
-      cardEl.querySelector('[class*="group/media-post-masonry-card"]') ||
-      cardEl.querySelector('.relative.group\\/media-post-masonry-card') ||
-      cardEl.querySelector('.relative') ||
-      cardEl;
+  const target =
+    cardEl.querySelector('[class*="group/media-post-masonry-card"]') ||
+    cardEl.querySelector('.relative.group\\/media-post-masonry-card') ||
+    cardEl.querySelector('.relative') ||
+    cardEl;
 
-    const cs = getComputedStyle(target);
-    if (cs.position === 'static') target.style.position = 'relative';
+  const cs = getComputedStyle(target);
+  if (cs.position === 'static') target.style.position = 'relative';
 
-    const btn = makeButton();
+  let btn = target.querySelector(':scope > .grok-fav-btn') || target.querySelector('.grok-fav-btn');
+  if (!btn) {
+    btn = makeButton();
     btn.addEventListener('click', (e) => onHeartClick(e, target, btn));
     target.appendChild(btn);
-    initButtonState(target, btn);
   }
 
+  // IMPORTANT: Always refresh state - the main viewer swaps the <img> under the same DOM node.
+  initButtonState(target, btn);
+}
+
   function scan() {
-    const nodes = document.querySelectorAll('[role="listitem"], [class*="group/media-post-masonry-card"]');
-    nodes.forEach(inject);
+    const set = new Set();
+
+    // Main grids (favorites, explore, masonry).
+    document
+      .querySelectorAll('[role="listitem"], [class*="group/media-post-masonry-card"]')
+      .forEach(el => set.add(el));
+
+    // Edit UI / post view: main selected image wrapper (div.grid).
+    document
+      .querySelectorAll('div.grid > img[src], div.grid > img[data-grok-cdn-src]')
+      .forEach(img => {
+        if (img.closest('[role="listitem"], [class*="group/media-post-masonry-card"]')) return;
+
+        const uSrc = img.getAttribute('src') || '';
+        const uCdn = img.dataset.grokCdnSrc || img.getAttribute('data-grok-cdn-src') || '';
+
+        if (!isAllowedMediaUrl(uSrc) && !isAllowedMediaUrl(uCdn)) return;
+
+        const host = img.closest('div.grid') || img.parentElement;
+        if (host) set.add(host);
+      });
+
+    set.forEach(inject);
   }
+
 
   function dumpDupesOnce() {
     const tiles = Array.from(document.querySelectorAll('[role="listitem"]'));
