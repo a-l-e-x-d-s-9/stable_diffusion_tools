@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Quick Favorite (Heart) Button
 // @namespace    grok_imagine_favorite
-// @version      0.41.4
+// @version      0.41.8
 // @description  Adds a heart button on media tiles. Better per-tile UUID detection + debug dump of all candidate UUIDs/URLs.
 // @match        https://grok.com/imagine*
 // @match        https://www.grok.com/imagine*
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.41.4';
+  const VERSION = "0.41.8";
 
   // Main debug toggle
   const DEBUG = true;
@@ -88,6 +88,60 @@
   }
 
   loadLikeCache();
+
+  // Upscale cache (videoId -> upscaled) to hide the button once done.
+  const UPSCALE_CACHE_KEY = 'grok_imagine_video_upscale_cache_v1';
+  const upscaledStateById = new Map();
+  let upscaleCacheSaveTimer = null;
+
+  function loadUpscaleCache() {
+    try {
+      const raw = localStorage.getItem(UPSCALE_CACHE_KEY);
+      if (!raw) return;
+      const obj = JSON.parse(raw);
+      if (!obj || typeof obj !== 'object') return;
+      for (const [k, v] of Object.entries(obj)) {
+        if (UUID_ONE.test(k) && v) upscaledStateById.set(k, true);
+      }
+    } catch (e) {
+      log('warn', 'Failed to load upscale cache:', e);
+    }
+  }
+
+  function saveUpscaleCacheSoon() {
+    if (upscaleCacheSaveTimer) return;
+    upscaleCacheSaveTimer = setTimeout(() => {
+      upscaleCacheSaveTimer = null;
+      try {
+        const obj = {};
+        // cap size to avoid unlimited growth
+        let count = 0;
+        for (const [k, v] of upscaledStateById.entries()) {
+          if (!v) continue;
+          obj[k] = 1;
+          count += 1;
+          if (count >= 4000) break;
+        }
+        localStorage.setItem(UPSCALE_CACHE_KEY, JSON.stringify(obj));
+      } catch (e) {
+        log('warn', 'Failed to save upscale cache:', e);
+      }
+    }, 350);
+  }
+
+  function setUpscaledCached(videoId, upscaled) {
+    if (!videoId || !UUID_ONE.test(videoId)) return;
+    if (upscaled) upscaledStateById.set(videoId, true);
+    else upscaledStateById.delete(videoId);
+    saveUpscaleCacheSoon();
+  }
+
+  function isUpscaledCached(videoId) {
+    if (!videoId || !UUID_ONE.test(videoId)) return false;
+    return upscaledStateById.get(videoId) === true;
+  }
+
+  loadUpscaleCache();
 
   // -----------------------------
   // Small helpers
@@ -563,6 +617,218 @@
     return 'MEDIA_POST_TYPE_IMAGE';
   }
 
+
+  function extractPostIdFromLocation() {
+    try {
+      const href = String(location.href || '');
+      const path = String(location.pathname || '');
+
+      // Most reliable: explicit /imagine/post/<uuid>
+      let m = href.match(/\/imagine\/post\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+      if (m && m[1] && UUID_ONE.test(m[1])) return String(m[1]).toLowerCase();
+
+      m = path.match(/\/imagine\/post\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+      if (m && m[1] && UUID_ONE.test(m[1])) return String(m[1]).toLowerCase();
+
+      // Query params fallback (varies by internal routes)
+      let u = null;
+      try { u = new URL(href); } catch {}
+      if (u && u.searchParams) {
+        for (const k of ['videoId', 'postId', 'id', 'mediaId']) {
+          const v = u.searchParams.get(k);
+          if (UUID_ONE.test(v || '')) return String(v).toLowerCase();
+        }
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+
+  function extractPostIdFromGeneratedUrl(u) {
+    try {
+      const s = String(u || '');
+
+      // Common asset form: /users/<userId>/generated/<postId>/...
+      let m = s.match(/\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/generated\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i);
+      if (m && m[2] && UUID_ONE.test(m[2])) return String(m[2]).toLowerCase();
+
+      // Generic: /generated/<postId>/...
+      m = s.match(/\/generated\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i);
+      if (m && m[1] && UUID_ONE.test(m[1])) return String(m[1]).toLowerCase();
+
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+
+  function hasHdVideo(cardEl) {
+    try {
+      if (!cardEl) return false;
+      const hd =
+        cardEl.querySelector('video#hd-video[src*="generated_video_hd.mp4"]') ||
+        cardEl.querySelector('video[src*="generated_video_hd.mp4"]') ||
+        null;
+      if (!hd) return false;
+      const src = String(hd.getAttribute('src') || '');
+      return /generated_video_hd\.mp4/i.test(src) && src.length > 8;
+    } catch {
+      return false;
+    }
+  }
+
+
+  function extractVideoIdForUpscale(cardEl) {
+    try {
+      if (!cardEl || !cardEl.querySelector('video')) return null;
+
+      // 1) Prefer the media post id from the current route (/imagine/post/<uuid>)
+      const urlId = extractPostIdFromLocation();
+      if (urlId && UUID_ONE.test(urlId)) return urlId;
+
+      // 2) Prefer a nearby dataset id (common on tiles / some viewers)
+      const holder =
+        cardEl.closest('[data-grok-post-id]') ||
+        cardEl.closest('[data-post-id]') ||
+        cardEl.querySelector('[data-grok-post-id]') ||
+        cardEl.querySelector('[data-post-id]') ||
+        null;
+
+      if (holder) {
+        const ds1 = holder.getAttribute('data-grok-post-id') || (holder.dataset ? holder.dataset.grokPostId : '');
+        if (UUID_ONE.test(ds1 || '')) return String(ds1).toLowerCase();
+
+        const ds2 = holder.getAttribute('data-post-id') || (holder.dataset ? holder.dataset.postId : '');
+        if (UUID_ONE.test(ds2 || '')) return String(ds2).toLowerCase();
+      }
+
+      // 2.5) On tiles, the post id is usually embedded in /generated/<postId>/... URLs (avoid picking the user id)
+      const mediaUrl = pickBestMediaUrl(cardEl);
+      const genIdFromMedia = extractPostIdFromGeneratedUrl(mediaUrl);
+      if (genIdFromMedia) return genIdFromMedia;
+
+      // 3) Last resort: infer id from video src. Prefer /generated/<postId>/... over the first UUID in the URL.
+      const v = cardEl.querySelector('video[src], video source[src]');
+      if (v) {
+        const src = String(v.getAttribute('src') || v.src || '');
+        const genId = extractPostIdFromGeneratedUrl(src);
+        if (genId) return genId;
+
+        // Fallback: use the LAST UUID in the URL (the first is often the user id).
+        const all = src.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/ig);
+        if (all && all.length) return String(all[all.length - 1]).toLowerCase();
+      }
+
+
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+
+  function shouldShowUpscaleButton(cardEl) {
+    try {
+      if (!cardEl) return false;
+      const mediaUrl = pickBestMediaUrl(cardEl);
+      const type = inferMediaTypeFromUrl(mediaUrl, cardEl);
+      if (type !== 'MEDIA_POST_TYPE_VIDEO') return false;
+
+      const videoId = extractVideoIdForUpscale(cardEl);
+      if (videoId && isUpscaledCached(videoId)) return false;
+
+      // If the HD video is already present, there is nothing to do.
+      if (hasHdVideo(cardEl)) return false;
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function onUpscaleClick(e, hostEl, btn) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (btn.dataset.busy === '1') return;
+    btn.dataset.busy = '1';
+
+    btn.style.opacity = '0.55';
+    btn.style.pointerEvents = 'none';
+
+    try {
+      const scanEl = hostEl.closest('div.grid') || hostEl.closest('[role="listitem"]') || hostEl;
+      const videoId = extractVideoIdForUpscale(scanEl) || extractVideoIdForUpscale(hostEl);
+
+      if (!videoId || !UUID_ONE.test(videoId)) {
+        throw new Error('Could not determine videoId for upscale');
+      }
+
+      const res = await apiPost('/rest/media/video/upscale', { videoId });
+
+      if (!res) throw new Error('No response from upscale API');
+      if (!res.ok) {
+        let t = '';
+        try { t = await res.text(); } catch {}
+        throw new Error('Upscale failed for videoId ' + videoId + ': HTTP ' + res.status + (t ? (' - ' + t.slice(0, 160)) : ''));
+      }
+
+      setUpscaledCached(videoId, true);
+
+      // Hide the button immediately; the page will show HD once backend finishes.
+      try { btn.remove(); } catch {}
+      setTimeout(scan, 400);
+    } catch (err) {
+      warn('Upscale error:', err);
+      btn.style.opacity = '1';
+      btn.style.pointerEvents = 'auto';
+      btn.dataset.busy = '0';
+      return;
+    }
+
+    btn.dataset.busy = '0';
+  }
+
+  function alignUpscaleLeftOfFav(target, upBtn, favBtn) {
+    if (!target || !upBtn || !favBtn) return;
+
+    try {
+      const tRect = target.getBoundingClientRect();
+      const fRect = favBtn.getBoundingClientRect();
+      if (!tRect || !fRect || !isFinite(tRect.left) || !isFinite(fRect.left)) return;
+
+      const w = Math.round(fRect.width) || 36;
+      const h = Math.round(fRect.height) || 36;
+      if (w >= 22 && h >= 22) {
+        upBtn.style.width = w + 'px';
+        upBtn.style.height = h + 'px';
+
+        const fs = getComputedStyle(favBtn);
+        if (fs && fs.borderRadius) upBtn.style.borderRadius = fs.borderRadius;
+
+        const svg = upBtn.querySelector('svg');
+        if (svg) {
+          const icon = Math.max(16, Math.min(24, Math.round(w * 0.56)));
+          svg.setAttribute('width', String(icon));
+          svg.setAttribute('height', String(icon));
+        }
+      }
+
+      const gap = 8;
+      const topPx = Math.round(fRect.top - tRect.top);
+      const leftPx = Math.round(fRect.left - tRect.left - gap - w);
+
+      if (leftPx < 6) return;
+
+      upBtn.style.top = topPx + 'px';
+      upBtn.style.left = leftPx + 'px';
+      upBtn.style.right = 'auto';
+    } catch {}
+  }
   function extractCandidateId(cardEl, mediaUrl) {
     if (!cardEl) return null;
 
@@ -803,6 +1069,39 @@
     return btn;
   }
 
+
+
+  function makeUpscaleButton() {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'grok-upscale-btn';
+    btn.title = 'Upscale video';
+    btn.style.cssText = [
+      'position:absolute',
+      'top:10px',
+      'right:10px',
+      'z-index:9999',
+      'width:36px',
+      'height:36px',
+      'border-radius:999px',
+      'display:flex',
+      'align-items:center',
+      'justify-content:center',
+      'background:rgba(0,0,0,0.45)',
+      'border:1px solid rgba(255,255,255,0.25)',
+      'backdrop-filter: blur(6px)',
+      'cursor:pointer',
+      'color:white',
+      'user-select:none',
+      'opacity:1',
+      'pointer-events:auto',
+      'outline:none'
+    ].join(';');
+
+    btn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5"></path><path d="m5 12 7-7 7 7"></path></svg>';
+    btn.dataset.busy = '0';
+    return btn;
+  }
   function alignFavButtonToTopRightControls(target, btn) {
     if (!target || !btn) return;
 
@@ -811,7 +1110,7 @@
       if (!tRect || !isFinite(tRect.left) || tRect.width < 120 || tRect.height < 80) return;
 
       const candidates = Array.from(target.querySelectorAll('button'))
-        .filter(b => b && b !== btn && !b.classList.contains('grok-fav-btn'))
+        .filter(b => b && b !== btn && !b.classList.contains('grok-fav-btn') && !b.classList.contains('grok-upscale-btn'))
         .map(b => ({ b, r: b.getBoundingClientRect() }))
         .filter(x => x.r && isFinite(x.r.left) && x.r.width >= 22 && x.r.height >= 22 && x.r.width <= 80 && x.r.height <= 80)
         // must be in the "top-right zone" of the target
@@ -1141,14 +1440,38 @@ function initButtonState(cardEl, btn) {
       btn.__grokFavBound = 1;
     }
 
+    // Upscale button (videos only, only when HD is not available yet)
+    const wantUpscale = shouldShowUpscaleButton(cardEl);
+    let upBtn = searchRoot ? searchRoot.querySelector('.grok-upscale-btn') : null;
+
+    if (wantUpscale) {
+      if (!upBtn) {
+        upBtn = makeUpscaleButton();
+        upBtn.addEventListener('click', (e) => onUpscaleClick(e, toolbar ? (wrapper || target) : target, upBtn));
+        upBtn.__grokUpscaleBound = 1;
+      } else if (!upBtn.__grokUpscaleBound) {
+        upBtn.addEventListener('click', (e) => onUpscaleClick(e, toolbar ? (wrapper || target) : target, upBtn));
+        upBtn.__grokUpscaleBound = 1;
+      }
+    } else if (upBtn) {
+      try { upBtn.remove(); } catch {}
+      upBtn = null;
+    }
+
+
+
     // Place button
     if (toolbar) {
       // Move into toolbar as the leftmost item so it never overlaps "More options"
       if (btn.parentElement !== toolbar) {
         toolbar.insertBefore(btn, toolbar.firstChild);
       }
+      if (upBtn && upBtn.parentElement !== toolbar) {
+        toolbar.insertBefore(upBtn, toolbar.firstChild);
+      }
 
       applyToolbarModeStyle(btn, toolbar);
+      if (upBtn) applyToolbarModeStyle(upBtn, toolbar);
 
       // State should be computed from the real media in the viewer (grid)
       initButtonState(cardEl, btn);
@@ -1162,9 +1485,18 @@ function initButtonState(cardEl, btn) {
 
       initButtonState(target, btn);
 
+      if (upBtn) {
+        upBtn.dataset.uiMode = 'overlay';
+        if (upBtn.parentElement !== target) target.appendChild(upBtn);
+      }
+
       // Align next to native buttons when they are inside the same target (masonry tiles etc)
       alignFavButtonToTopRightControls(target, btn);
       requestAnimationFrame(() => alignFavButtonToTopRightControls(target, btn));
+      if (upBtn) {
+        alignUpscaleLeftOfFav(target, upBtn, btn);
+        requestAnimationFrame(() => alignUpscaleLeftOfFav(target, upBtn, btn));
+      }
     }
   }
 
