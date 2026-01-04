@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.09
+// @version      2.6.11
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -103,6 +103,36 @@ async function headContentLength(u) {
     }
   });
 }
+
+  // Prefer HD upscaled video URL when available.
+  // In Favorites tiles, the DOM often keeps the SD URL even after upscale finishes.
+  // We cheaply probe the HD URL via HEAD Content-Length and pick it if it is larger.
+  const bestVideoUrlCache = new Map(); // key: normalized URL, value: { best, ts }
+  async function resolveBestVideoUrl(url) {
+    if (!url) return "";
+    const key = normalizeUrlVideo(url);
+    const now = Date.now();
+    const cached = bestVideoUrlCache.get(key);
+    if (cached && (now - cached.ts) < 60000) return cached.best;
+
+    let best = url;
+
+    try {
+      // Common naming: generated_video.mp4 -> generated_video_hd.mp4
+      if (/\/generated_video\.mp4(\?|$)/i.test(url)) {
+        const hd = url.replace(/\/generated_video\.mp4(\?|$)/i, "/generated_video_hd.mp4$1");
+        const [lenHd, lenSd] = await Promise.all([
+          headContentLength(hd),
+          headContentLength(url),
+        ]);
+        if (lenHd && lenHd > (lenSd || 0)) best = hd;
+      }
+    } catch (_) {}
+
+    bestVideoUrlCache.set(key, { best, ts: now });
+    return best;
+  }
+
 
 
 
@@ -629,6 +659,16 @@ async function headContentLength(u) {
       // Grok often shows temporary in-progress PNG previews during generation. Ignore them.
       if (/^data:image\/png/i.test(src)) return;
 
+      // Skip video preview frames (small "preview_image.jpg") - they are not final images.
+      // This is needed because the <video> element may appear later, after we already saw the preview.
+      try {
+        const cand0 = upgradeCdnCgiImageUrl(src) || src;
+        const cand1 = normalizeUrl(cand0);
+        if (/\/preview_image\.(jpg|jpeg|png)(\?|#|$)/i.test(cand0) || /\/preview_image\.(jpg|jpeg|png)(\?|#|$)/i.test(cand1)) {
+          return;
+        }
+      } catch (_) {}
+
       const normSrc = normalizeUrl(src);
 
       const hasUserAssetCandidate =
@@ -833,43 +873,54 @@ async function headContentLength(u) {
         // Same-URL upscale check: if already marked done, allow re-download only if size grew.
         // If no stored size, treat as not upscaled and keep the existing "done".
         if (!forcePage && videoEl.dataset.grokDone === "1") {
-          const dimsNow = await videoDims(videoEl);
-          const curStr = `${dimsNow.w}x${dimsNow.h}`;
-
-          // 1) Compare with element-local saved dims (same page/view)
-          const prevElStr = videoEl.dataset.grokSavedDims || "";
-          const parseDims = s => {
-            const [w, h] = String(s || "").split("x").map(n => parseInt(n, 10) || 0);
-            return { w, h };
-          };
-          const prevEl = parseDims(prevElStr);
-          const grewVsEl = (dimsNow.w * dimsNow.h > prevEl.w * prevEl.h) ||
-                           (Math.max(dimsNow.w, dimsNow.h) > Math.max(prevEl.w, prevEl.h));
-
-          // 2) Compare with persisted per-URL dims (survives reloads)
+          // If an HD/upscaled URL exists, allow a second download even if SD was already saved.
+          // (Favorites tiles often keep the SD <video src> even after upscale finishes.)
           const url0 = getVideoUrl(videoEl) || "";
-          const k = url0 ? normalizeUrlVideo(url0) : "";
-          const stored = k ? vidMetaByUrlNorm[k] : null;
-          const grewVsStored = !!stored && (
-            (dimsNow.w * dimsNow.h > (stored.w || 0) * (stored.h || 0)) ||
-            (Math.max(dimsNow.w, dimsNow.h) > Math.max(stored.w || 0, stored.h || 0))
-          );
+          const best0 = url0 ? await resolveBestVideoUrl(url0) : "";
 
-          if (grewVsEl || grewVsStored) {
+          if (best0 && best0 !== url0) {
             delete videoEl.dataset.grokDone;
             delete videoEl.dataset.grokDoneForce;
           } else {
-            return;
+            const dimsNow = await videoDims(videoEl);
+            const curStr = `${dimsNow.w}x${dimsNow.h}`;
+
+            // 1) Compare with element-local saved dims (same page/view)
+            const prevElStr = videoEl.dataset.grokSavedDims || "";
+            const parseDims = s => {
+              const [w, h] = String(s || "").split("x").map(n => parseInt(n, 10) || 0);
+              return { w, h };
+            };
+            const prevEl = parseDims(prevElStr);
+            const grewVsEl = (dimsNow.w * dimsNow.h > prevEl.w * prevEl.h) ||
+                             (Math.max(dimsNow.w, dimsNow.h) > Math.max(prevEl.w, prevEl.h));
+
+            // 2) Compare with persisted per-URL dims (survives reloads)
+            const k = url0 ? normalizeUrlVideo(url0) : "";
+            const stored = k ? vidMetaByUrlNorm[k] : null;
+            const grewVsStored = !!stored && (
+              (dimsNow.w * dimsNow.h > (stored.w || 0) * (stored.h || 0)) ||
+              (Math.max(dimsNow.w, dimsNow.h) > Math.max(stored.w || 0, stored.h || 0))
+            );
+
+            if (grewVsEl || grewVsStored) {
+              delete videoEl.dataset.grokDone;
+              delete videoEl.dataset.grokDoneForce;
+            } else {
+              return;
+            }
           }
         }
 
 
 
-      if (forcePage && videoEl.dataset.grokDoneForce === "1") return;
+        if (forcePage && videoEl.dataset.grokDoneForce === "1") return;
       // Force mode: skip items that were present before Force toggle
       if (forcePage && videoEl.dataset.grokPreForce === "1") return;
 
-      const url = getVideoUrl(videoEl);
+      const url0 = getVideoUrl(videoEl);
+      if (!url0) return;
+      const url = await resolveBestVideoUrl(url0);
       if (!url) return;
 
       const normUrl = normalizeUrlVideo(url);
@@ -1009,7 +1060,7 @@ async function headContentLength(u) {
           const dims = await videoDims(videoEl);
           const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : "";
           videoEl.dataset.grokSavedDims = sizeStr;
-          const k = normalizeUrlVideo(getVideoUrl(videoEl));
+          const k = normUrl;
           if (k) {
             vidMetaByUrlNorm[k] = { w: dims.w || 0, h: dims.h || 0, sizeStr };
             saveVidMetaByUrlNorm(vidMetaByUrlNorm);
