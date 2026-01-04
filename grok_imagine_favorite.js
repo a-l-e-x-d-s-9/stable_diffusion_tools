@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Quick Favorite (Heart) Button
 // @namespace    grok_imagine_favorite
-// @version      0.41.1
+// @version      0.41.3
 // @description  Adds a heart button on media tiles. Better per-tile UUID detection + debug dump of all candidate UUIDs/URLs.
 // @match        https://grok.com/imagine*
 // @match        https://www.grok.com/imagine*
@@ -794,6 +794,66 @@
     return btn;
   }
 
+  function alignFavButtonToTopRightControls(target, btn) {
+    if (!target || !btn) return;
+
+    try {
+      const tRect = target.getBoundingClientRect();
+      if (!tRect || !isFinite(tRect.left) || tRect.width < 120 || tRect.height < 80) return;
+
+      const candidates = Array.from(target.querySelectorAll('button'))
+        .filter(b => b && b !== btn && !b.classList.contains('grok-fav-btn'))
+        .map(b => ({ b, r: b.getBoundingClientRect() }))
+        .filter(x => x.r && isFinite(x.r.left) && x.r.width >= 22 && x.r.height >= 22 && x.r.width <= 80 && x.r.height <= 80)
+        // must be in the "top-right zone" of the target
+        .filter(x => (x.r.top - tRect.top) > -6 && (x.r.top - tRect.top) < 90)
+        .filter(x => (tRect.right - x.r.right) > -6 && (tRect.right - x.r.right) < 180);
+
+      if (!candidates.length) return;
+
+      // Reference button = the one closest to the right edge
+      candidates.sort((a, b) => b.r.right - a.r.right);
+      const ref = candidates[0];
+
+      // Match size + radius
+      const refW = Math.round(ref.r.width);
+      const refH = Math.round(ref.r.height);
+      if (refW >= 22 && refH >= 22) {
+        btn.style.width = refW + 'px';
+        btn.style.height = refH + 'px';
+
+        const refStyle = getComputedStyle(ref.b);
+        if (refStyle && refStyle.borderRadius) btn.style.borderRadius = refStyle.borderRadius;
+
+        const svg = btn.querySelector('svg');
+        if (svg) {
+          const icon = Math.max(16, Math.min(24, Math.round(refW * 0.56)));
+          svg.setAttribute('width', String(icon));
+          svg.setAttribute('height', String(icon));
+        }
+      }
+
+      // Place our button left of the LEFT-most top-right control
+      let leftMost = candidates[0];
+      for (const c of candidates) {
+        if (c.r.left < leftMost.r.left) leftMost = c;
+      }
+
+      const gap = 8;
+      const btnW = parseInt(btn.style.width, 10) || 36;
+
+      const topPx = Math.round(ref.r.top - tRect.top);
+      const leftPx = Math.round(leftMost.r.left - tRect.left - gap - btnW);
+
+      // If there is no room, keep default (top-right)
+      if (leftPx < 6) return;
+
+      btn.style.top = topPx + 'px';
+      btn.style.left = leftPx + 'px';
+      btn.style.right = 'auto';
+    } catch {}
+  }
+
 
   async function onHeartClick(e, hostEl, btn) {
     e.preventDefault();
@@ -937,28 +997,38 @@ function initButtonState(cardEl, btn) {
   }
 }
 
-function inject(cardEl) {
-  if (!isMediaCard(cardEl)) return;
 
-  const target =
-    cardEl.querySelector('[class*="group/media-post-masonry-card"]') ||
-    cardEl.querySelector('.relative.group\\/media-post-masonry-card') ||
-    cardEl.querySelector('.relative') ||
-    cardEl;
+  function inject(cardEl) {
+    if (!isMediaCard(cardEl)) return;
 
-  const cs = getComputedStyle(target);
-  if (cs.position === 'static') target.style.position = 'relative';
+    const target =
+      cardEl.querySelector('[class*="group/media-post-masonry-card"]') ||
+      cardEl.querySelector('.relative.group\\/media-post-masonry-card') ||
+      cardEl.querySelector('.relative') ||
+      cardEl;
 
-  let btn = target.querySelector(':scope > .grok-fav-btn') || target.querySelector('.grok-fav-btn');
-  if (!btn) {
-    btn = makeButton();
-    btn.addEventListener('click', (e) => onHeartClick(e, target, btn));
-    target.appendChild(btn);
+    const cs = getComputedStyle(target);
+    if (cs.position === 'static') target.style.position = 'relative';
+
+    // Reuse an existing button if present (important for post-view switching)
+    let btn = target.querySelector('.grok-fav-btn');
+    if (!btn) {
+      btn = makeButton();
+      btn.addEventListener('click', (e) => onHeartClick(e, target, btn));
+      btn.__grokFavBound = 1;
+      target.appendChild(btn);
+    } else if (!btn.__grokFavBound) {
+      btn.addEventListener('click', (e) => onHeartClick(e, target, btn));
+      btn.__grokFavBound = 1;
+    }
+
+    initButtonState(target, btn);
+
+    // Align next to the native top-right buttons
+    alignFavButtonToTopRightControls(target, btn);
+    requestAnimationFrame(() => alignFavButtonToTopRightControls(target, btn));
   }
 
-  // IMPORTANT: Always refresh state - the main viewer swaps the <img> under the same DOM node.
-  initButtonState(target, btn);
-}
 
   function scan() {
     const set = new Set();
