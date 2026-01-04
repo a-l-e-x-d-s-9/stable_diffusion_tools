@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.08
+// @version      2.6.09
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -620,28 +620,34 @@ async function headContentLength(u) {
                        || isFavoritedCard(card)
                        || (onFavoritesRoute() && !!card?.querySelector('button[aria-label="Make video"]'));
 
-      const srcRaw = imgEl.getAttribute("src") || "";
-      const cdnSrc = imgEl.getAttribute("data-grok-cdn-src") || "";
-      const src =
-        cdnSrc &&
-        /^https?:\/\//i.test(cdnSrc) &&
-        /assets\.grok\.com\/users\//i.test(cdnSrc)
-          ? cdnSrc
-          : srcRaw;
+      const srcRaw = (imgEl.getAttribute("src") || "").trim();
+      const cdnSrcRaw = (imgEl.getAttribute("data-grok-cdn-src") || "").trim();
+
+      const src = pickBestImageSrc(srcRaw, cdnSrcRaw);
       if (!src) return;
+
+      // Grok often shows temporary in-progress PNG previews during generation. Ignore them.
+      if (/^data:image\/png/i.test(src)) return;
 
       const normSrc = normalizeUrl(src);
 
-      // Avoid downloading Grok's built-in example media on /imagine.
-      // Only allow user-like sources unless we are in Favorites or Force mode.
+      const hasUserAssetCandidate =
+        /assets\.grok\.com\/users\//i.test(srcRaw) ||
+        /assets\.grok\.com\/users\//i.test(cdnSrcRaw);
+
+      const isImaginePublic = /imagine-public\.x\.ai\/imagine-public\/(images|share-images)\//i.test(src);
+
+      // Avoid downloading Grok's public example media (esp. on /imagine) unless it is tied to a user asset.
       if (!forcePage && !onFavorites) {
         const looksLikeUser =
           src.startsWith("data:image/") ||
           /assets\.grok\.com\/users\//i.test(src) ||
-          /imagine-public\.x\.ai\/imagine-public\/images\//.test(src);
+          (isImaginePublic && hasUserAssetCandidate);
+
         if (!looksLikeUser) return;
       }
-      const finalByHost = /imagine-public\.x\.ai\/imagine-public\/images\//.test(src);
+
+      const finalByHost = isImaginePublic;
 
       // NEW: page-scope in-flight URL guard
       // Lock as late as possible (after cheap early returns), but before any bytes fetch.
@@ -1129,12 +1135,51 @@ async function headContentLength(u) {
   }
 
     function normalizeUrlVideo(u) {
-      try {
-        const x = new URL(u, location.href);
-        x.hash = "";               // keep query, drop hash
-        return x.toString();
-      } catch { return u; }
-    }
+  // For dedupe keys only: drop query and hash to avoid duplicate downloads when Grok varies ?cache=...
+  try {
+    const x = new URL(u, location.href);
+    x.hash = "";
+    x.search = "";
+    return x.toString();
+  } catch {
+    return (u || "").split(/[?#]/)[0];
+  }
+}
+
+function upgradeCdnCgiImageUrl(u) {
+  // Cloudflare image resizing URLs look like:
+  // https://imagine-public.x.ai/cdn-cgi/image/width=500,fit=scale-down,format=auto/imagine-public/share-images/<id>.jpg
+  // Prefer the original URL without the /cdn-cgi/image/... prefix when possible.
+  if (!u || typeof u !== "string") return u;
+  if (!/\/cdn-cgi\/image\//i.test(u)) return u;
+
+  const m = u.match(/^(https?:\/\/[^\/]+)\/cdn-cgi\/image\/[^\/]+\/(imagine-public\/.*)$/i);
+  if (m) return m[1] + "/" + m[2];
+
+  // Fallback: keep the cdn-cgi form but request a larger width so fit=scale-down returns full size.
+  return u.replace(/(\/cdn-cgi\/image\/)([^\/]*)(\/)/i, (all, p1, p2, p3) => {
+    let opts = p2 || "";
+    if (!/width=\d+/i.test(opts)) opts = "width=2048," + opts;
+    else opts = opts.replace(/width=\d+/i, "width=2048");
+    return p1 + opts + p3;
+  });
+}
+
+function pickBestImageSrc(srcRaw, cdnSrcRaw) {
+  const cands = [];
+  if (cdnSrcRaw) cands.push(cdnSrcRaw);
+  if (srcRaw) cands.push(srcRaw);
+
+  for (const cand0 of cands) {
+    let cand = (cand0 || "").trim();
+    if (!cand) continue;
+    cand = upgradeCdnCgiImageUrl(cand);
+    if (!cand) continue;
+    return cand;
+  }
+  return "";
+}
+
 
 
   function getPromptNearestToNode(el) {
