@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.13
+// @version      2.6.14
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -1083,7 +1083,18 @@ async function headContentLength(u) {
 
 
         // Filename parts
-        const dims = await videoDims(videoEl);
+        let dims = await videoDims(videoEl);
+
+        // If we are downloading the HD variant (or any URL different from the element's src),
+        // probe the real file metadata so naming reflects the actual downloaded resolution.
+        if (url && url0 && url !== url0) {
+          const probed = await probeVideoDimsFromUrl(url);
+          if (probed && probed.w && probed.h) dims = probed;
+        } else if (url && /\/generated_video_hd\.mp4(\?|$)/i.test(url)) {
+          const probed = await probeVideoDimsFromUrl(url);
+          if (probed && probed.w && probed.h) dims = probed;
+        }
+
         const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : "";
         const prompt = getPromptNearestToNode(videoEl) || lastSeenPrompt || "";
 
@@ -1150,12 +1161,13 @@ async function headContentLength(u) {
 
         // Persist per-URL dimensions so future loads can detect upscales
         try {
-          const dims = await videoDims(videoEl);
-          const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : "";
+          const dims2 = (dims && dims.w && dims.h) ? dims : await videoDims(videoEl);
+          const sizeStr = dims2.w && dims2.h ? `${dims2.w}x${dims2.h}` : "";
+
           videoEl.dataset.grokSavedDims = sizeStr;
           const k = normUrl;
           if (k) {
-            vidMetaByUrlNorm[k] = { w: dims.w || 0, h: dims.h || 0, sizeStr };
+            vidMetaByUrlNorm[k] = { w: dims2.w || 0, h: dims2.h || 0, sizeStr };
             saveVidMetaByUrlNorm(vidMetaByUrlNorm);
           }
         } catch (_) {}
@@ -1174,6 +1186,51 @@ async function headContentLength(u) {
         inflightVidUrl.delete(normUrl);
       }
     }
+
+
+    async function probeVideoDimsFromUrl(url, timeoutMs = 8000) {
+      if (!url || !/^https?:/i.test(url)) return null;
+
+      return await new Promise((resolve) => {
+        const v = document.createElement("video");
+        let done = false;
+
+        const finish = (val) => {
+          if (done) return;
+          done = true;
+          try { v.removeAttribute("src"); v.load(); } catch (_) {}
+          resolve(val || null);
+        };
+
+        const t = setTimeout(() => finish(null), timeoutMs);
+
+        v.preload = "metadata";
+        v.muted = true;
+        v.playsInline = true;
+
+        v.onloadedmetadata = () => {
+          clearTimeout(t);
+          const w = v.videoWidth || 0;
+          const h = v.videoHeight || 0;
+          if (w > 0 && h > 0) finish({ w, h });
+          else finish(null);
+        };
+
+        v.onerror = () => {
+          clearTimeout(t);
+          finish(null);
+        };
+
+        try {
+          v.src = url;
+          v.load();
+        } catch (_) {
+          clearTimeout(t);
+          finish(null);
+        }
+      });
+    }
+
 
 
     function isVideoPosterImage(imgEl) {
