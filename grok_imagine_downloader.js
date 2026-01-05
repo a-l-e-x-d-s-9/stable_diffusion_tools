@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.11
+// @version      2.6.13
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -24,6 +24,39 @@
 // ==/UserScript==
 (function () {
   "use strict";
+
+
+// --- Cross-script / cross-instance de-dupe locks (Tampermonkey can run multiple scripts in parallel) ---
+// We store short-lived locks on the page's real window (unsafeWindow) so other scripts (or old versions)
+// do not start the same download at the same time (which causes Chrome to create (1), (2), ... files).
+const PAGE_WINDOW = (typeof unsafeWindow !== "undefined") ? unsafeWindow : window;
+if (!PAGE_WINDOW.__GROK_IMAGINE_DL_LOCKS__) {
+  PAGE_WINDOW.__GROK_IMAGINE_DL_LOCKS__ = { img: new Map(), vid: new Map() };
+}
+function _lockMap(kind) {
+  const o = PAGE_WINDOW.__GROK_IMAGINE_DL_LOCKS__;
+  if (!o[kind]) o[kind] = new Map();
+  return o[kind];
+}
+function acquirePageLock(kind, key, ttlMs) {
+  try {
+    const m = _lockMap(kind);
+    const now = Date.now();
+    for (const [k, ts] of m) {
+      if (!ts || (now - ts) > ttlMs) m.delete(k);
+    }
+    const ts = m.get(key);
+    if (ts && (now - ts) < ttlMs) return false;
+    m.set(key, now);
+    return true;
+  } catch (_) {
+    return true;
+  }
+}
+function releasePageLock(kind, key) {
+  try { _lockMap(kind).delete(key); } catch (_) {}
+}
+
 
   // Prompt chips (generator + viewer, including new sticky pill on viewer)
   const PROMPT_SELECTOR_GEN    = "div.border.border-border-l2.bg-surface-l1.rounded-3xl";
@@ -625,6 +658,12 @@ async function headContentLength(u) {
       const myEpoch = Number(imgEl.dataset.grokEpoch || routeEpoch);
       if (myEpoch !== routeEpoch || !imgEl.isConnected) return;
       if (!autoOn) return;
+
+      // Cross-script lock (prevents duplicate downloads when multiple scripts/versions run)
+      let pageLockKey = null;
+      let pageLockHeld = false;
+      let pageLockKeep = false;
+
       const isEditedThumb = (() => {
         try {
           const r = imgEl.getBoundingClientRect();
@@ -775,6 +814,11 @@ async function headContentLength(u) {
 
         // ---- Save as JPEG always ----
         // block re-entry on this node while saving
+        // Cross-script de-dupe: prevent parallel downloads of the same URL in other scripts/versions.
+        pageLockKey = "img|" + normSrc;
+        if (!acquirePageLock("img", pageLockKey, 10 * 60 * 1000)) return;
+        pageLockHeld = true;
+
         imgEl.dataset.grokSaving = "1";
         const dims    = await imageDims(bytes).catch(() => ({ w: 0, h: 0 }));
         const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : "";
@@ -809,6 +853,7 @@ async function headContentLength(u) {
               const dataUrl = bytesToDataURL("image/jpeg", jpegU8);
               await simpleDownload(dataUrl, fname, myEpoch);
             } finally {
+              if (!pageLockKeep && pageLockHeld && pageLockKey) releasePageLock("img", pageLockKey);
               URL.revokeObjectURL(objUrl);
             }
 
@@ -816,6 +861,7 @@ async function headContentLength(u) {
             if (sig) seenSig.add(sig);
             seenImg.add(sha1);
             persistSeen();
+            pageLockKeep = true;
 
             imgEl.dataset.grokDone = "1";
             if (forcePage) imgEl.dataset.grokDoneForce = "1";
@@ -869,6 +915,22 @@ async function headContentLength(u) {
       if (myEpoch !== routeEpoch || !videoEl.isConnected) return;
 
         if (!autoOn) return;
+
+
+
+
+        // Re-entry guard (timers/observers can fire while a download is already in progress)
+
+        if (videoEl.dataset.grokSaving === "1") return;
+
+
+        // Cross-script lock (prevents duplicate downloads when multiple scripts/versions run)
+
+        let pageLockKey = null;
+
+        let pageLockHeld = false;
+
+        let pageLockKeep = false;
 
         // Same-URL upscale check: if already marked done, allow re-download only if size grew.
         // If no stored size, treat as not upscaled and keep the existing "done".
@@ -925,6 +987,27 @@ async function headContentLength(u) {
 
       const normUrl = normalizeUrlVideo(url);
       const vKey = normUrl;
+
+      // Global cross-refresh de-dupe (shared across script versions)
+      const gKey = makeGlobalVideoKey(videoEl, url);
+      if (!forcePage && gKey && globalSeen.has(gKey)) {
+        // Allow a re-download only if the video grew vs stored dims (upscale case)
+        try {
+          const dimsNow = await videoDims(videoEl);
+          const stored = normUrl ? vidMetaByUrlNorm[normUrl] : null;
+          const grewVsStored = !!stored && (
+            (dimsNow.w * dimsNow.h > (stored.w || 0) * (stored.h || 0)) ||
+            (Math.max(dimsNow.w, dimsNow.h) > Math.max(stored.w || 0, stored.h || 0))
+          );
+          if (!grewVsStored) {
+            videoEl.dataset.grokDone = "1";
+            return;
+          }
+        } catch {
+          videoEl.dataset.grokDone = "1";
+          return;
+        }
+      }
 
       // page-scope in-flight guard for video URL
       if (inflightVidUrl.has(normUrl)) return;
@@ -1013,6 +1096,11 @@ async function headContentLength(u) {
         const filename = ["grokvid", stamp, short, sizeStr || null, slug].filter(Boolean).join("_") + ".mp4";
 
         // Block re-entry on this node while saving
+        // Cross-script de-dupe: prevent parallel downloads of the same URL in other scripts/versions.
+        pageLockKey = "vid|" + normUrl;
+        if (!acquirePageLock("vid", pageLockKey, 10 * 60 * 1000)) return;
+        pageLockHeld = true;
+
         videoEl.dataset.grokSaving = "1";
 
         // In Force mode, register this page-view key right before we start saving
@@ -1049,7 +1137,12 @@ async function headContentLength(u) {
         if (sha1) seenVid.add(sha1);
         seenVidUrls.add(url);
         seenVidUrlsNorm.add(normUrl);
+        if (gKey) {
+          globalSeen.add(gKey);
+          saveGlobalSeenSet(globalSeen);
+        }
         persistSeen();
+        pageLockKeep = true;
 
         videoEl.dataset.grokSaving = "0";
         videoEl.dataset.grokDone = "1";
@@ -1076,6 +1169,7 @@ async function headContentLength(u) {
         // Let a later retry occur in this page/view
         if (forcePage) forceSeenVideoThisPage.delete(vKey);
       } finally {
+        if (!pageLockKeep && pageLockHeld && pageLockKey) releasePageLock("vid", pageLockKey);
         if (sha1Locked && sha1) inflightVidSha1.delete(sha1);
         inflightVidUrl.delete(normUrl);
       }
@@ -1196,6 +1290,114 @@ async function headContentLength(u) {
     return (u || "").split(/[?#]/)[0];
   }
 }
+
+
+
+// ---------- Global cross-refresh de-dupe (shared across script versions) ----------
+// Rationale: GM storage is per-script. If you have multiple downloader scripts/versions enabled,
+// or if Tampermonkey treats an import as a new script, page refreshes can trigger re-downloads.
+// We keep a compact "global seen" set in localStorage keyed by stable media IDs (postId + kind + quality).
+const GLOBAL_SEEN_KEY_V1 = "grok_global_seen_media_v1";
+
+function loadGlobalSeenSet() {
+  try {
+    const raw = localStorage.getItem(GLOBAL_SEEN_KEY_V1);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return new Set();
+    return new Set(arr.filter(x => typeof x === "string" && x.length < 200));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveGlobalSeenSet(setObj) {
+  try {
+    const arr = Array.from(setObj);
+    // keep it bounded
+    const MAX = 20000;
+    const out = arr.length > MAX ? arr.slice(arr.length - MAX) : arr;
+    localStorage.setItem(GLOBAL_SEEN_KEY_V1, JSON.stringify(out));
+  } catch {
+    // ignore
+  }
+}
+
+const globalSeen = loadGlobalSeenSet();
+
+function extractUuidFromGeneratedUrl(u) {
+  // assets.grok.com/users/<userId>/generated/<postId>/...
+  // (the first UUID is a user id, the second is the media post id)
+  if (!u || typeof u !== "string") return null;
+  const m = u.match(/\/generated\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+function extractUuidFromImaginePostHref(u) {
+  if (!u || typeof u !== "string") return null;
+  const m = u.match(/\/imagine\/post\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+function guessMediaPostIdFromNode(node) {
+  if (!node) return null;
+
+  // 1) data attribute used in some views
+  try {
+    const el = node.closest && node.closest("[data-grok-post-id]");
+    const v = el && el.getAttribute("data-grok-post-id");
+    if (v && /^[0-9a-f-]{36}$/i.test(v)) return v.toLowerCase();
+  } catch {}
+
+  // 2) nearest link to /imagine/post/<id>
+  try {
+    const a = node.closest && node.closest("a[href*=\"/imagine/post/\"]");
+    const href = a && a.getAttribute("href");
+    const id2 = extractUuidFromImaginePostHref(href);
+    if (id2) return id2;
+  } catch {}
+
+  // 3) URL patterns from video/img/poster
+  const candidates = [];
+  try {
+    if (node.currentSrc) candidates.push(node.currentSrc);
+    if (node.src) candidates.push(node.src);
+    if (node.poster) candidates.push(node.poster);
+  } catch {}
+  try {
+    const img = (node.closest && node.closest("div")) ? node.closest("div").querySelector("img[src*=\"/generated/\"]") : null;
+    const u = img && (img.getAttribute("data-grok-cdn-src") || img.getAttribute("src"));
+    if (u) candidates.push(u);
+  } catch {}
+
+  for (const u of candidates) {
+    const id3 = extractUuidFromGeneratedUrl(u);
+    if (id3) return id3;
+  }
+
+  // 4) as last resort, current route if we are on /imagine/post/<id>
+  const id4 = extractUuidFromImaginePostHref(location.href);
+  return id4;
+}
+
+function isHdVideoUrl(u, videoEl) {
+  const s = String(u || "");
+  if (/generated_video_hd\.mp4/i.test(s)) return true;
+  if (/_hd\.mp4/i.test(s)) return true;
+  try {
+    if (videoEl && String(videoEl.id || "") === "hd-video") return true;
+  } catch {}
+  return false;
+}
+
+function makeGlobalVideoKey(videoEl, bestUrl) {
+  const postId = guessMediaPostIdFromNode(videoEl) || extractUuidFromGeneratedUrl(bestUrl) || extractUuidFromImaginePostHref(location.href);
+  const qual = isHdVideoUrl(bestUrl, videoEl) ? "hd" : "sd";
+  if (postId) return `vid:${postId}:${qual}`;
+  const norm = normalizeUrlVideo(bestUrl || "");
+  return norm ? `vid_url:${norm}` : null;
+}
+
 
 function upgradeCdnCgiImageUrl(u) {
   // Cloudflare image resizing URLs look like:
