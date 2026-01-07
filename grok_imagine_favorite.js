@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Quick Favorite (Heart) Button
 // @namespace    grok_imagine_favorite
-// @version      0.41.8
+// @version      0.41.9
 // @description  Adds a heart button on media tiles. Better per-tile UUID detection + debug dump of all candidate UUIDs/URLs.
 // @match        https://grok.com/imagine*
 // @match        https://www.grok.com/imagine*
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const VERSION = "0.41.8";
+  const VERSION = "0.41.9";
 
   // Main debug toggle
   const DEBUG = true;
@@ -594,9 +594,13 @@
     const norm = candidates.filter(isAllowedMediaUrl);
     if (!norm.length) {
       // React fallback (some pages do not expose direct media URLs on the DOM).
-      const react = getReactProps(tileEl);
-      const reactMedia = react && pickFromReactProps(react);
-      if (reactMedia && isAllowedMediaUrl(reactMedia)) return reactMedia;
+      // NOTE: Older versions referenced getReactProps/pickFromReactProps, but those helpers
+      // are not present in this script. Use our fiber-based extractor instead.
+      try {
+        const r = findBestPostViaReact(tileEl);
+        const mu = r && r.post && typeof r.post.mediaUrl === 'string' ? unwrapNextImageUrl(r.post.mediaUrl) : null;
+        if (mu && isAllowedMediaUrl(mu)) return mu;
+      } catch {}
       return null;
     }
 
