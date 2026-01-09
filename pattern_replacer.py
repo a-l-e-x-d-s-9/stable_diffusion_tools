@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Pattern Replacer (PyQt6) — crash fix + UX updates
+# Pattern Replacer (PyQt6)  -  crash fix + UX updates
 # - Fix: Add Pair click no longer passes a bool into setText
 # - Layout: Pattern (top), Output (middle), Pairs & Help (collapsible, below Output)
 # - Pairs panel slimmer (max height) and collapsed by default
@@ -8,7 +8,7 @@
 # - Pattern editor wraps long lines
 # - Defaults auto-load on start; auto-save on close AND debounced auto-save on edits (survives most crashes)
 # - Project save/load; Output save
-# - Tags: <loop_N>, <rand_int_min_max>, <rand_float_min_max>, <sum_inc interval=... upper=... lower=... order=...>
+# - Tags: <loop_N>, <rand_int_min_max>, <rand_float_min_max>, <sum_inc interval=... upper=... lower=... order=... count=... dist=... sigma=... min_mult=... max_mult=...>
 
 from __future__ import annotations
 import sys, re, json, random
@@ -89,20 +89,38 @@ def expand_sum_inc(match: re.Match) -> str:
     lower_s = attrs.get("lower") or attrs.get("lower_bound") or attrs.get("min")
     order = (attrs.get("order") or "up_first").strip().lower()
 
-    # NEW: count-based mode detection (aka “interval count”)
+    # NEW: count-based mode detection (aka "interval count")
     count_s = attrs.get("count") or attrs.get("interval_count") or attrs.get("sums") or attrs.get("count_sums")
     dist = (attrs.get("dist") or attrs.get("distribution") or "uniform").strip().lower()
     sigma_s = attrs.get("sigma")
 
     # decimal places / quantizer
-    def places_for_all():
+    def _base_places() -> int:
         return max(
             max((_dec_places(m.group(3)) for m in slot_matches), default=0),
             _dec_places(upper_s or ""),
             _dec_places(lower_s or ""),
             _dec_places(attrs.get("interval") or "")
         )
-    q = _quantizer(places_for_all())
+
+    # Optional override: places / precision / dp / decimals
+    places_override_s = (
+        attrs.get("places")
+        or attrs.get("precision")
+        or attrs.get("dp")
+        or attrs.get("decimals")
+    )
+    if places_override_s is not None:
+        try:
+            max_places = int(str(places_override_s).strip())
+        except Exception:
+            return "[sum_inc error: bad places/precision]"
+        if max_places < 0 or max_places > 10:
+            return "[sum_inc error: places/precision out of range (0-10)]"
+    else:
+        max_places = _base_places()
+
+    q = _quantizer(max_places)
 
     # helper for rendering with a provided vector of values
     def render_with_values(vals: list[Decimal]) -> str:
@@ -139,8 +157,23 @@ def expand_sum_inc(match: re.Match) -> str:
         except Exception:
             return "[sum_inc error: bad lower/upper]"
         if upper < lower:
-            # allow reverse; we’ll still produce ascending sums
+            # allow reverse; we'll still produce ascending sums
             lower, upper = upper, lower
+
+
+        # Refine quantizer in count mode: make sure it can represent the computed step.
+        # Example: lower=0 upper=1 count=5 => step=0.25 needs 2 decimal places even if inputs are "0" and "1".
+        if places_override_s is None and count > 1:
+            step_for_places = (upper - lower) / Decimal(count - 1)
+            try:
+                step_norm = step_for_places.normalize()
+                step_places = max(0, -step_norm.as_tuple().exponent)
+            except Exception:
+                step_places = 0
+            step_places = min(step_places, 6)  # safety cap; override with places=... if needed
+            if step_places > max_places:
+                max_places = step_places
+                q = _quantizer(max_places)
 
         # build target sums, evenly spaced, inclusive
         sums: list[Decimal] = []
@@ -151,46 +184,184 @@ def expand_sum_inc(match: re.Match) -> str:
             for i in range(count):
                 sums.append(lower + step * Decimal(i))
 
-        # distribution profiles -> weights over variables
-        if dist in ("uniform", "u"):
-            weights = [Decimal(1) / Decimal(nslots)] * nslots
+        random_mode = dist in ("random", "rand", "random_dist", "randomized")
+
+        # Random distribution mode (count-based): for each target sum S, pick per-variable values
+        # within [min_mult*(S/n), max_mult*(S/n)], in a randomized variable order, while keeping
+        # the total exactly S (within quantization).
+        if random_mode:
+            min_mult_s = (
+                attrs.get("min_mult")
+                or attrs.get("min_mul")
+                or attrs.get("min_multiplier")
+                or attrs.get("minm")
+            )
+            max_mult_s = (
+                attrs.get("max_mult")
+                or attrs.get("max_mul")
+                or attrs.get("max_multiplier")
+                or attrs.get("maxm")
+            )
+
+            # defaults match the example in the requirements
+            try:
+                min_mult = Decimal(min_mult_s) if min_mult_s is not None else Decimal("0.25")
+                max_mult = Decimal(max_mult_s) if max_mult_s is not None else Decimal("1.5")
+            except Exception:
+                return "[sum_inc error: bad min_mult/max_mult]"
+
+            if min_mult < 0 or max_mult < 0:
+                return "[sum_inc error: min_mult/max_mult must be >= 0]"
+            if min_mult > max_mult:
+                return "[sum_inc error: min_mult must be <= max_mult]"
+            # Feasibility for "base = S/n": must include 1.0 for the sum to be reachable
+            if min_mult > 1 or max_mult < 1:
+                return "[sum_inc error: need min_mult <= 1 and max_mult >= 1 for a valid total]"
+
+            def _alloc_random_for_sum(S: Decimal):
+                if nslots <= 0:
+                    return "[sum_inc error: no slots]"
+                base = S / Decimal(nslots)
+                min_v = base * min_mult
+                max_v = base * max_mult
+
+                # Basic feasibility check (guard against weird decimals)
+                if (min_v * Decimal(nslots)) > (S + (q / 2)):
+                    return "[sum_inc error: min_mult too high for this sum]"
+                if (max_v * Decimal(nslots)) < (S - (q / 2)):
+                    return "[sum_inc error: max_mult too low for this sum]"
+
+                idxs = list(range(nslots))
+                random.shuffle(idxs)
+
+                vals_raw = [Decimal(0)] * nslots
+                remaining = S
+
+                for t, idx in enumerate(idxs):
+                    rem_slots = nslots - t - 1
+                    if rem_slots == 0:
+                        vals_raw[idx] = remaining
+                        remaining = Decimal(0)
+                        break
+
+                    min_rem = min_v * Decimal(rem_slots)
+                    max_rem = max_v * Decimal(rem_slots)
+
+                    low = min_v
+                    high = max_v
+
+                    # Ensure the pick keeps the remaining feasible
+                    low2 = max(low, remaining - max_rem)
+                    high2 = min(high, remaining - min_rem)
+
+                    if high2 < low2:
+                        # Numerical edge; snap to low2 to stay feasible
+                        pick = low2
+                    else:
+                        r = Decimal(str(random.random()))
+                        pick = low2 + (high2 - low2) * r
+
+                    vals_raw[idx] = pick
+                    remaining -= pick
+
+                # Quantize (same quantizer as other modes)
+                vals = [v.quantize(q, rounding=ROUND_HALF_UP) for v in vals_raw]
+
+                # Bounds in quantized space (so drift-fix stays within limits)
+                min_b = (min_v).quantize(q, rounding=ROUND_HALF_UP)
+                max_b = (max_v).quantize(q, rounding=ROUND_HALF_UP)
+
+                # Fix rounding drift without violating bounds
+                drift = (S - sum(vals, Decimal(0))).quantize(q, rounding=ROUND_HALF_UP)
+                if drift != 0:
+                    step = q
+                    if step == 0:
+                        pass
+                    elif drift > 0:
+                        loops = 0
+                        while drift > 0 and loops < 100000:
+                            loops += 1
+                            progressed = False
+                            for j in idxs:
+                                if vals[j] + step <= max_b:
+                                    vals[j] = vals[j] + step
+                                    drift = drift - step
+                                    progressed = True
+                                    if drift <= 0:
+                                        break
+                            if not progressed:
+                                break
+                    else:
+                        loops = 0
+                        while drift < 0 and loops < 100000:
+                            loops += 1
+                            progressed = False
+                            for j in idxs:
+                                if vals[j] - step >= min_b:
+                                    vals[j] = vals[j] - step
+                                    drift = drift + step
+                                    progressed = True
+                                    if drift >= 0:
+                                        break
+                            if not progressed:
+                                break
+
+                # Final tiny correction on the last randomized slot, if it still fits bounds
+                drift2 = (S - sum(vals, Decimal(0))).quantize(q, rounding=ROUND_HALF_UP)
+                if drift2 != 0:
+                    j = idxs[-1]
+                    cand = vals[j] + drift2
+                    if min_b <= cand <= max_b:
+                        vals[j] = cand
+
+                return vals
+
         else:
-            # normal_* modes
-            if dist in ("normal_center", "center", "normal", "gauss", "gauss_center"):
-                mu = (nslots - 1) / 2.0
-            elif dist in ("normal_start", "start", "gauss_start"):
-                mu = 0.0
-            elif dist in ("normal_end", "end", "gauss_end", "normal_send", "send"):
-                mu = float(nslots - 1)
-            else:
-                # fallback to uniform if unknown
+            # distribution profiles -> weights over variables
+            if dist in ("uniform", "u"):
                 weights = [Decimal(1) / Decimal(nslots)] * nslots
-                mu = None
+            else:
+                # normal_* modes
+                if dist in ("normal_center", "center", "normal", "gauss", "gauss_center"):
+                    mu = (nslots - 1) / 2.0
+                elif dist in ("normal_start", "start", "gauss_start"):
+                    mu = 0.0
+                elif dist in ("normal_end", "end", "gauss_end", "normal_send", "send"):
+                    mu = float(nslots - 1)
+                else:
+                    # fallback to uniform if unknown
+                    weights = [Decimal(1) / Decimal(nslots)] * nslots
+                    mu = None
 
-            if mu is not None:
-                try:
-                    sigma = float(sigma_s) if sigma_s is not None else max(0.8, (nslots - 1) / 3.0)
-                    sigma = max(sigma, 1e-6)
-                except Exception:
-                    sigma = max(0.8, (nslots - 1) / 3.0)
+                if mu is not None:
+                    try:
+                        sigma = float(sigma_s) if sigma_s is not None else max(0.8, (nslots - 1) / 3.0)
+                        sigma = max(sigma, 1e-6)
+                    except Exception:
+                        sigma = max(0.8, (nslots - 1) / 3.0)
 
-                ws = []
-                for j in range(nslots):
-                    z = (j - mu) / sigma
-                    ws.append(math.exp(-0.5 * z * z))
-                total = sum(ws) or 1.0
-                weights = [Decimal(w / total) for w in ws]
-
+                    ws = []
+                    for j in range(nslots):
+                        z = (j - mu) / sigma
+                        ws.append(math.exp(-0.5 * z * z))
+                    total = sum(ws) or 1.0
+                    weights = [Decimal(w / total) for w in ws]
         # For each target sum, distribute across variables and render
         lines = []
         for S in sums:
-            raw = [S * w for w in weights]  # Decimal * Decimal
-            # round all but last, then fix the last to keep sum close
-            vals = [d.quantize(q, rounding=ROUND_HALF_UP) for d in raw]
-            # adjust minor rounding drift to the last slot to keep tighter sum
-            drift = S - sum(vals, Decimal(0))
-            if nslots > 0:
-                vals[-1] = (vals[-1] + drift).quantize(q, rounding=ROUND_HALF_UP)
+            if random_mode:
+                vals = _alloc_random_for_sum(S)
+                if isinstance(vals, str):
+                    return vals
+            else:
+                raw = [S * w for w in weights]  # Decimal * Decimal
+                # round all but last, then fix the last to keep sum close
+                vals = [d.quantize(q, rounding=ROUND_HALF_UP) for d in raw]
+                # adjust minor rounding drift to the last slot to keep tighter sum
+                drift = S - sum(vals, Decimal(0))
+                if nslots > 0:
+                    vals[-1] = (vals[-1] + drift).quantize(q, rounding=ROUND_HALF_UP)
+
             lines.append(render_with_values(vals))
 
             if log_flag:
@@ -481,7 +652,7 @@ class MainWindow(QMainWindow):
         self.pattern_combo = QComboBox()
         self.pattern_combo.setEditable(True)  # to allow placeholder
         self.pattern_combo.lineEdit().setReadOnly(True)
-        self.pattern_combo.lineEdit().setPlaceholderText("History…")
+        self.pattern_combo.lineEdit().setPlaceholderText("History...")
         self.pattern_combo.setMinimumWidth(220)
         self.pattern_combo.setToolTip("Pick a saved pattern from history")
         self.pattern_combo.currentTextChanged.connect(self._on_pattern_combo_changed)
@@ -558,7 +729,7 @@ class MainWindow(QMainWindow):
         # Add Pair button (fix: avoid passing bool via clicked)
         btn_row_pairs = QHBoxLayout()
         self.add_pair_btn = QPushButton("Add Pair")
-        self.add_pair_btn.setToolTip("Add a pattern–replacement row. Use the minus to remove.")
+        self.add_pair_btn.setToolTip("Add a pattern-replacement row. Use the minus to remove.")
         self.add_pair_btn.clicked.connect(lambda: self.add_pair())
         btn_row_pairs.addWidget(self.add_pair_btn)
         btn_row_pairs.addSpacerItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
@@ -677,7 +848,7 @@ class MainWindow(QMainWindow):
         self._load_pattern_history()
         self._refresh_pattern_combo()
 
-        # Take periodic “default_*” snapshots on meaningful changes
+        # Take periodic "default_*" snapshots on meaningful changes
         self.input_edit.textChanged.connect(self._schedule_snapshot)  # add this
         self.input_edit.textChanged.connect(self._mark_edited_since_snapshot)
         self._snapshot_timer = QTimer(self)
@@ -1066,7 +1237,7 @@ class MainWindow(QMainWindow):
     def on_load_defaults(self):
         if self.DEFAULTS_PATH.exists():
             self.load_state(self.DEFAULTS_PATH)
-            # record digest of what’s on disk
+            # record digest of what's on disk
             try:
                 self._last_saved_digest = self._digest(self.DEFAULTS_PATH.read_bytes())
             except Exception:
