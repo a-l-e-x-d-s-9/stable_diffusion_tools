@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Add Reactions
 // @namespace    https://civitai.com/
-// @version      1.5
+// @version      1.6
 // @description  Add (or remove) 👍 and ❤️ reactions using keyboard shortcuts. Supports model preview, gallery carousel, image page, post page, and review carousel.
 // @author       You
 // @match        https://civitai.com/*
@@ -15,10 +15,10 @@
   const TARGET_EMOJIS = ['👍', '❤️'];
   const REACTION_RE = new RegExp(`[${TARGET_EMOJIS.join('')}]`);
 
-  const SLIDE_DELAY = 45;
-  const WAIT_FAST_MS = 200;
-  const WAIT_SLOW_MS = 200;
-  const MAX_SLIDES_FALLBACK = 120;
+    const SLIDE_DELAY = 65;
+    const WAIT_FAST_MS = 260;
+    const WAIT_SLOW_MS = 650;
+    const MAX_SLIDES_FALLBACK = 120;
 
   /* ───── helpers ───── */
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -65,10 +65,10 @@
     return false;
   }
 
-  function textHasTargetEmoji(el) {
-    const t = (el && el.textContent) ? el.textContent : '';
-    return REACTION_RE.test(t);
-  }
+function textHasTargetEmoji(el) {
+  const t = (el && el.textContent) ? el.textContent.trim() : '';
+  return t.startsWith('👍') || t.startsWith('❤️');
+}
 
   /* ───── reaction state detection (add-only safe) ───── */
   function getReactionContainer(el) {
@@ -180,13 +180,66 @@
     return [...root.querySelectorAll('button')].filter(textHasTargetEmoji);
   }
 
-  async function reactButtonsIn(root, mode) {
-    const btns = getReactionButtons(root);
-    for (const b of btns) {
-      await ensureFinalState(b, mode === 'add');
-      await sleep(25);
-    }
+  function groupTargetButtonsByContainer(root) {
+  const m = new Map();
+  for (const b of getReactionButtons(root)) {
+    const c = getReactionContainer(b) || b.parentElement;
+    if (!c) continue;
+    if (!m.has(c)) m.set(c, []);
+    m.get(c).push(b);
   }
+  return m;
+}
+
+function containerHasAnyPressedReaction(container) {
+  const baseline = getBaseline(container);
+  const badges = collectAllReactionBadgeButtons(container);
+
+  for (const b of badges) {
+    const st = readPressedState(b, baseline);
+
+    // If we cannot safely detect, treat as "already reacted" to avoid damage.
+    if (st === null) return true;
+
+    if (st === true) return true;
+  }
+  return false;
+}
+
+function pickAddButton(btns) {
+  // Prefer 👍 then ❤️ (TARGET_EMOJIS order)
+  for (const emo of TARGET_EMOJIS) {
+    const b = btns.find(x => ((x.textContent || '').trim().startsWith(emo)));
+    if (b) return b;
+  }
+  return btns[0] || null;
+}
+
+
+async function reactButtonsIn(root, mode) {
+  const groups = groupTargetButtonsByContainer(root);
+
+  for (const [container, btns] of groups.entries()) {
+    if (!container || !container.isConnected) continue;
+
+    if (mode === 'add') {
+      // If user already reacted with ANY emoji (including 😂 😢), never override it.
+      if (containerHasAnyPressedReaction(container)) continue;
+
+      const b = pickAddButton(btns);
+      if (b) await ensureFinalState(b, true);
+    } else {
+      // remove: only remove 👍/❤️ if they are the active reaction (ensureFinalState handles it safely)
+      for (const b of btns) {
+        await ensureFinalState(b, false);
+        await sleep(25);
+      }
+    }
+
+    await sleep(25);
+  }
+}
+
 
   /* ───── carousel navigation ───── */
   function findNextButton(root) {
@@ -226,7 +279,11 @@
       .map(el => el.getAttribute('src') || el.getAttribute('poster') || '')
       .join('|');
 
-    const activeDot = root.querySelector('div.flex.w-full.gap-px button[data-active="true"]');
+    const activeDot = root.querySelector(
+      'div.flex.w-full.gap-px button[data-active="true"], ' +
+      'div.flex.w-full.gap-px button[aria-current="true"], ' +
+      'div.flex.w-full.gap-px button[aria-selected="true"]'
+    );
     const activeIdx = activeDot ? [...activeDot.parentElement.querySelectorAll('button')].indexOf(activeDot) : -1;
 
     return `${hrefs}##${srcs}##${activeIdx}`;
@@ -443,7 +500,8 @@
       return;
     }
 
-    const buttons = [...document.querySelectorAll('button')].filter(b => REACTION_RE.test(b.textContent || ''));
+    const buttons = [...document.querySelectorAll('button')].filter(textHasTargetEmoji);
+
     if (buttons.length === 0) {
       notify('No reaction buttons found on this page.', 'info');
       return;
