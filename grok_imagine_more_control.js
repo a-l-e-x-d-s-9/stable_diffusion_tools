@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Prompt Manager Panel
 // @namespace    alexds9.scripts
-// @version      1.2.4
+// @version      1.2.7
 // @description  Draggable prompt panel with persistent seconds, prompt, and prompt history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -182,8 +182,8 @@
     const panel = css(el("div"), [
       "position: fixed",
       "top: 80px",
-      "left: calc(100vw - 560px)",
-      "width: 540px",
+      "left: calc(100vw - 450px)",
+      "width: 430px",
       "background: #1a1a1a",
       "border: 1px solid #333",
       "border-radius: 10px",
@@ -201,7 +201,7 @@
     const header = css(el("div"), [
       "display: flex",
       "align-items: center",
-      "justify-content: space-between",
+      "justify-content: flex-start",
       "gap: 10px",
       "cursor: move",
       "user-select: none",
@@ -209,19 +209,36 @@
     ].join(";"));
 
     const title = css(el("div", { textContent: "Prompt Manager" }), "font-size: 14px; font-weight: 700; color: #4ade80;");
-    const btnRow = css(el("div"), "display: flex; gap: 8px;");
+    title.style.flex = "1 1 auto";
+    const btnRow = css(el("div"), "display: flex; gap: 8px; margin-left: auto;");
 
-    const hideBtn = css(el("button", { textContent: "Hide" }), "background: none; border: 1px solid #333; color: #bbb; padding: 3px 8px; border-radius: 7px; cursor: pointer; font-size: 12px;");
+    const hideBtn = css(el("button", { textContent: "Minimize" }), "background: none; border: 1px solid #333; color: #bbb; padding: 3px 8px; border-radius: 7px; cursor: pointer; font-size: 12px;");
     const contentWrap = css(el("div"), "display: block;");
-    const fieldsGrid = css(el("div"), "display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; align-items: start;");
 
     let isFolded = false;
+
+    const PANEL_W_EXPANDED = "430px";
+    const PANEL_W_FOLDED = "210px";
 
     function applyFoldState(folded, persist) {
       isFolded = !!folded;
 
       contentWrap.style.display = isFolded ? "none" : "block";
-      hideBtn.textContent = isFolded ? "Show" : "Hide";
+      hideBtn.textContent = isFolded ? "Open" : "Minimize";
+
+      // Resize panel when minimized to remove empty space
+      panel.style.width = isFolded ? PANEL_W_FOLDED : PANEL_W_EXPANDED;
+      // Slightly tighter padding when minimized
+      panel.style.padding = isFolded ? "10px" : "12px";
+
+      // When folded, avoid a big empty gap between title and button
+      if (isFolded) {
+        title.style.flex = "0 0 auto";
+        btnRow.style.marginLeft = "8px";
+      } else {
+        title.style.flex = "1 1 auto";
+        btnRow.style.marginLeft = "auto";
+      }
 
       // Smaller when folded
       header.style.marginBottom = isFolded ? "0px" : "10px";
@@ -245,34 +262,87 @@
     header.appendChild(btnRow);
     panel.appendChild(header);
 
-    function group(labelText) {
-      const g = css(el("div"), "margin: 0;");
-      const lab = css(el("label", { textContent: labelText }), "display: block; margin: 0 0 3px 0; font-size: 11px; color: #ccc; line-height: 1.1;");
+
+    // Compact grid: 3 fields per row (consistent 2-line labels)
+    function group2(line1, line2) {
+      const g = css(el("div"), "display: flex; flex-direction: column; gap: 4px;");
+      const lab = css(el("div"), "font-size: 11px; color: #ccc; line-height: 1.05; min-height: 26px;");
+      const l1 = el("div"); l1.textContent = line1;
+      const l2 = css(el("div"), "font-size: 10px; color: #888;");
+      l2.textContent = line2 || " ";
+      lab.appendChild(l1);
+      lab.appendChild(l2);
       g.appendChild(lab);
-      return { g, lab };
+      return { g, lab, l1, l2 };
     }
 
-    // Seconds (persistent)
-    const secondsG = group("Seconds (note / preference)");
-    const secondsInput = css(el("input"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
-    secondsInput.id = 'exp-len';
+    function group(label) {
+      const s = String(label || '').trim();
+      if (!s) return group2('', '');
+      // Split into two lines to keep the grid aligned
+      const m = s.match(/^([^\s]+)\s*(.*)$/);
+      const line1 = (m && m[1]) ? m[1] : s;
+      const line2 = (m && m[2]) ? m[2].trim() : '';
+      return group2(line1, line2);
+    }
+
+
+    const grid = css(el("div"), "display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px;");
+
+    const inputCss = "width: 100%; padding: 6px 8px; height: 34px; background: #333; color: #fff; border: 1px solid #555; border-radius: 7px; font-size: 12px;";
+
+    // Row 1: Seconds, Resolution, Mode
+    const secondsG = group2("Seconds", " ");
+    const secondsInput = css(el("input"), inputCss);
+    secondsInput.id = "exp-len";
     secondsInput.type = "number";
     secondsInput.min = "1";
     secondsInput.max = "15";
     secondsInput.placeholder = "e.g. 15";
     secondsInput.value = savedSeconds;
-
-    secondsInput.addEventListener("input", () => {
-      lsSet(K_SECONDS, String(secondsInput.value || ""));
-    });
-
+    secondsInput.addEventListener("input", () => lsSet(K_SECONDS, String(secondsInput.value || "")));
     secondsG.g.appendChild(secondsInput);
 
-    // Aspect ratio (persistent, default unchanged)
-    const arG = group("Aspect ratio (default: unchanged)");
-    const arSelect = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
-    arSelect.id = 'exp-ar';
+    const resG = group2("Resolution", "Default/Unchanged");
+    const resSelect = css(el("select"), inputCss);
+    resSelect.id = "exp-resolutionName";
+    [
+      { label: "Default (Unchanged)", value: "" },
+      { label: "480p", value: "480p" },
+      { label: "720p", value: "720p" },
+    ].forEach(({ label, value }) => {
+      const opt = el("option");
+      opt.value = value;
+      opt.textContent = label;
+      resSelect.appendChild(opt);
+    });
+    resSelect.value = savedResolution;
+    resSelect.addEventListener("change", () => lsSet(K_RESOLUTION, resSelect.value || ""));
+    resG.g.appendChild(resSelect);
 
+    const modeG = group2("Mode", "Default/Unchanged");
+    const modeSelect = css(el("select"), inputCss);
+    modeSelect.id = "exp-mode";
+    [
+      { label: "Default (Unchanged)", value: "" },
+      { label: "custom", value: "custom" },
+      { label: "fun", value: "fun" },
+      { label: "normal", value: "normal" },
+      { label: "spicy", value: "spicy" },
+    ].forEach(({ label, value }) => {
+      const opt = el("option");
+      opt.value = value;
+      opt.textContent = label;
+      modeSelect.appendChild(opt);
+    });
+    modeSelect.value = savedMode;
+    modeSelect.addEventListener("change", () => lsSet(K_MODE, modeSelect.value || ""));
+    modeG.g.appendChild(modeSelect);
+
+    // Row 2: Aspect ratio, isVideoEdit, enableSideBySide
+    const arG = group2("Aspect ratio", "Default/Unchanged");
+    const arSelect = css(el("select"), inputCss);
+    arSelect.id = "exp-ar";
     [
       { label: "Default (Unchanged)", value: "" },
       { label: "1:1", value: "1:1" },
@@ -288,39 +358,12 @@
       opt.textContent = label;
       arSelect.appendChild(opt);
     });
-
     arSelect.value = savedAR;
-    arSelect.addEventListener("change", () => {
-      lsSet(K_AR, arSelect.value || "");
-    });
-
+    arSelect.addEventListener("change", () => lsSet(K_AR, arSelect.value || ""));
     arG.g.appendChild(arSelect);
 
-    // Mode (default unchanged)
-    const modeG = group("Mode (default: unchanged)");
-    const modeSelect = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
-    modeSelect.id = "exp-mode";
-    [
-      { label: "Default (Unchanged)", value: "" },
-      { label: "custom", value: "custom" },
-      { label: "fun", value: "fun" },
-      { label: "normal", value: "normal" },
-      { label: "spicy", value: "spicy" },
-    ].forEach(({ label, value }) => {
-      const opt = el("option");
-      opt.value = value;
-      opt.textContent = label;
-      modeSelect.appendChild(opt);
-    });
-    modeSelect.value = savedMode;
-    modeSelect.addEventListener("change", () => {
-      lsSet(K_MODE, modeSelect.value || "");
-    });
-    modeG.g.appendChild(modeSelect);
-
-    // isVideoEdit (default unchanged)
-    const iveG = group("isVideoEdit (default: unchanged)");
-    const iveSelect = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
+    const iveG = group2("isVideoEdit", "Default/Unchanged");
+    const iveSelect = css(el("select"), inputCss);
     iveSelect.id = "exp-isVideoEdit";
     [
       { label: "Default (Unchanged)", value: "" },
@@ -333,34 +376,11 @@
       iveSelect.appendChild(opt);
     });
     iveSelect.value = savedIsVideoEdit;
-    iveSelect.addEventListener("change", () => {
-      lsSet(K_IS_VIDEO_EDIT, iveSelect.value || "");
-    });
+    iveSelect.addEventListener("change", () => lsSet(K_IS_VIDEO_EDIT, iveSelect.value || ""));
     iveG.g.appendChild(iveSelect);
 
-    // resolutionName (default unchanged)
-    const resG = group("resolutionName (default: unchanged)");
-    const resSelect = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
-    resSelect.id = "exp-resolutionName";
-    [
-      { label: "Default (Unchanged)", value: "" },
-      { label: "480p", value: "480p" },
-      { label: "720p", value: "720p" },
-    ].forEach(({ label, value }) => {
-      const opt = el("option");
-      opt.value = value;
-      opt.textContent = label;
-      resSelect.appendChild(opt);
-    });
-    resSelect.value = savedResolution;
-    resSelect.addEventListener("change", () => {
-      lsSet(K_RESOLUTION, resSelect.value || "");
-    });
-    resG.g.appendChild(resSelect);
-
-    // enableSideBySide (default unchanged)
-    const sbsG = group("enableSideBySide (default: unchanged)");
-    const sbsSelect = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
+    const sbsG = group2("Side-by-side", "Default/Unchanged");
+    const sbsSelect = css(el("select"), inputCss);
     sbsSelect.id = "exp-enableSideBySide";
     [
       { label: "Default (Unchanged)", value: "" },
@@ -373,28 +393,15 @@
       sbsSelect.appendChild(opt);
     });
     sbsSelect.value = savedSideBySide;
-    sbsSelect.addEventListener("change", () => {
-      lsSet(K_SIDEBYSIDE, sbsSelect.value || "");
-    });
+    sbsSelect.addEventListener("change", () => lsSet(K_SIDEBYSIDE, sbsSelect.value || ""));
     sbsG.g.appendChild(sbsSelect);
 
-    // Field order (3 per row):
-    // Row 1: Seconds, Resolution, Mode
-    // Row 2: Aspect ratio, isVideoEdit, enableSideBySide
-    fieldsGrid.innerHTML = "";
-    fieldsGrid.appendChild(secondsG.g);
-    fieldsGrid.appendChild(resG.g);
-    fieldsGrid.appendChild(modeG.g);
-    fieldsGrid.appendChild(arG.g);
-    fieldsGrid.appendChild(iveG.g);
-    fieldsGrid.appendChild(sbsG.g);
-
-    contentWrap.appendChild(fieldsGrid);
-
+    [secondsG, resG, modeG, arG, iveG, sbsG].forEach((x) => grid.appendChild(x.g));
+    contentWrap.appendChild(grid);
 
     // Prompt history select
     const histG = group("Prompt history");
-    const select = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
+    const select = css(el("select"), "width: 100%; padding: 6px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
     refreshSelect(select, prompts);
 
     if (Number.isFinite(savedSelected) && savedSelected >= 0 && savedSelected < prompts.length) {
@@ -415,7 +422,7 @@
 
     // Prompt textarea (persistent)
     const promptG = group("Prompt (editable)");
-    const promptArea = css(el("textarea"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px; resize: vertical; font-size: 12px; min-height: 90px;");
+    const promptArea = css(el("textarea"), "width: 100%; padding: 6px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px; resize: vertical; font-size: 12px; min-height: 90px;");
     promptArea.id = 'exp-prompt';
     promptArea.placeholder = "Write or paste your prompt here. Newlines are kept.";
     promptArea.value = savedPrompt;
@@ -428,11 +435,11 @@
     contentWrap.appendChild(promptG.g);
 
     // Actions
-    const actions = css(el("div"), "display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px;");
+    const actions = css(el("div"), "display: flex; gap: 6px; margin-top: 6px; flex-wrap: nowrap;");
 
-    const newBtn = css(el("button", { textContent: "New" }), "background: #222; border: 1px solid #444; color: #ddd; padding: 7px; border-radius: 8px; cursor: pointer; font-size: 12px;");
-    const saveBtn = css(el("button", { textContent: "Save" }), "background: #1f2a1f; border: 1px solid #2b4; color: #e7ffe7; padding: 7px; border-radius: 8px; cursor: pointer; font-size: 12px;");
-    const delBtn = css(el("button", { textContent: "Delete" }), "background: #2a1f1f; border: 1px solid #844; color: #ffe7e7; padding: 7px; border-radius: 8px; cursor: pointer; font-size: 12px;");
+    const newBtn = css(el("button", { textContent: "New" }), "background: #222; border: 1px solid #444; color: #ddd; padding: 5px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;");
+    const saveBtn = css(el("button", { textContent: "Save" }), "background: #1f2a1f; border: 1px solid #2b4; color: #e7ffe7; padding: 5px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;");
+    const delBtn = css(el("button", { textContent: "Delete" }), "background: #2a1f1f; border: 1px solid #844; color: #ffe7e7; padding: 5px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;");
 
     const status = css(el("div"), "margin-top: 10px; padding: 8px; background: #000; border-radius: 6px; font-size: 11px; color: #aaa; max-height: 90px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;");
     status.id = 'exp-status';
@@ -498,6 +505,10 @@
       log("Deleted saved prompt.");
     };
 
+
+    newBtn.style.flex = "0 0 auto";
+    saveBtn.style.flex = "0 0 auto";
+    delBtn.style.flex = "0 0 auto";
 
     actions.appendChild(newBtn);
     actions.appendChild(saveBtn);
@@ -727,34 +738,42 @@
                 body.enableSideBySide = b;
             }
 
-            // 4. Prompt
+            // 4. Prompt (apply whenever non-empty, regardless of mode)
             const rawPrompt = document.getElementById("exp-prompt")?.value ?? "";
-            const promptSanitized = rawPrompt.trim();
+            const promptSanitized = String(rawPrompt || "").trim();
 
-            // New behavior: if prompt is not empty, inject it regardless of mode.
-            // Strategy:
-            // - If message contains a --mode=... flag: replace everything before that (except a leading URL token) with the prompt.
-            // - If no --mode=: append the prompt to the message (keeping leading URL if present).
             if (promptSanitized) {
-              let msg = String(body.message || "").trim();
+              const msg0 = String(body.message || "").trim();
 
-              const modeIdx = msg.toLowerCase().indexOf("--mode=");
+              // Keep the leading URL (first token) if present
+              let urlToken = "";
+              let rest = msg0;
+              const mUrl = msg0.match(/^(https?:\/\/\S+)\s*(.*)$/);
+              if (mUrl) {
+                urlToken = mUrl[1] || "";
+                rest = (mUrl[2] || "").trim();
+              }
 
-              let before = modeIdx >= 0 ? msg.slice(0, modeIdx).trim() : msg;
-              const after = modeIdx >= 0 ? msg.slice(modeIdx).trim() : "";
+              // Determine final mode: UI override wins, else keep existing --mode=..., else none
+              const uiMode2 = document.getElementById("exp-mode")?.value || "";
+              const mMode = msg0.match(/--mode=([^\s"]+)/i);
+              const existingMode = mMode ? (mMode[1] || "") : "";
+              const modeFinal = uiMode2 || existingMode || "";
 
-              // Preserve a leading URL token if present (common on video-edit payloads)
-              const urlM = before.match(/^(https?:\/\/[^\s"]+)/i);
-              const urlToken = urlM ? urlM[1] : "";
+              // Remove any existing --mode=... from the rest
+              rest = rest.replace(/--mode=[^\s"]+/ig, "").trim();
 
-              const rebuiltBefore = urlToken ? (urlToken + " " + promptSanitized) : promptSanitized;
-              msg = (rebuiltBefore + (after ? (" " + after) : "")).trim();
+              let newMsg = "";
+              if (urlToken) newMsg = (urlToken + " " + promptSanitized).trim();
+              else newMsg = promptSanitized;
 
-              body.message = msg;
+              if (modeFinal) newMsg = (newMsg + " --mode=" + modeFinal).trim();
+
+              body.message = newMsg;
+              log("Applied prompt override.");
             }
 
             // 5. Image Swap - unused
-
             const swapUrl = false; //document.getElementById('exp-url')?.value?.trim();
             if (swapUrl) {
                 const newUuid = extractUuid(swapUrl);
