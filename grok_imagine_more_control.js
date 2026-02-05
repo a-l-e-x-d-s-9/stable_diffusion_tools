@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Prompt Manager Panel
 // @namespace    alexds9.scripts
-// @version      1.2.1
+// @version      1.2.4
 // @description  Draggable prompt panel with persistent seconds, prompt, and prompt history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -18,6 +18,10 @@
   const K_PROMPTS = LS_PREFIX + "prompts";
   const K_SELECTED = LS_PREFIX + "selectedIndex";
   const K_AR = LS_PREFIX + "aspectRatio";
+  const K_MODE = LS_PREFIX + "mode";
+  const K_IS_VIDEO_EDIT = LS_PREFIX + "isVideoEdit";
+  const K_RESOLUTION = LS_PREFIX + "resolutionName";
+  const K_SIDEBYSIDE = LS_PREFIX + "enableSideBySide";
   const K_FOLDED = LS_PREFIX + "folded";
 
   function lsGet(key, fallback) {
@@ -169,13 +173,17 @@
     const savedPrompt = lsGet(K_CURRENT_PROMPT, "");
     const savedSelected = parseInt(lsGet(K_SELECTED, "-1"), 10);
     const savedAR = lsGet(K_AR, "");
+    const savedMode = lsGet(K_MODE, "");
+    const savedIsVideoEdit = lsGet(K_IS_VIDEO_EDIT, "");
+    const savedResolution = lsGet(K_RESOLUTION, "");
+    const savedSideBySide = lsGet(K_SIDEBYSIDE, "");
     const savedFolded = lsGet(K_FOLDED, "0") === "1";
 
     const panel = css(el("div"), [
       "position: fixed",
       "top: 80px",
-      "left: calc(100vw - 360px)",
-      "width: 340px",
+      "left: calc(100vw - 560px)",
+      "width: 540px",
       "background: #1a1a1a",
       "border: 1px solid #333",
       "border-radius: 10px",
@@ -205,6 +213,7 @@
 
     const hideBtn = css(el("button", { textContent: "Hide" }), "background: none; border: 1px solid #333; color: #bbb; padding: 3px 8px; border-radius: 7px; cursor: pointer; font-size: 12px;");
     const contentWrap = css(el("div"), "display: block;");
+    const fieldsGrid = css(el("div"), "display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; align-items: start;");
 
     let isFolded = false;
 
@@ -237,15 +246,15 @@
     panel.appendChild(header);
 
     function group(labelText) {
-      const g = css(el("div"), "margin-bottom: 10px;");
-      const lab = css(el("label", { textContent: labelText }), "display: block; margin-bottom: 5px; font-size: 12px; color: #ccc;");
+      const g = css(el("div"), "margin: 0;");
+      const lab = css(el("label", { textContent: labelText }), "display: block; margin: 0 0 3px 0; font-size: 11px; color: #ccc; line-height: 1.1;");
       g.appendChild(lab);
       return { g, lab };
     }
 
     // Seconds (persistent)
     const secondsG = group("Seconds (note / preference)");
-    const secondsInput = css(el("input"), "width: 100%; padding: 6px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
+    const secondsInput = css(el("input"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
     secondsInput.id = 'exp-len';
     secondsInput.type = "number";
     secondsInput.min = "1";
@@ -258,11 +267,10 @@
     });
 
     secondsG.g.appendChild(secondsInput);
-    contentWrap.appendChild(secondsG.g);
 
     // Aspect ratio (persistent, default unchanged)
     const arG = group("Aspect ratio (default: unchanged)");
-    const arSelect = css(el("select"), "width: 100%; padding: 6px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
+    const arSelect = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
     arSelect.id = 'exp-ar';
 
     [
@@ -287,12 +295,106 @@
     });
 
     arG.g.appendChild(arSelect);
-    contentWrap.appendChild(arG.g);
+
+    // Mode (default unchanged)
+    const modeG = group("Mode (default: unchanged)");
+    const modeSelect = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
+    modeSelect.id = "exp-mode";
+    [
+      { label: "Default (Unchanged)", value: "" },
+      { label: "custom", value: "custom" },
+      { label: "fun", value: "fun" },
+      { label: "normal", value: "normal" },
+      { label: "spicy", value: "spicy" },
+    ].forEach(({ label, value }) => {
+      const opt = el("option");
+      opt.value = value;
+      opt.textContent = label;
+      modeSelect.appendChild(opt);
+    });
+    modeSelect.value = savedMode;
+    modeSelect.addEventListener("change", () => {
+      lsSet(K_MODE, modeSelect.value || "");
+    });
+    modeG.g.appendChild(modeSelect);
+
+    // isVideoEdit (default unchanged)
+    const iveG = group("isVideoEdit (default: unchanged)");
+    const iveSelect = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
+    iveSelect.id = "exp-isVideoEdit";
+    [
+      { label: "Default (Unchanged)", value: "" },
+      { label: "true", value: "true" },
+      { label: "false", value: "false" },
+    ].forEach(({ label, value }) => {
+      const opt = el("option");
+      opt.value = value;
+      opt.textContent = label;
+      iveSelect.appendChild(opt);
+    });
+    iveSelect.value = savedIsVideoEdit;
+    iveSelect.addEventListener("change", () => {
+      lsSet(K_IS_VIDEO_EDIT, iveSelect.value || "");
+    });
+    iveG.g.appendChild(iveSelect);
+
+    // resolutionName (default unchanged)
+    const resG = group("resolutionName (default: unchanged)");
+    const resSelect = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
+    resSelect.id = "exp-resolutionName";
+    [
+      { label: "Default (Unchanged)", value: "" },
+      { label: "480p", value: "480p" },
+      { label: "720p", value: "720p" },
+    ].forEach(({ label, value }) => {
+      const opt = el("option");
+      opt.value = value;
+      opt.textContent = label;
+      resSelect.appendChild(opt);
+    });
+    resSelect.value = savedResolution;
+    resSelect.addEventListener("change", () => {
+      lsSet(K_RESOLUTION, resSelect.value || "");
+    });
+    resG.g.appendChild(resSelect);
+
+    // enableSideBySide (default unchanged)
+    const sbsG = group("enableSideBySide (default: unchanged)");
+    const sbsSelect = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
+    sbsSelect.id = "exp-enableSideBySide";
+    [
+      { label: "Default (Unchanged)", value: "" },
+      { label: "true", value: "true" },
+      { label: "false", value: "false" },
+    ].forEach(({ label, value }) => {
+      const opt = el("option");
+      opt.value = value;
+      opt.textContent = label;
+      sbsSelect.appendChild(opt);
+    });
+    sbsSelect.value = savedSideBySide;
+    sbsSelect.addEventListener("change", () => {
+      lsSet(K_SIDEBYSIDE, sbsSelect.value || "");
+    });
+    sbsG.g.appendChild(sbsSelect);
+
+    // Field order (3 per row):
+    // Row 1: Seconds, Resolution, Mode
+    // Row 2: Aspect ratio, isVideoEdit, enableSideBySide
+    fieldsGrid.innerHTML = "";
+    fieldsGrid.appendChild(secondsG.g);
+    fieldsGrid.appendChild(resG.g);
+    fieldsGrid.appendChild(modeG.g);
+    fieldsGrid.appendChild(arG.g);
+    fieldsGrid.appendChild(iveG.g);
+    fieldsGrid.appendChild(sbsG.g);
+
+    contentWrap.appendChild(fieldsGrid);
 
 
     // Prompt history select
     const histG = group("Prompt history");
-    const select = css(el("select"), "width: 100%; padding: 6px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
+    const select = css(el("select"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
     refreshSelect(select, prompts);
 
     if (Number.isFinite(savedSelected) && savedSelected >= 0 && savedSelected < prompts.length) {
@@ -313,7 +415,7 @@
 
     // Prompt textarea (persistent)
     const promptG = group("Prompt (editable)");
-    const promptArea = css(el("textarea"), "width: 100%; padding: 6px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px; resize: vertical; font-size: 12px; min-height: 90px;");
+    const promptArea = css(el("textarea"), "width: 100%; padding: 5px; font-size: 12px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px; resize: vertical; font-size: 12px; min-height: 90px;");
     promptArea.id = 'exp-prompt';
     promptArea.placeholder = "Write or paste your prompt here. Newlines are kept.";
     promptArea.value = savedPrompt;
@@ -590,22 +692,69 @@
                 }
             }
 
+
+            // 3. Mode (message flag --mode=...)
+            const uiMode = document.getElementById("exp-mode")?.value || "";
+            if (uiMode) {
+                const msg = String(body.message || "");
+                if (/--mode=[^\s"]+/i.test(msg)) {
+                    body.message = msg.replace(/--mode=[^\s"]+/i, `--mode=${uiMode}`);
+                } else {
+                    body.message = (msg + ` --mode=${uiMode}`).trim();
+                }
+            }
+
+            // 3b. isVideoEdit
+            const uiIsVideoEdit = document.getElementById("exp-isVideoEdit")?.value || "";
+            if (uiIsVideoEdit === "true" || uiIsVideoEdit === "false") {
+                const b = uiIsVideoEdit === "true";
+                log(`Overriding isVideoEdit: ${config.isVideoEdit} -> ${b}`);
+                config.isVideoEdit = b;
+            }
+
+            // 3c. resolutionName
+            const uiRes = document.getElementById("exp-resolutionName")?.value || "";
+            if (uiRes) {
+                log(`Overriding resolutionName: ${config.resolutionName} -> ${uiRes}`);
+                config.resolutionName = uiRes;
+            }
+
+            // 3d. enableSideBySide (top-level)
+            const uiSbs = document.getElementById("exp-enableSideBySide")?.value || "";
+            if (uiSbs === "true" || uiSbs === "false") {
+                const b = uiSbs === "true";
+                log(`Overriding enableSideBySide: ${body.enableSideBySide} -> ${b}`);
+                body.enableSideBySide = b;
+            }
+
             // 4. Prompt
             const rawPrompt = document.getElementById("exp-prompt")?.value ?? "";
             const promptSanitized = rawPrompt.trim();
 
+            // New behavior: if prompt is not empty, inject it regardless of mode.
+            // Strategy:
+            // - If message contains a --mode=... flag: replace everything before that (except a leading URL token) with the prompt.
+            // - If no --mode=: append the prompt to the message (keeping leading URL if present).
             if (promptSanitized) {
-              const request_message = String(body.message || "");
-              if (request_message.includes("--mode=normal")) {
-                body.message = request_message.replace(
-                  "--mode=normal",
-                  `${promptSanitized} --mode=custom`
-                );
-              }
+              let msg = String(body.message || "").trim();
+
+              const modeIdx = msg.toLowerCase().indexOf("--mode=");
+
+              let before = modeIdx >= 0 ? msg.slice(0, modeIdx).trim() : msg;
+              const after = modeIdx >= 0 ? msg.slice(modeIdx).trim() : "";
+
+              // Preserve a leading URL token if present (common on video-edit payloads)
+              const urlM = before.match(/^(https?:\/\/[^\s"]+)/i);
+              const urlToken = urlM ? urlM[1] : "";
+
+              const rebuiltBefore = urlToken ? (urlToken + " " + promptSanitized) : promptSanitized;
+              msg = (rebuiltBefore + (after ? (" " + after) : "")).trim();
+
+              body.message = msg;
             }
 
-
             // 5. Image Swap - unused
+
             const swapUrl = false; //document.getElementById('exp-url')?.value?.trim();
             if (swapUrl) {
                 const newUuid = extractUuid(swapUrl);
