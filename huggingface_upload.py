@@ -333,23 +333,31 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 # ------------- File Selection -------------
 
+def _abspath_no_resolve(p: Path) -> Path:
+    """Return an absolute path without dereferencing symlinks.
+
+    We intentionally avoid Path.resolve() here so that symlink *names* are preserved
+    for downstream relative-path and repo-path construction.
+    """
+    return Path(os.path.abspath(os.fspath(p)))
+
 def resolve_globs(base: str, patterns: List[str]) -> Set[Path]:
     matches: Set[Path] = set()
     base_path = Path(base)
+    import glob as _glob
     for pat in patterns:
         if os.path.isabs(pat):
-            import glob as _glob
             for p in _glob.glob(pat, recursive=True):
                 pth = Path(p)
                 if pth.is_file():
-                    matches.add(pth.resolve())
+                    matches.add(_abspath_no_resolve(pth))
             continue
-        import glob as _glob
         for p in _glob.glob(str(base_path / pat), recursive=True):
             pth = Path(p)
             if pth.is_file():
-                matches.add(pth.resolve())
+                matches.add(_abspath_no_resolve(pth))
     return matches
+
 
 def apply_excludes(files: Set[Path], base: str, exclude_patterns: List[str]) -> List[Path]:
     if not exclude_patterns:
