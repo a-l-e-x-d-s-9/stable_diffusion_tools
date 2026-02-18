@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Prompt Manager Panel
 // @namespace    alexds9.scripts
-// @version      1.2.7
+// @version      1.2.9
 // @description  Draggable prompt panel with persistent seconds, prompt, and prompt history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -77,8 +77,62 @@
     return t.slice(0, maxLen - 3) + "...";
   }
 
-  function refreshSelect(selectEl, prompts) {
-    const prev = Number(selectEl.value);
+  function escapeHtml(s) {
+    return String(s || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function escapeRegExp(s) {
+    return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  }
+
+  function buildHighlightedHtml(text, query) {
+    const src = String(text || "");
+    const q = String(query || "").trim();
+    if (!q) return escapeHtml(src);
+
+    const re = new RegExp(escapeRegExp(q), "gi");
+    let out = "";
+    let last = 0;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      const i = m.index;
+      const j = i + m[0].length;
+      out += escapeHtml(src.slice(last, i));
+      out += '<span class="gpm-hl">' + escapeHtml(src.slice(i, j)) + "</span>";
+      last = j;
+      if (m[0].length === 0) re.lastIndex++;
+    }
+    out += escapeHtml(src.slice(last));
+    return out;
+  }
+
+  function ensurePromptHighlightStyles() {
+    const id = "grok-prompt-mgr-style";
+    if (document.getElementById(id)) return;
+
+    const st = el("style");
+    st.id = id;
+    st.textContent = [
+      "#grok-prompt-mgr textarea.gpm-prompt::placeholder { color: #888; }",
+      "#grok-prompt-mgr .gpm-hl { background: rgba(74, 222, 128, 0.45); color: #eaffea; border-radius: 3px; }",
+      "#grok-prompt-mgr .gpm-highlighter { scrollbar-width: none; }",
+      "#grok-prompt-mgr .gpm-highlighter::-webkit-scrollbar { width: 0; height: 0; }",
+      "#grok-prompt-mgr .gpm-highlight-on .gpm-highlighter { display: block !important; }",
+      "#grok-prompt-mgr .gpm-highlight-on textarea.gpm-prompt { color: transparent !important; caret-color: #fff; }"
+    ].join("\n");
+    document.head.appendChild(st);
+  }
+
+
+
+  function refreshSelect(selectEl, prompts, indices) {
+    const prev = parseInt(String(selectEl.value || "-1"), 10);
     selectEl.innerHTML = "";
 
     const opt0 = el("option");
@@ -86,14 +140,17 @@
     opt0.textContent = "-- select saved prompt --";
     selectEl.appendChild(opt0);
 
-    prompts.forEach((p, i) => {
+    const idxs = Array.isArray(indices) ? indices : prompts.map((_, i) => i);
+
+    idxs.forEach((origIdx) => {
+      const p = prompts[origIdx];
       const opt = el("option");
-      opt.value = String(i);
-      opt.textContent = (i + 1) + ". " + truncateOneLine(p, 60);
+      opt.value = String(origIdx);
+      opt.textContent = (origIdx + 1) + ". " + truncateOneLine(p, 60);
       selectEl.appendChild(opt);
     });
 
-    if (Number.isFinite(prev) && prev >= 0 && prev < prompts.length) {
+    if (Number.isFinite(prev) && prev >= 0 && prev < prompts.length && idxs.includes(prev)) {
       selectEl.value = String(prev);
     } else {
       selectEl.value = "-1";
@@ -399,10 +456,25 @@
     [secondsG, resG, modeG, arG, iveG, sbsG].forEach((x) => grid.appendChild(x.g));
     contentWrap.appendChild(grid);
 
-    // Prompt history select
+    // Prompt history select + search
     const histG = group("Prompt history");
+
+    const searchRow = css(el("div"), "display: flex; gap: 6px; align-items: center; margin-bottom: 6px;");
+    const searchInput = css(el("input"), "flex: 1 1 auto; padding: 6px; height: 34px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px; font-size: 12px;");
+    searchInput.type = "text";
+    searchInput.placeholder = "Search in saved prompts...";
+    searchInput.autocomplete = "off";
+
+    const clearSearchBtn = css(el("button", { textContent: "Clear" }), "flex: 0 0 auto; background: #222; border: 1px solid #444; color: #ddd; padding: 5px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;");
+    clearSearchBtn.title = "Clear search";
+
+    searchRow.appendChild(searchInput);
+    searchRow.appendChild(clearSearchBtn);
+
     const select = css(el("select"), "width: 100%; padding: 6px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px;");
-    refreshSelect(select, prompts);
+    // Filled later by applySearchFilter()
+
+    const searchInfo = css(el("div"), "margin-top: 4px; font-size: 11px; color: #888;");
 
     if (Number.isFinite(savedSelected) && savedSelected >= 0 && savedSelected < prompts.length) {
       select.value = String(savedSelected);
@@ -414,25 +486,96 @@
       if (Number.isFinite(idx) && idx >= 0 && idx < prompts.length) {
         promptArea.value = prompts[idx];
         lsSet(K_CURRENT_PROMPT, promptArea.value);
+        updatePromptHighlighter();
       }
     });
 
+    histG.g.appendChild(searchRow);
     histG.g.appendChild(select);
+    histG.g.appendChild(searchInfo);
     contentWrap.appendChild(histG.g);
 
     // Prompt textarea (persistent)
+    ensurePromptHighlightStyles();
+
     const promptG = group("Prompt (editable)");
-    const promptArea = css(el("textarea"), "width: 100%; padding: 6px; background: #333; color: #fff; border: 1px solid #555; border-radius: 6px; resize: vertical; font-size: 12px; min-height: 90px;");
-    promptArea.id = 'exp-prompt';
+
+    const promptStack = css(el("div"), "position: relative; width: 100%; background: #333; border: 1px solid #555; border-radius: 6px; overflow: hidden;");
+    promptStack.className = "gpm-prompt-stack";
+
+    const highlighter = css(el("pre"), "position: absolute; inset: 0; margin: 0; padding: 6px; font-size: 12px; line-height: 1.25; font-family: inherit; white-space: pre-wrap; word-break: break-word; overflow: auto; pointer-events: none; color: #fff; display: none; box-sizing: border-box; z-index: 1;");
+    highlighter.className = "gpm-highlighter";
+
+    const promptArea = css(el("textarea"), "width: 100%; padding: 6px; background: transparent; color: #fff; border: none; resize: vertical; font-size: 12px; line-height: 1.25; font-family: inherit; min-height: 90px; outline: none; box-sizing: border-box; position: relative; z-index: 2;");
+    promptArea.className = "gpm-prompt";
+    promptArea.id = "exp-prompt";
     promptArea.placeholder = "Write or paste your prompt here. Newlines are kept.";
     promptArea.value = savedPrompt;
 
-    promptArea.addEventListener("input", () => {
-      lsSet(K_CURRENT_PROMPT, promptArea.value);
+    function updatePromptHighlighter() {
+      const q = String(searchInput.value || "").trim();
+      if (!q) {
+        promptStack.classList.remove("gpm-highlight-on");
+        highlighter.innerHTML = "";
+        return;
+      }
+      promptStack.classList.add("gpm-highlight-on");
+      highlighter.innerHTML = buildHighlightedHtml(promptArea.value, q);
+      highlighter.scrollTop = promptArea.scrollTop;
+      highlighter.scrollLeft = promptArea.scrollLeft;
+    }
+
+    function applySearchFilter() {
+      const qRaw = String(searchInput.value || "");
+      const q = qRaw.trim().toLowerCase();
+
+      let indices = null;
+      if (q) {
+        indices = [];
+        for (let i = 0; i < prompts.length; i++) {
+          const p = String(prompts[i] || "").toLowerCase();
+          if (p.includes(q)) indices.push(i);
+        }
+      }
+
+      refreshSelect(select, prompts, indices);
+
+      const shown = Array.isArray(indices) ? indices.length : prompts.length;
+      if (q) searchInfo.textContent = "Showing " + shown + " of " + prompts.length + " prompts.";
+      else searchInfo.textContent = "Showing all " + prompts.length + " prompts.";
+
+      const disabled = !qRaw.trim();
+      clearSearchBtn.disabled = disabled;
+      clearSearchBtn.style.opacity = disabled ? "0.5" : "1";
+
+      updatePromptHighlighter();
+    }
+
+    searchInput.addEventListener("input", applySearchFilter);
+    clearSearchBtn.addEventListener("click", () => {
+      searchInput.value = "";
+      applySearchFilter();
+      searchInput.focus();
     });
 
-    promptG.g.appendChild(promptArea);
+    promptArea.addEventListener("input", () => {
+      lsSet(K_CURRENT_PROMPT, promptArea.value);
+      updatePromptHighlighter();
+    });
+
+    promptArea.addEventListener("scroll", () => {
+      highlighter.scrollTop = promptArea.scrollTop;
+      highlighter.scrollLeft = promptArea.scrollLeft;
+    });
+
+    promptStack.appendChild(highlighter);
+    promptStack.appendChild(promptArea);
+
+    promptG.g.appendChild(promptStack);
     contentWrap.appendChild(promptG.g);
+
+    // Initial fill
+    applySearchFilter();
 
     // Actions
     const actions = css(el("div"), "display: flex; gap: 6px; margin-top: 6px; flex-wrap: nowrap;");
@@ -486,7 +629,7 @@
       }
 
       saveJson(K_PROMPTS, prompts);
-      refreshSelect(select, prompts);
+      applySearchFilter();
       select.value = String(idx);
       lsSet(K_SELECTED, String(idx));
     };
@@ -499,7 +642,7 @@
       }
       prompts.splice(idx, 1);
       saveJson(K_PROMPTS, prompts);
-      refreshSelect(select, prompts);
+      applySearchFilter();
       select.value = "-1";
       lsSet(K_SELECTED, "-1");
       log("Deleted saved prompt.");
