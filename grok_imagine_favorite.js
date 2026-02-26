@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Quick Favorite (Heart) Button
 // @namespace    grok_imagine_favorite
-// @version      0.41.9
+// @version      0.41.10
 // @description  Adds a heart button on media tiles. Better per-tile UUID detection + debug dump of all candidate UUIDs/URLs.
 // @match        https://grok.com/imagine*
 // @match        https://www.grok.com/imagine*
@@ -159,12 +159,53 @@
     try { return decodeURIComponent(hit.split('=').slice(1).join('=')); } catch { return hit.split('=').slice(1).join('='); }
   }
 
+  function getStatsigId() {
+    try {
+      // Common places Statsig stable id can live
+      const lsKeys = [
+        'x-statsig-id',
+        'statsigStableID',
+        'statsig_stable_id',
+        'STATSIG_STABLE_ID',
+        'statsigStableId',
+      ];
+      for (const k of lsKeys) {
+        const v = localStorage.getItem(k);
+        if (v && String(v).trim().length > 10) return String(v).trim();
+      }
+
+      // Meta fallback (sometimes present)
+      const m = document.querySelector('meta[name="x-statsig-id"]');
+      if (m && m.content && m.content.trim().length > 10) return m.content.trim();
+
+      // Last-resort: some apps expose it on window
+      const w = window;
+      const cand =
+        (w.__STATSIG__ && (w.__STATSIG__.stableID || w.__STATSIG__.stableId)) ||
+        (w.Statsig && typeof w.Statsig.getStableID === 'function' && w.Statsig.getStableID());
+      if (cand && String(cand).trim().length > 10) return String(cand).trim();
+
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   function buildHeaders() {
     const h = {
       'accept': '*/*',
       'content-type': 'application/json',
       'x-xai-request-id': uuidv4(),
     };
+
+    // These are sometimes enforced on some accounts/regions
+    const statsig = getStatsigId();
+    if (statsig) h['x-statsig-id'] = statsig;
+
+    // Some flows expect x-userid as header (it is also a cookie)
+    const xu = cookieVal('x-userid');
+    if (xu) h['x-userid'] = xu;
+
     for (const k of ['x-challenge','x-signature','x-anon-token','x-anonuserid']) {
       const v = cookieVal(k);
       if (v) h[k] = v;
@@ -690,11 +731,11 @@
     try {
       if (!cardEl || !cardEl.querySelector('video')) return null;
 
-      // 1) Prefer the media post id from the current route (/imagine/post/<uuid>)
+      // 1) Best: URL /imagine/post/<uuid>
       const urlId = extractPostIdFromLocation();
       if (urlId && UUID_ONE.test(urlId)) return urlId;
 
-      // 2) Prefer a nearby dataset id (common on tiles / some viewers)
+      // 2) Dataset attributes
       const holder =
         cardEl.closest('[data-grok-post-id]') ||
         cardEl.closest('[data-post-id]') ||
@@ -710,30 +751,40 @@
         if (UUID_ONE.test(ds2 || '')) return String(ds2).toLowerCase();
       }
 
-      // 2.5) On tiles, the post id is usually embedded in /generated/<postId>/... URLs (avoid picking the user id)
+      // 3) React fiber: if we can see a VIDEO post object, trust its id
+      try {
+        const r = findBestPostViaReact(cardEl);
+        if (r && r.post && UUID_ONE.test(r.post.id || '') && (r.wantType || '').includes('VIDEO')) {
+          return String(r.post.id).toLowerCase();
+        }
+        // If wantType detection fails, still accept a VIDEO-ish post
+        if (r && r.post && UUID_ONE.test(r.post.id || '') && String(r.post.mediaType || '').includes('VIDEO')) {
+          return String(r.post.id).toLowerCase();
+        }
+      } catch {}
+
+      // 4) Generated URL parsing (avoid userId confusion)
       const mediaUrl = pickBestMediaUrl(cardEl);
       const genIdFromMedia = extractPostIdFromGeneratedUrl(mediaUrl);
       if (genIdFromMedia) return genIdFromMedia;
 
-      // 3) Last resort: infer id from video src. Prefer /generated/<postId>/... over the first UUID in the URL.
+      // 5) Video element src parsing
       const v = cardEl.querySelector('video[src], video source[src]');
       if (v) {
         const src = String(v.getAttribute('src') || v.src || '');
         const genId = extractPostIdFromGeneratedUrl(src);
         if (genId) return genId;
 
-        // Fallback: use the LAST UUID in the URL (the first is often the user id).
+        // Last UUID in the URL is usually the post id (first can be user id)
         const all = src.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/ig);
         if (all && all.length) return String(all[all.length - 1]).toLowerCase();
       }
-
 
       return null;
     } catch {
       return null;
     }
   }
-
 
   function shouldShowUpscaleButton(cardEl) {
     try {
@@ -772,6 +823,7 @@
         throw new Error('Could not determine videoId for upscale');
       }
 
+      log('Upscale request:', { videoId, href: location.href });
       const res = await apiPost('/rest/media/video/upscale', { videoId });
 
       if (!res) throw new Error('No response from upscale API');
@@ -930,7 +982,10 @@
     if (!res) return { ok: false, status: 0, postId: null, text: 'no response' };
 
     const txt = await res.text().catch(() => '');
-    if (!res.ok) return { ok: false, status: res.status, postId: null, text: txt };
+    if (!res.ok) {
+        try { log('Upscale response headers:', Array.from(res.headers.entries())); } catch {}
+        return { ok: false, status: res.status, postId: null, text: txt };
+    }
 
     try {
       const j = txt ? JSON.parse(txt) : {};
