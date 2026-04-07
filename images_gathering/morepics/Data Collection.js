@@ -8,6 +8,8 @@
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=pornpics.com
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
 // @grant        GM_registerMenuCommand
 // @run-at       document-idle
 // ==/UserScript==
@@ -15,9 +17,79 @@
 (function() {
     'use strict';
 
-    var currentUrl = window.location.href;
-    var storedData = JSON.parse(GM_getValue("storedData", "{}"));
+    function normalizeGalleryUrl(url) {
+        try {
+            const u = new URL(url, window.location.origin);
+            u.searchParams.delete("extra");
+            u.hash = "";
+            return u.toString();
+        } catch (e) {
+            return url;
+        }
+    }
+
+    var currentUrl = normalizeGalleryUrl(window.location.href);
     var autoStoreData = GM_getValue("autoStoreData", false);
+
+    const DATA_KEY_PREFIX = "catpics:data:";
+
+    function pageDataKey(url) {
+        return DATA_KEY_PREFIX + normalizeGalleryUrl(url);
+    }
+
+    function getAllStoredData() {
+        const out = {};
+        const keys = GM_listValues();
+
+        for (const key of keys) {
+            if (!key.startsWith(DATA_KEY_PREFIX)) continue;
+            try {
+                const entry = JSON.parse(GM_getValue(key, "null"));
+                if (entry && entry.url) {
+                    out[normalizeGalleryUrl(entry.url)] = entry;
+                }
+            } catch (e) {
+                console.error("Failed to parse stored entry for key:", key, e);
+            }
+        }
+
+        return out;
+    }
+
+    function getStoredCount() {
+        let count = 0;
+        const keys = GM_listValues();
+        for (const key of keys) {
+            if (key.startsWith(DATA_KEY_PREFIX)) count++;
+        }
+        return count;
+    }
+
+    const OPENED_LINKS_KEY = "openAllOpenedLinks";
+    const openedLinks = new Set(JSON.parse(GM_getValue(OPENED_LINKS_KEY, "[]")));
+
+    function saveOpenedLinks() {
+        GM_setValue(OPENED_LINKS_KEY, JSON.stringify(Array.from(openedLinks)));
+    }
+
+    function markLinkOpened(url) {
+        const normalized = normalizeGalleryUrl(url);
+        if (!openedLinks.has(normalized)) {
+            openedLinks.add(normalized);
+            saveOpenedLinks();
+        }
+    }
+
+    function hasLinkBeenOpened(url) {
+        const normalized = normalizeGalleryUrl(url);
+        return openedLinks.has(normalized) || !!GM_getValue(pageDataKey(normalized), null);
+    }
+
+    function clearOpenedLinks() {
+        openedLinks.clear();
+        saveOpenedLinks();
+        console.log("Cleared opened links cache");
+    }
 
     // Create a fixed counter element
     var counter = document.createElement('div');
@@ -27,25 +99,37 @@
     counter.style.fontSize = '55px';
     counter.style.color = 'red';
     counter.style.zIndex = '9999'; // ensures counter is always on top
-    counter.innerHTML = Object.keys(storedData).length;
-    document.body.appendChild(counter);
+    counter.innerHTML = getStoredCount();
+    function attachCounter() {
+        if (document.body && !counter.isConnected) {
+            document.body.appendChild(counter);
+        }
+    }
+
+    attachCounter();
+    document.addEventListener("DOMContentLoaded", attachCounter);
 
     function updateCounter() {
-        counter.innerHTML = Object.keys(storedData).length;
+        counter.innerHTML = getStoredCount();
     }
 
     function removeDataFromList(imageUrl) {
-        delete storedData[imageUrl];
-        GM_setValue("storedData", JSON.stringify(storedData));
+        const normalized = normalizeGalleryUrl(imageUrl);
+        GM_deleteValue(pageDataKey(normalized));
         updateCounter();
     }
 
     function addDataToList(url, data) {
-        if (!storedData[url]) {
-            storedData[url] = data;
-            GM_setValue("storedData", JSON.stringify(storedData));
-            updateCounter();
-        }
+        const normalized = normalizeGalleryUrl(url);
+        const key = pageDataKey(normalized);
+
+        const payload = {
+            ...data,
+            url: normalized
+        };
+
+        GM_setValue(key, JSON.stringify(payload));
+        updateCounter();
     }
 
     function removeCurrentPageData() {
@@ -55,16 +139,21 @@
 
     async function copyToClipboard() {
         try {
-            let dataStrings = JSON.stringify(storedData, null, 2);
+            const storedData = getAllStoredData();
+            const dataStrings = JSON.stringify(storedData, null, 2);
             await navigator.clipboard.writeText(dataStrings);
         } catch (err) {
-            console.error('Failed to copy data: ', err);
+            console.error("Failed to copy data: ", err);
         }
     }
 
     function clearList() {
-        storedData = {};
-        GM_setValue("storedData", JSON.stringify(storedData));
+        const keys = GM_listValues();
+        for (const key of keys) {
+            if (key.startsWith(DATA_KEY_PREFIX)) {
+                GM_deleteValue(key);
+            }
+        }
         updateCounter();
     }
 
@@ -83,102 +172,255 @@
         return hrefs;
     }
 
-    function open_all_links(){
-        let desired_pages = 55;
 
-        // Function to scroll and load more elements
-        function scrollToLoadMore(finalCount, callback) {
-            let lastCount = 0;
-            let noChangeCount = 0; // Counter to track how many times the content count hasn't changed
-            const maxNoChange = 3; // Number of intervals to wait with no change before assuming all content has loaded
+    function open_all_links() {
+        const max_parallel_tabs = 5;
+        const check_every_ms = 250;
+        const page_timeout_ms = 15000;
+        const retry_limit = 1;
 
-            let intervalId = setInterval(() => {
-                window.scrollTo(0, document.body.scrollHeight); // Scroll to the bottom of the page
-                let currentCount = extract_valid_link().length;
+        const queuedUrls = new Set();
+        let activeCount = 0;
+        let finishedCount = 0;
+        let producerDone = false;
+        let noNewLinksRounds = 0;
 
-                // Check if we've reached the final count or if there's been no change for maxNoChange intervals
-                if (currentCount >= finalCount || noChangeCount >= maxNoChange) {
-                    clearInterval(intervalId); // Stop scrolling
-                    callback(); // Proceed after scrolling
-                } else if (lastCount === currentCount) {
-                    // If the count hasn't changed, increment noChangeCount
-                    noChangeCount++;
-                } else {
-                    // If new content was loaded, reset noChangeCount and update lastCount
-                    noChangeCount = 0;
-                    lastCount = currentCount;
+        const queue = [];
+
+        function maybeNotifyProgress() {
+            if (finishedCount > 0 && finishedCount % 44 === 1) {
+                window.focus();
+                if (Notification.permission === "granted") {
+                    new Notification("Time to check back on your process!");
                 }
-            }, 1500); // Adjust time as needed for your site's loading behavior
+            }
         }
 
+        function isSameOriginAccessible(win) {
+            try {
+                return !!win && !!win.location && win.location.origin === window.location.origin;
+            } catch (e) {
+                return false;
+            }
+        }
 
-        scrollToLoadMore(desired_pages, () => {
-            // After scrolling and loading, proceed to open links
-            let hrefs = extract_valid_link().slice(0, desired_pages); // Get up to desired_pages links
+        function isChromeErrorPage(win) {
+            try {
+                return !!win && !!win.location && String(win.location.href).startsWith("chrome-error://");
+            } catch (e) {
+                return false;
+            }
+        }
 
-            console.log('scrollToLoadMore: ' + hrefs.length);
-            console.log('scrollToLoadMore: ' + hrefs.length);
+        function enqueueDiscoveredLinks() {
+            const hrefs = extract_valid_link()
+                .map(href => normalizeGalleryUrl(href))
+                .filter((href, index, arr) => arr.indexOf(href) === index);
 
-            if (hrefs.length > 0) {
+            let added = 0;
 
-//                // Modify all hrefs except the last to add "?extra=autoclose"
-//                for (let i = 0; i < hrefs.length - 1; i++) {
-//                    let url = new URL(hrefs[i]);
-//                    url.searchParams.append("extra", "autoclose"); // Add the query parameter for auto-closing
-//                    hrefs[i] = url.toString(); // Update the href with the modified URL
-//                }
+            for (const href of hrefs) {
+                if (hasLinkBeenOpened(href)) continue;
+                if (queuedUrls.has(href)) continue;
 
-                // Modify only the last href to add "?extra=copy"
-                let lastUrl = new URL(hrefs[hrefs.length - 1]);
-                lastUrl.searchParams.append("extra", "copy"); // Add the query parameter
-                hrefs[hrefs.length - 1] = lastUrl.toString(); // Update the last href with the modified URL
+                queuedUrls.add(href);
+                queue.push({
+                    normalizedUrl: href,
+                    openUrl: href,
+                    retries: 0
+                });
+                added++;
             }
 
-            function openLink(index) {
-                if (index >= hrefs.length) return; // No more links
+            console.log("Discovered total links on page:", hrefs.length, "newly queued:", added, "queue size:", queue.length);
+            return added;
+        }
 
-                let wait_milliseconds = 250;
-                let timeout_counter_maximum = 15000 / wait_milliseconds;
-                const win = window.open(hrefs[index], '_blank');
-                if (win) {
-                    //win.focus();
-                    let timeout_counter = 0;
-                    const checkLoad = setInterval(() => {
-                        let is_done = false;
-                        if (win.document.readyState === 'complete') {
-                            console.log("waiting for childMutationObserver")
-                            if (win.document && win.document.body.getAttribute('data-child-ready') === 'true') {
-                                clearInterval(checkLoad);
-                                if (index + 1 < hrefs.length) {
-                                    win.close(); // Close the tab if you're done with it
-                                    openLink(index + 1); // Open the next link
-                                }else{
-                                    window.close();
-                                }
+        function maybeFinishParent() {
+            if (producerDone && activeCount === 0 && queue.length === 0) {
+                console.log("Open All Links finished");
+                copyToClipboard().catch(err => console.error("Final clipboard copy failed:", err));
+                window.close();
+            }
+        }
 
-                            }
-                            if (1 == (index % 44)){
-                                window.focus();
-                                if (Notification.permission === "granted") {
-                                    new Notification("Time to check back on your process!");
-                                }
-                            }
-                            timeout_counter += 1;
-                            if (is_done === false){
-                                if (timeout_counter_maximum < timeout_counter){
-                                    win.close();
-                                    openLink(index);
-                                }
-                            }
+        function launchMore() {
+            while (activeCount < max_parallel_tabs && queue.length > 0) {
+                const item = queue.shift();
+                openOne(item);
+            }
+            maybeFinishParent();
+        }
+
+        function openOne(item) {
+
+            const win = window.open(item.openUrl, "_blank");
+            if (!win) {
+                console.log("Popup blocked or window could not be opened:", item.openUrl);
+                finishedCount++;
+                maybeNotifyProgress();
+                launchMore();
+                return;
+            }
+
+            activeCount++;
+
+            const timeout_counter_maximum = Math.ceil(page_timeout_ms / check_every_ms);
+            let timeout_counter = 0;
+
+            const checkLoad = setInterval(() => {
+                try {
+                    if (win.closed) {
+                        clearInterval(checkLoad);
+                        activeCount--;
+                        finishedCount++;
+                        maybeNotifyProgress();
+                        launchMore();
+                        return;
+                    }
+
+                    if (isChromeErrorPage(win)) {
+                        clearInterval(checkLoad);
+                        try { win.close(); } catch (e) {}
+                        activeCount--;
+
+                        if (item.retries < retry_limit) {
+                            item.retries += 1;
+                            queue.push(item);
+                        } else {
+                            console.log("Skipping chrome-error page:", item.normalizedUrl);
+                            finishedCount++;
                         }
-                    }, wait_milliseconds);
-                } else {
-                    console.log('Popup blocked or window could not be opened');
-                }
-            }
 
-            openLink(0); // Start opening links after all desired elements are loaded
-        });
+                        maybeNotifyProgress();
+                        launchMore();
+                        return;
+                    }
+
+                    if (!isSameOriginAccessible(win)) {
+                        timeout_counter++;
+                        if (timeout_counter > timeout_counter_maximum) {
+                            clearInterval(checkLoad);
+                            try { win.close(); } catch (e) {}
+                            activeCount--;
+
+                            if (item.retries < retry_limit) {
+                                item.retries += 1;
+                                queue.push(item);
+                            } else {
+                                console.log("Skipping inaccessible page:", item.normalizedUrl);
+                                finishedCount++;
+                            }
+
+                            maybeNotifyProgress();
+                            launchMore();
+                        }
+                        return;
+                    }
+
+                    const doc = win.document;
+                    const body = doc && doc.body;
+                    const readyState = doc ? doc.readyState : "";
+                    const title = doc && doc.title ? doc.title.toLowerCase() : "";
+                    const bodyText = body && body.innerText ? body.innerText.slice(0, 1200).toLowerCase() : "";
+
+                    const childReady = !!(body && body.getAttribute("data-child-ready") === "true");
+                    const copyFinished = !!(body && body.getAttribute("data-copy-finished") === "true");
+                    const is404 =
+                        title.includes("404") ||
+                        bodyText.includes("404") ||
+                        bodyText.includes("page not found") ||
+                        bodyText.includes("not found");
+
+                    if (readyState === "complete" && (childReady || copyFinished || is404)) {
+                        clearInterval(checkLoad);
+                        markLinkOpened(item.normalizedUrl);
+                        try { win.close(); } catch (e) {}
+
+                        activeCount--;
+                        finishedCount++;
+                        maybeNotifyProgress();
+                        launchMore();
+                        return;
+                    }
+
+                    timeout_counter++;
+                    if (timeout_counter > timeout_counter_maximum) {
+                        clearInterval(checkLoad);
+                        try { win.close(); } catch (e) {}
+
+                        activeCount--;
+
+                        if (item.retries < retry_limit) {
+                            item.retries += 1;
+                            queue.push(item);
+                        } else {
+                            console.log("Skipping timed out page:", item.normalizedUrl);
+                            finishedCount++;
+                        }
+
+                        maybeNotifyProgress();
+                        launchMore();
+                    }
+                } catch (err) {
+                    clearInterval(checkLoad);
+                    try { win.close(); } catch (e) {}
+                    activeCount--;
+
+                    if (item.retries < retry_limit) {
+                        item.retries += 1;
+                        queue.push(item);
+                    } else {
+                        console.log("Skipping failed page:", item.normalizedUrl, err);
+                        finishedCount++;
+                    }
+
+                    maybeNotifyProgress();
+                    launchMore();
+                }
+            }, check_every_ms);
+        }
+
+        function producerTick() {
+            const beforeQueued = queue.length + activeCount;
+            window.scrollTo(0, document.body.scrollHeight);
+
+            setTimeout(() => {
+                const added = enqueueDiscoveredLinks();
+
+                if (added === 0) {
+                    noNewLinksRounds++;
+                } else {
+                    noNewLinksRounds = 0;
+                }
+
+                launchMore();
+
+                const afterQueued = queue.length + activeCount;
+                console.log("Producer tick - active:", activeCount, "queue:", queue.length, "finished:", finishedCount);
+
+                if (noNewLinksRounds >= 4) {
+                    producerDone = true;
+
+                    if (queue.length > 0) {
+                        const lastQueued = queue[queue.length - 1];
+                        const lastUrl = new URL(lastQueued.openUrl);
+                        lastUrl.searchParams.set("extra", "copy");
+                        lastQueued.openUrl = lastUrl.toString();
+                    }
+
+                    console.log("No new links after several scroll rounds, finishing producer");
+                    maybeFinishParent();
+                    return;
+                }
+
+                producerTick();
+            }, 900);
+        }
+
+        enqueueDiscoveredLinks();
+        launchMore();
+        producerTick();
     }
 
     GM_registerMenuCommand('Copy data to Clipboard', copyToClipboard);
@@ -186,61 +428,64 @@
     GM_registerMenuCommand('Remove current page data', removeCurrentPageData);
     GM_registerMenuCommand('Open all links', open_all_links);
     GM_registerMenuCommand('Find most popular model name', findMostPopularModelNameShow);
+    GM_registerMenuCommand("Clear opened links cache", clearOpenedLinks);
 
     let is_ready = false;
 
-    const observer = new MutationObserver((mutations) => {
-        // React to mutations here
-//        if (window.opener) {
-//            // Send a message to the parent window
-//            // Replace "http://example.com" with the actual origin of the parent window
-//            window.opener.postMessage('MutationObserver', 'http://pornpics.com');
-//        }
-
-        const urlParams = new URLSearchParams(window.location.search);
-        const extra = urlParams.get('extra');
-        console.log("MutationObserver")
-
-
-        if (is_ready == false){
+    function markChildReady() {
+        if (!is_ready && document.body) {
             is_ready = true;
-
-            //window.childMutationObserver = true;
-            document.body.setAttribute('data-child-ready', 'true');
+            document.body.setAttribute("data-child-ready", "true");
         }
+    }
 
+    function markCopyFinished() {
+        if (document.body) {
+            document.body.setAttribute("data-copy-finished", "true");
+        }
+    }
+
+    const observer = new MutationObserver(() => {
+        console.log("MutationObserver");
+        markChildReady();
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+
+    if (document.body) {
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
 
     window.onload = () => {
-    //function run_on_load(){
         const urlParams = new URLSearchParams(window.location.search);
-        const extra = urlParams.get('extra');
-        console.log("window.onload")
+        const extra = urlParams.get("extra");
+        console.log("window.onload");
 
-        if (extra === 'autoclose') {
+        markChildReady();
+
+        if (extra === "autoclose") {
             window.close();
         }
 
-        if (extra === 'copy') {
-            copyToClipboard();
+        if (extra === "copy") {
             makePageBlink();
-            fetch("http://localhost:5001/trigger?message=reached_last_for_actress")
-              .then(response => response.text()) // or response.json() if the server responds with JSON
-              .then(data =>
-              {
-                console.log(data);
-                window.close();
-              })
-              .catch(error => console.error('Error:', error));
-            //window.close();
-        }
 
+            fetch("http://localhost:5001/trigger?message=reached_last_for_actress")
+                .then(response => response.text())
+                .then(data => {
+                    console.log(data);
+                    markCopyFinished();
+                    window.close();
+                })
+                .catch(error => {
+                    console.error("Error:", error);
+                    markCopyFinished();
+                    window.close();
+                });
+        }
     };
 
-    document.addEventListener('DOMContentLoaded', (event) => {
-        console.log('DOM fully loaded and parsed');
-        // Your code here
+    document.addEventListener("DOMContentLoaded", () => {
+        console.log("DOM fully loaded and parsed");
+        markChildReady();
     });
 
     function waitForElement(selector, callback) {
@@ -255,11 +500,12 @@
 
     waitForElement("body", function() {
         console.log("Loaded!");
-        const urlParams = new URLSearchParams(window.location.search);
-        const extra = urlParams.get('extra');
+        markChildReady();
 
-//        run_on_load();
-        if (extra === 'auto_download_all') {
+        const urlParams = new URLSearchParams(window.location.search);
+        const extra = urlParams.get("extra");
+
+        if (extra === "auto_download_all") {
             clearList();
             open_all_links();
         }
@@ -270,25 +516,23 @@
         alert(findMostPopularModelName());
     }
 
-    function findMostPopularModelName() {
-        const nameCount = {}; // Object to hold name counts
 
-        // Iterate over each entry in storedData
+    function findMostPopularModelName() {
+        const nameCount = {};
+        const storedData = getAllStoredData();
+
         Object.values(storedData).forEach(entry => {
-            // Iterate over each name in the modelName array
-            entry.modelName.forEach(name => {
-                // If the name doesn't exist in nameCount, initialize it with 0
+            (entry.modelName || []).forEach(name => {
                 if (!nameCount[name]) {
                     nameCount[name] = 0;
                 }
-                // Increment the count for this name
                 nameCount[name]++;
             });
         });
 
-        // Find the name with the highest count
         let mostPopularName = "";
         let maxCount = 0;
+
         Object.entries(nameCount).forEach(([name, count]) => {
             if (count > maxCount) {
                 maxCount = count;
