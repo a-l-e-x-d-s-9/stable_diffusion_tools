@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Add Reactions
 // @namespace    https://civitai.com/
-// @version      1.6
+// @version      1.62
 // @description  Add (or remove) 👍 and ❤️ reactions using keyboard shortcuts. Supports model preview, gallery carousel, image page, post page, and review carousel.
 // @author       You
 // @match        https://civitai.com/*
@@ -11,16 +11,16 @@
 (() => {
   'use strict';
 
-  /* ───── config ───── */
+  /* ----- config ----- */
   const TARGET_EMOJIS = ['👍', '❤️'];
   const REACTION_RE = new RegExp(`[${TARGET_EMOJIS.join('')}]`);
 
-    const SLIDE_DELAY = 65;
-    const WAIT_FAST_MS = 260;
-    const WAIT_SLOW_MS = 650;
-    const MAX_SLIDES_FALLBACK = 120;
+  const SLIDE_DELAY = 65;
+  const WAIT_FAST_MS = 260;
+  const WAIT_SLOW_MS = 650;
+  const MAX_SLIDES_FALLBACK = 120;
 
-  /* ───── helpers ───── */
+  /* ----- helpers ----- */
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   function notify(msg, kind = 'info') {
@@ -65,12 +65,36 @@
     return false;
   }
 
-function textHasTargetEmoji(el) {
-  const t = (el && el.textContent) ? el.textContent.trim() : '';
-  return t.startsWith('👍') || t.startsWith('❤️');
-}
+  function normalizeEmojiText(s) {
+    return String(s || '')
+      .replace(/\uFE0F/g, '')
+      .trim();
+  }
 
-  /* ───── reaction state detection (add-only safe) ───── */
+  function buttonReactionEmoji(el) {
+    if (!el) return null;
+
+    const parts = [
+      el.textContent || '',
+      el.getAttribute?.('aria-label') || '',
+      el.getAttribute?.('title') || '',
+      el.getAttribute?.('data-tooltip') || '',
+      el.getAttribute?.('data-label') || ''
+    ];
+
+    const t = normalizeEmojiText(parts.join(' | '));
+
+    if (t.includes('👍')) return '👍';
+    if (t.includes('❤')) return '❤️';
+
+    return null;
+  }
+
+  function textHasTargetEmoji(el) {
+    return !!buttonReactionEmoji(el);
+  }
+
+  /* ----- reaction state detection ----- */
   function getReactionContainer(el) {
     return el?.closest?.('div[class*="reactions__"], div[class*="_reactions__"], div[class*="reactions"]') || null;
   }
@@ -80,10 +104,12 @@ function textHasTargetEmoji(el) {
     const byClass = [...container.querySelectorAll('button[class*="Reactions_reactionBadge__"]')];
     if (byClass.length) return byClass;
 
-    // Fallback: "badge-like" buttons that contain an emoji + a number
     return [...container.querySelectorAll('button')].filter(b => {
-      const t = (b.textContent || '').trim();
-      return /[\u{1F300}-\u{1FAFF}]/u.test(t) && /\d/.test(t);
+      const emo = buttonReactionEmoji(b);
+      if (emo) return true;
+
+      const t = normalizeEmojiText(b.textContent || '');
+      return /[\u{1F300}-\u{1FAFF}\u2764]/u.test(t) && /\d/.test(t);
     });
   }
 
@@ -157,13 +183,10 @@ function textHasTargetEmoji(el) {
 
     let state = readPressedState(btn, baseline);
     if (state === null) {
-      // If we cannot safely detect, do nothing rather than risk un-reacting.
       return;
     }
     if (state === wantPressed) return;
 
-    // Try click once, then verify. If it toggled the wrong way (because it was already pressed),
-    // the verification will catch it and we will click again to restore.
     btn.click();
     await sleep(140);
 
@@ -177,79 +200,84 @@ function textHasTargetEmoji(el) {
 
   function getReactionButtons(root) {
     if (!root) return [];
-    return [...root.querySelectorAll('button')].filter(textHasTargetEmoji);
+    return [...root.querySelectorAll('button')].filter(buttonReactionEmoji);
   }
 
   function groupTargetButtonsByContainer(root) {
-  const m = new Map();
-  for (const b of getReactionButtons(root)) {
-    const c = getReactionContainer(b) || b.parentElement;
-    if (!c) continue;
-    if (!m.has(c)) m.set(c, []);
-    m.get(c).push(b);
-  }
-  return m;
-}
-
-function containerHasAnyPressedReaction(container) {
-  const baseline = getBaseline(container);
-  const badges = collectAllReactionBadgeButtons(container);
-
-  for (const b of badges) {
-    const st = readPressedState(b, baseline);
-
-    // If we cannot safely detect, treat as "already reacted" to avoid damage.
-    if (st === null) return true;
-
-    if (st === true) return true;
-  }
-  return false;
-}
-
-function pickAddButton(btns) {
-  // Prefer 👍 then ❤️ (TARGET_EMOJIS order)
-  for (const emo of TARGET_EMOJIS) {
-    const b = btns.find(x => ((x.textContent || '').trim().startsWith(emo)));
-    if (b) return b;
-  }
-  return btns[0] || null;
-}
-
-
-async function reactButtonsIn(root, mode) {
-  const groups = groupTargetButtonsByContainer(root);
-
-  for (const [container, btns] of groups.entries()) {
-    if (!container || !container.isConnected) continue;
-
-    if (mode === 'add') {
-      // If user already reacted with ANY emoji (including 😂 😢), never override it.
-      if (containerHasAnyPressedReaction(container)) continue;
-
-      const b = pickAddButton(btns);
-      if (b) await ensureFinalState(b, true);
-    } else {
-      // remove: only remove 👍/❤️ if they are the active reaction (ensureFinalState handles it safely)
-      for (const b of btns) {
-        await ensureFinalState(b, false);
-        await sleep(25);
-      }
+    const m = new Map();
+    for (const b of getReactionButtons(root)) {
+      const c = getReactionContainer(b) || b.parentElement;
+      if (!c) continue;
+      if (!m.has(c)) m.set(c, []);
+      m.get(c).push(b);
     }
-
-    await sleep(25);
+    return m;
   }
-}
 
+  function containerHasAnyPressedReaction(container) {
+    const baseline = getBaseline(container);
+    const badges = collectAllReactionBadgeButtons(container);
 
-  /* ───── carousel navigation ───── */
+    for (const b of badges) {
+      const st = readPressedState(b, baseline);
+
+      if (st === null) return true;
+      if (st === true) return true;
+    }
+    return false;
+  }
+
+  async function reactButtonsIn(root, mode) {
+    const groups = groupTargetButtonsByContainer(root);
+
+    for (const [container, btns] of groups.entries()) {
+      if (!container || !container.isConnected) continue;
+
+      if (mode === 'add') {
+        const baseline = getBaseline(container);
+        const allBadges = collectAllReactionBadgeButtons(container);
+
+        let hasForeignPressed = false;
+        for (const b of allBadges) {
+          const st = readPressedState(b, baseline);
+
+          if (st === null) {
+            hasForeignPressed = true;
+            break;
+          }
+
+          if (st === true && !buttonReactionEmoji(b)) {
+            hasForeignPressed = true;
+            break;
+          }
+        }
+
+        if (hasForeignPressed) continue;
+
+        for (const emo of TARGET_EMOJIS) {
+          const b = btns.find(x => buttonReactionEmoji(x) === emo);
+          if (!b) continue;
+          await ensureFinalState(b, true);
+          await sleep(25);
+        }
+      } else {
+        for (const b of btns) {
+          await ensureFinalState(b, false);
+          await sleep(25);
+        }
+      }
+
+      await sleep(25);
+    }
+  }
+
+  /* ----- carousel navigation ----- */
   function findNextButton(root) {
     if (!root) return null;
 
-    // Prefer a local "chevron-right" inside the scope.
     const local = root.querySelector('button svg.tabler-icon-chevron-right, button svg[class*="chevron-right"]');
     if (local) return local.closest('button');
 
-    // Fallback: nearest next-like button in root.
     const btns = [...root.querySelectorAll('button')];
     for (const b of btns) {
       if (b.querySelector('svg.tabler-icon-chevron-right, svg[class*="chevron-right"]')) return b;
@@ -337,7 +365,7 @@ async function reactButtonsIn(root, mode) {
     return await waitForSlideChange(root, prevSig, WAIT_SLOW_MS);
   }
 
-  /* ───── scoping ───── */
+  /* ----- scoping ----- */
   function hasReactionButtons(root) {
     if (!root) return false;
     const btn = [...root.querySelectorAll('button')].find(textHasTargetEmoji);
@@ -357,7 +385,6 @@ async function reactButtonsIn(root, mode) {
   function expandScopeToCarouselRoot(scope) {
     if (!scope) return null;
 
-    // Try to find a nearby ancestor that includes both reactions and a next button.
     let cur = scope;
     for (let i = 0; cur && i < 30; i++, cur = cur.parentElement) {
       const hasMedia = !!cur.querySelector('a[href^="/images/"], img, video');
@@ -366,7 +393,6 @@ async function reactButtonsIn(root, mode) {
       if (hasMedia && hasReacts && hasNext) return cur;
     }
 
-    // Otherwise, bubble up to something that at least has a next button.
     cur = scope;
     for (let i = 0; cur && i < 26; i++, cur = cur.parentElement) {
       if (findNextButton(cur)) return cur;
@@ -402,7 +428,6 @@ async function reactButtonsIn(root, mode) {
     const seen = new Set();
 
     for (let step = 0; step < maxSteps; step++) {
-      // Always refresh the scope (React often replaces DOM nodes after navigation).
       const refreshed = refreshScopeFn ? refreshScopeFn() : null;
       if (refreshed) scope = refreshed;
 
@@ -425,7 +450,7 @@ async function reactButtonsIn(root, mode) {
     }
   }
 
-  /* ───── view-post mode (/posts/...) ───── */
+  /* ----- view-post mode (/posts/...) ----- */
   function getPostReactionGroups() {
     return [...document.querySelectorAll('div[class*="PostImages_reactions__"]')];
   }
@@ -458,7 +483,7 @@ async function reactButtonsIn(root, mode) {
     }
   }
 
-  /* ───── entrypoints ───── */
+  /* ----- entrypoints ----- */
   let cx = 0, cy = 0;
   document.addEventListener('mousemove', e => { cx = e.clientX; cy = e.clientY; }, { passive: true });
 
@@ -528,7 +553,7 @@ async function reactButtonsIn(root, mode) {
     notify(`Finished on ${n} target(s).`, mode);
   }
 
-  /* ───── UI and hotkeys ───── */
+  /* ----- UI and hotkeys ----- */
   function createShortcutButton() {
     const button = document.createElement('button');
     button.id = 'civitai-emoji-button';
@@ -617,5 +642,5 @@ async function reactButtonsIn(root, mode) {
   }, true);
 
   createShortcutButton();
-  console.log('✅ Civitai Auto-React Helper 1.5 loaded (👍❤️).');
+  console.log('Civitai Auto-React Helper 1.62 loaded (👍❤️).');
 })();
