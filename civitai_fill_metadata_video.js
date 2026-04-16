@@ -6,6 +6,7 @@
 // @description  Drag a PNG / JPEG / WEBP into the “Image details” modal → auto-fill Prompt etc.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
+// @match        https://civitai.red/*
 // @run-at       document-idle
 // @grant        GM_addStyle
 // @grant        unsafeWindow

@@ -5,6 +5,8 @@
 // @description  Add (or remove) 👍 and ❤️ reactions using keyboard shortcuts. Supports model preview, gallery carousel, image page, post page, and review carousel.
 // @author       You
 // @match        https://civitai.com/*
+// @match        https://civitai.green/*
+// @match        https://civitai.red/*
 // @grant        none
 // ==/UserScript==
 

@@ -5,6 +5,8 @@
 // @description  Extract download links from Civitai
 // @author       You
 // @match        https://civitai.com/models/*
+// @match        https://civitai.green/models/*
+// @match        https://civitai.red/models/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=civitai.com
 // @grant        GM_registerMenuCommand
 // @grant        GM_setClipboard

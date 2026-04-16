@@ -5,6 +5,8 @@
 // @description  On Civitai model pages by alexds9, convert Month Year text in the model description into a Hugging Face collection link.
 // @author       OpenAI
 // @match        https://civitai.com/models/*
+// @match        https://civitai.green/models/*
+// @match        https://civitai.red/models/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
