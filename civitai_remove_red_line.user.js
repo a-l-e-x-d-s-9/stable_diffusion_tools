@@ -1,9 +1,8 @@
 // ==UserScript==
-// @name         Civitai - Remove Footer Red Line
-// @namespace    https://civitai.com/
-// @version      1.1
+// @name         Civitai - Remove Red Line
+// @namespace    https://civitai.red/
+// @version      1.0
 // @description  Removes the red top border line from the Civitai footer
-// @match        https://civitai.com/*
 // @match        https://civitai.red/*
 // @run-at       document-start
 // @grant        none
@@ -12,7 +11,7 @@
 (function () {
     'use strict';
 
-    const STYLE_ID = 'alexds9-civitai-remove-footer-red-line';
+    const STYLE_ID = 'civitai-remove-footer-red-line';
 
     function installStyle() {
         if (document.getElementById(STYLE_ID)) return;
