@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Civitai - Remove Top Banner Above Header Navigation
 // @namespace    https://civitai.com/
-// @version      1.0
-// @description  Removes the extra banner button placed above top navigation blocks on Civitai
+// @version      1.3
+// @description  Removes the extra promo/rewards banner placed at the top of Civitai pages
 // @match        https://civitai.com/*
 // @match        https://civitai.red/*
 // @match        https://civitai.green/*
@@ -17,6 +17,71 @@
 
   function isElement(node) {
     return !!node && node.nodeType === 1;
+  }
+
+  function textOf(el) {
+    return (el && el.textContent ? el.textContent : '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toUpperCase();
+  }
+
+  function getClassText(el) {
+    if (!el) return '';
+    if (typeof el.className === 'string') return el.className;
+    if (el.className && typeof el.className.baseVal === 'string') return el.className.baseVal;
+    return '';
+  }
+
+  function hasClassPart(el, part) {
+    if (!isElement(el)) return false;
+    return getClassText(el).includes(part);
+  }
+
+  function isLikelyFullWidthTopBannerButton(el) {
+    if (!isElement(el) || el.tagName !== 'BUTTON') return false;
+    if (el.getAttribute(PROCESSED_ATTR) === '1') return false;
+
+    const cls = getClassText(el);
+    const txt = textOf(el);
+    const aria = textOf({ textContent: el.getAttribute('aria-label') || '' });
+
+    const hasFullWidthLayout =
+      cls.includes('w-full') ||
+      cls.includes('flex') ||
+      el.style.width === '100%';
+
+    const hasBannerShape =
+      cls.includes('items-center') &&
+      cls.includes('justify-center') &&
+      cls.includes('overflow-hidden');
+
+    const hasAnimatedGradientChild =
+      !!el.querySelector(
+        '[class*="animate-gradient-shift"], ' +
+        '[class*="animate-shimmer"], ' +
+        '[class*="bg-gradient-to-r"]'
+      );
+
+    const hasKnownPromoText =
+      txt.includes('BONUS') ||
+      txt.includes('REWARDS') ||
+      txt.includes('BUZZ') ||
+      aria.includes('REWARDS') ||
+      aria.includes('BONUS');
+
+    const hasPromoIconHints =
+      !!el.querySelector(
+        'svg[class*="tabler-icon-bolt"], ' +
+        'svg[class*="tabler-icon-sparkles"]'
+      );
+
+    return (
+      hasFullWidthLayout &&
+      hasBannerShape &&
+      hasAnimatedGradientChild &&
+      (hasKnownPromoText || hasPromoIconHints)
+    );
   }
 
   function getDirectChildAnchors(el) {
@@ -80,45 +145,89 @@
       const first = children[i];
       const second = children[i + 1];
 
-      if (first.tagName === 'BUTTON' && isHeaderNavBlock(second)) {
-        return { banner: first, nav: second, container };
+      if (
+        first.tagName === 'BUTTON' &&
+        (isHeaderNavBlock(second) || isLikelyFullWidthTopBannerButton(first))
+      ) {
+        return { banner: first, next: second, container };
       }
     }
 
     return null;
   }
 
-  function findBanner(root = document) {
+  function removeElement(el) {
+    if (!isElement(el)) return false;
+    if (el.getAttribute(PROCESSED_ATTR) === '1') return true;
+
+    el.setAttribute(PROCESSED_ATTR, '1');
+    el.remove();
+    return true;
+  }
+
+  function removeBannerAboveNav(root = document) {
     const candidates = root.querySelectorAll
       ? root.querySelectorAll('div.sticky, div[class*="sticky"]')
       : [];
 
     for (const container of candidates) {
       const found = findBannerPairInContainer(container);
-      if (found) return found;
+      if (found && removeElement(found.banner)) return true;
     }
 
-    return null;
+    return false;
   }
 
-  function removeBanner(root = document) {
-    const found = findBanner(root);
-    if (!found) return false;
+  function removeGenericTopPromoButtons(root = document) {
+    let removed = false;
 
-    const { banner } = found;
-    if (banner.getAttribute(PROCESSED_ATTR) === '1') return true;
+    const scope = root.querySelectorAll ? root : document;
+    const buttons = Array.from(scope.querySelectorAll('button'));
 
-    banner.setAttribute(PROCESSED_ATTR, '1');
-    banner.remove();
-    return true;
+    if (isElement(root) && root.tagName === 'BUTTON') {
+      buttons.unshift(root);
+    }
+
+    for (const btn of buttons) {
+      if (!isLikelyFullWidthTopBannerButton(btn)) continue;
+
+      const parent = btn.parentElement;
+      if (!parent) continue;
+
+      const siblings = Array.from(parent.children).filter(isElement);
+      const index = siblings.indexOf(btn);
+
+      const isNearTop = index >= 0 && index <= 1;
+      const parentLooksLikeLayout =
+        parent.tagName === 'MAIN' ||
+        parent.tagName === 'DIV' ||
+        hasClassPart(parent, 'flex') ||
+        hasClassPart(parent, 'sticky') ||
+        hasClassPart(parent, 'overflow-hidden');
+
+      if (isNearTop && parentLooksLikeLayout) {
+        removed = removeElement(btn) || removed;
+      }
+    }
+
+    return removed;
+  }
+
+  function removeBanners(root = document) {
+    const a = removeBannerAboveNav(document);
+    const b = removeGenericTopPromoButtons(document);
+
+    if (root !== document && isElement(root)) {
+      const c = removeBannerAboveNav(root);
+      const d = removeGenericTopPromoButtons(root);
+      return a || b || c || d;
+    }
+
+    return a || b;
   }
 
   function scan(root = document) {
-    removeBanner(document);
-
-    if (root !== document && isElement(root)) {
-      removeBanner(root);
-    }
+    removeBanners(root);
   }
 
   function init() {
@@ -142,6 +251,10 @@
     window.addEventListener('load', () => {
       scan(document);
     }, { once: true });
+
+    setTimeout(() => scan(document), 250);
+    setTimeout(() => scan(document), 1000);
+    setTimeout(() => scan(document), 2500);
   }
 
   init();
