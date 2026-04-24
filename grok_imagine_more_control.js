@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Prompt Manager Panel
 // @namespace    alexds9.scripts
-// @version      1.2.9
+// @version      1.3.1
 // @description  Draggable prompt panel with persistent seconds, prompt, and prompt history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -349,13 +349,13 @@
     const inputCss = "width: 100%; padding: 6px 8px; height: 34px; background: #333; color: #fff; border: 1px solid #555; border-radius: 7px; font-size: 12px;";
 
     // Row 1: Seconds, Resolution, Mode
-    const secondsG = group2("Seconds", " ");
+    const secondsG = group2("Seconds", "0 = Default");
     const secondsInput = css(el("input"), inputCss);
     secondsInput.id = "exp-len";
     secondsInput.type = "number";
-    secondsInput.min = "1";
+    secondsInput.min = "0";
     secondsInput.max = "15";
-    secondsInput.placeholder = "e.g. 15";
+    secondsInput.placeholder = "0 = default";
     secondsInput.value = savedSeconds;
     secondsInput.addEventListener("input", () => lsSet(K_SECONDS, String(secondsInput.value || "")));
     secondsG.g.appendChild(secondsInput);
@@ -407,6 +407,8 @@
       { label: "9:16", value: "9:16" },
       { label: "4:3", value: "4:3" },
       { label: "3:4", value: "3:4" },
+      { label: "2:3", value: "2:3" },
+      { label: "3:2", value: "3:2" },
       { label: "2:1", value: "2:1" },
       { label: "1:2", value: "1:2" },
     ].forEach(({ label, value }) => {
@@ -809,8 +811,16 @@
         try {
             const body = JSON.parse(originalBody);
 
-            // Only target video generation requests
-            if (!body.toolOverrides || !body.toolOverrides.videoGen) {
+            // Only target video generation requests.
+            // Grok changed the request shape: newer payloads may no longer include
+            // body.toolOverrides.videoGen. The current image-to-video request is
+            // identified by modelName "imagine-video-gen" and/or by the nested
+            // videoGenModelConfig under responseMetadata.
+            const hasOldVideoOverride = !!body.toolOverrides?.videoGen;
+            const hasCurrentVideoModel = body.modelName === "imagine-video-gen";
+            const hasVideoConfig = !!body.responseMetadata?.modelConfigOverride?.modelMap?.videoGenModelConfig;
+
+            if (!hasOldVideoOverride && !hasCurrentVideoModel && !hasVideoConfig) {
                 return originalBody;
             }
 
@@ -838,11 +848,16 @@
 
             // 2. Video Length
             const len = document.getElementById('exp-len')?.value;
-            if (len) {
-                const val = parseInt(len);
-                if (!isNaN(val)) {
+            if (len !== undefined && len !== null && String(len).trim() !== "") {
+                const val = parseInt(len, 10);
+
+                // 0 means Default / Unchanged.
+                // Any positive number overrides videoLength.
+                if (!isNaN(val) && val > 0) {
                     log(`Overriding Length: ${config.videoLength} -> ${val}`);
                     config.videoLength = val;
+                } else if (val === 0) {
+                    log("Leaving Length unchanged because Seconds is 0.");
                 }
             }
 
@@ -980,9 +995,35 @@
             url = input.url;
         }
 
-        if (url && url.includes('/rest/app-chat/conversations/new') && init && init.method === 'POST' && init.body) {
-            const newBody = modifyPayload(init.body);
-            init.body = newBody;
+        const method = String(init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+        const isTarget = !!url && String(url).includes('/rest/app-chat/conversations/new') && method === 'POST';
+
+        if (isTarget) {
+            try {
+                // Common path: fetch(url, { method: "POST", body: "..." })
+                if (init && init.body) {
+                    const newBody = modifyPayload(init.body);
+                    if (newBody !== init.body) {
+                        init = Object.assign({}, init, { body: newBody });
+                        return originalFetch.call(this, input, init);
+                    }
+                }
+
+                // More robust path: fetch(new Request(...))
+                if (input instanceof Request && !init?.body) {
+                    const oldBody = await input.clone().text();
+                    if (oldBody) {
+                        const newBody = modifyPayload(oldBody);
+                        if (newBody !== oldBody) {
+                            const newRequest = new Request(input, { body: newBody });
+                            return originalFetch.call(this, newRequest);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('[GrokExp] Interceptor error:', e);
+                log('Interceptor error: ' + e.message);
+            }
         }
 
         return originalFetch.apply(this, arguments);
