@@ -189,6 +189,10 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     max_inflight_per_repo = int(cfg.get("max_inflight_per_repo", 2))
 
     archive_defaults = cfg.get("archive_defaults", {})
+    archive_tmp_dir = cfg.get("archive_tmp_dir") or archive_defaults.get("tmp_dir") or archive_defaults.get("temp_dir")
+    if archive_tmp_dir:
+        archive_tmp_dir = os.path.expanduser(str(archive_tmp_dir))
+
 
     sources = cfg.get("sources")
     if not sources or not isinstance(sources, list):
@@ -327,6 +331,7 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "use_checksum": use_checksum,
         "progress_colour": progress_colour,
         "max_inflight_per_repo": max_inflight_per_repo,
+        "archive_tmp_dir": archive_tmp_dir,
         "archive_defaults": merge_archive({}, cfg.get("archive_defaults", {}), None),
         "sources": normalized_sources,
     }
@@ -546,8 +551,18 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
     source_archive_succeed_counts: Dict[int, int] = defaultdict(int)
     source_originals: Dict[int, List[str]] = {}
 
-    # Temp dir to store archives
-    tmpdir = Path(tempfile.mkdtemp(prefix="_hf_tmp_")) if not dry_run else None
+    # Temp dir to store archives.
+    # By default this follows Python's temp directory, but large archives can fill the system disk.
+    # Set top-level "archive_tmp_dir" or archive_defaults."temp_dir"/"tmp_dir",
+    # or pass --archive_tmp_dir, to force archives onto another disk.
+    tmpdir = None
+    if not dry_run:
+        archive_tmp_parent = cfg.get("archive_tmp_dir")
+        if archive_tmp_parent:
+            Path(archive_tmp_parent).mkdir(parents=True, exist_ok=True)
+            tmpdir = Path(tempfile.mkdtemp(prefix="_hf_tmp_", dir=archive_tmp_parent))
+        else:
+            tmpdir = Path(tempfile.mkdtemp(prefix="_hf_tmp_"))
 
     for s_idx, src in enumerate(cfg["sources"]):
         base = src["source_base"]
@@ -992,6 +1007,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--token_file", default=None, help="Override top-level token_file")
     ap.add_argument("--token_env", default=None, help="Override top-level token_env")
     ap.add_argument("--source_base", default=None, help="Override top-level source_base")
+    ap.add_argument("--archive_tmp_dir", default=None, help="Directory on a disk with enough free space for temporary ZIP archives")
     ap.add_argument("--threads", type=int, default=None, help="Override threads")
     ap.add_argument("--remove", action="store_true", help="Remove local files after successful uploads to all destinations")
     ap.add_argument("--dry_run", action="store_true", help="Do not perform network operations")
@@ -1012,6 +1028,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         raw_cfg["token_env"] = args.token_env
     if args.source_base is not None:
         raw_cfg["source_base"] = args.source_base
+    if args.archive_tmp_dir is not None:
+        raw_cfg["archive_tmp_dir"] = args.archive_tmp_dir
     if args.threads is not None:
         raw_cfg["threads"] = args.threads
     if args.remove:
