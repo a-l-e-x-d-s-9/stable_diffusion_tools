@@ -8,6 +8,8 @@ Safe defaults:
 - Writing is done through a temporary file first, then atomically moved into place.
 - In-place writes create a .bak backup by default.
 - Existing metadata can be fully replaced with --replace-metadata.
+- Selected existing metadata keys can be preserved during replace/clear operations.
+- Metadata can be provided from JSON and/or direct CLI key=value pairs.
 - Nested JSON values are stored as valid JSON strings, not Python repr strings.
 
 Notes:
@@ -50,6 +52,60 @@ def _load_metadata_json(json_path: Path) -> Dict[str, str]:
         raise ValueError("Metadata JSON must be a dictionary/object of key-value pairs.")
 
     return {str(k): _metadata_value_to_string(v) for k, v in data.items()}
+
+
+def _parse_key_list(values: Optional[List[str]]) -> List[str]:
+    """Parse repeated/comma-separated key arguments while preserving order."""
+    if not values:
+        return []
+
+    keys: List[str] = []
+    seen = set()
+    for value in values:
+        for part in str(value).split(","):
+            key = part.strip()
+            if key and key not in seen:
+                keys.append(key)
+                seen.add(key)
+    return keys
+
+
+def _parse_set_metadata(values: Optional[List[str]]) -> Dict[str, str]:
+    """Parse repeatable CLI metadata overrides in key=value form."""
+    metadata: Dict[str, str] = {}
+    if not values:
+        return metadata
+
+    for item in values:
+        if "=" not in item:
+            raise ValueError(f"Invalid --set-meta value: {item!r}. Expected key=value.")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Invalid --set-meta value: {item!r}. Key cannot be empty.")
+        metadata[key] = value
+    return metadata
+
+
+def _parse_set_metadata_json(values: Optional[List[str]]) -> Dict[str, str]:
+    """Parse repeatable CLI metadata overrides in key=json_value form."""
+    metadata: Dict[str, str] = {}
+    if not values:
+        return metadata
+
+    for item in values:
+        if "=" not in item:
+            raise ValueError(f"Invalid --set-meta-json value: {item!r}. Expected key=json_value.")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Invalid --set-meta-json value: {item!r}. Key cannot be empty.")
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON for --set-meta-json {key!r}: {e}") from e
+        metadata[key] = _metadata_value_to_string(decoded)
+    return metadata
 
 
 def _decode_metadata_for_display(raw_meta: Optional[Dict[str, str]]) -> Dict[str, Any]:
@@ -125,6 +181,7 @@ def _write_metadata_one_file(
     *,
     replace_metadata: bool,
     clear_metadata: bool,
+    preserve_keys: List[str],
     backup: bool,
     overwrite: bool,
     verify: bool,
@@ -144,12 +201,26 @@ def _write_metadata_one_file(
         tensors = {key: f.get_tensor(key) for key in f.keys()}
         existing_metadata = dict(f.metadata() or {})
 
+    missing_preserve_keys = [key for key in preserve_keys if key not in existing_metadata]
+    if missing_preserve_keys:
+        print(
+            "WARNING: requested preserve keys not found in existing metadata: "
+            + ", ".join(missing_preserve_keys),
+            file=sys.stderr,
+        )
+
     if clear_metadata or replace_metadata:
-        final_metadata: Dict[str, str] = {}
+        final_metadata: Dict[str, str] = {
+            key: existing_metadata[key]
+            for key in preserve_keys
+            if key in existing_metadata
+        }
     else:
         final_metadata = dict(existing_metadata)
 
     if not clear_metadata:
+        # New metadata intentionally wins over preserved metadata when the same key
+        # is provided through JSON or CLI overrides. This makes overrides useful.
         final_metadata.update(new_metadata)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,14 +289,40 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--read", action="store_true", help="Read and print metadata.")
     parser.add_argument("--write-json", type=Path, help="Path to JSON metadata to write.")
     parser.add_argument(
+        "--set-meta",
+        action="append",
+        metavar="KEY=VALUE",
+        help=(
+            "Set or override one metadata key directly from the command line. "
+            "Can be repeated. The value is stored as a plain string."
+        ),
+    )
+    parser.add_argument(
+        "--set-meta-json",
+        action="append",
+        metavar="KEY=JSON_VALUE",
+        help=(
+            "Set or override one metadata key from a JSON value. Can be repeated. "
+            "Example: --set-meta-json config='{\"a\":1}'"
+        ),
+    )
+    parser.add_argument(
+        "--preserve-key",
+        action="append",
+        help=(
+            "Existing metadata key to preserve during --replace-metadata or --clear-metadata. "
+            "Can be repeated or comma-separated."
+        ),
+    )
+    parser.add_argument(
         "--replace-metadata",
         action="store_true",
-        help="Remove all existing metadata first, then write metadata from --write-json.",
+        help="Remove existing metadata first, except --preserve-key keys, then write new metadata.",
     )
     parser.add_argument(
         "--clear-metadata",
         action="store_true",
-        help="Remove all metadata. Cannot be combined with --write-json.",
+        help="Remove metadata, except --preserve-key keys. Cannot be combined with new metadata input.",
     )
     parser.add_argument(
         "--output",
@@ -240,10 +337,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     try:
-        if args.clear_metadata and args.write_json:
-            raise ValueError("--clear-metadata cannot be combined with --write-json.")
+        preserve_keys = _parse_key_list(args.preserve_key)
+        cli_json_metadata = _parse_set_metadata_json(args.set_meta_json)
+        cli_metadata = _parse_set_metadata(args.set_meta)
 
-        do_write = bool(args.write_json or args.clear_metadata)
+        if args.clear_metadata and (args.write_json or cli_json_metadata or cli_metadata):
+            raise ValueError("--clear-metadata cannot be combined with --write-json, --set-meta, or --set-meta-json.")
+
+        do_write = bool(args.write_json or args.clear_metadata or cli_json_metadata or cli_metadata)
         if not args.read and not do_write:
             args.read = True
 
@@ -255,6 +356,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             raise ValueError("When processing multiple files, --output must be a directory.")
 
         metadata = _load_metadata_json(args.write_json) if args.write_json else {}
+        # CLI values intentionally override JSON values. Plain --set-meta is last,
+        # so it can override --set-meta-json too.
+        metadata.update(cli_json_metadata)
+        metadata.update(cli_metadata)
 
         if args.read:
             for file_path in files:
@@ -270,6 +375,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                     metadata,
                     replace_metadata=bool(args.replace_metadata),
                     clear_metadata=bool(args.clear_metadata),
+                    preserve_keys=preserve_keys,
                     backup=not bool(args.no_backup),
                     overwrite=bool(args.overwrite),
                     verify=not bool(args.no_verify),
