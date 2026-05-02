@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         Civitai Hover Video Audio - Synced Unlock Button
 // @namespace    https://civitai.com/
-// @version      1.4.1
-// @description  Enable synced audio on hovered Civitai videos, with delayed switching, first-use unlock button, and M mute toggle.
+// @version      1.5.0
+// @description  Enable synced audio on hovered Civitai videos, with delayed switching, first-use unlock button, persistent M mute toggle.
 // @author       alexds9
 // @match        https://civitai.com/*
 // @match        https://civitai.red/*
 // @match        https://civitai.green/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_addValueChangeListener
 // ==/UserScript==
 
 (() => {
@@ -35,6 +37,10 @@
     showStatus: true,
   };
 
+  const STORAGE_KEYS = {
+    scriptMuted: "civitai_hover_video_audio_script_muted",
+  };
+
   let hoverTimer = null;
   let hoverVideo = null;
   let activeVideo = null;
@@ -55,40 +61,97 @@
     if (CONFIG.debug) console.log("[Civitai Hover Synced Audio]", ...args);
   };
 
-    const toast = (() => {
-        let el = null;
-        let timer = null;
+  const toast = (() => {
+    let el = null;
+    let timer = null;
 
-        return (text) => {
-            if (!CONFIG.showStatus) return;
+    return (text) => {
+      if (!CONFIG.showStatus) return;
 
-            if (!el) {
-                el = document.createElement("div");
-                el.style.position = "fixed";
-                el.style.left = "14px";
-                el.style.top = "14px";
-                el.style.padding = "7px 11px";
-                el.style.borderRadius = "8px";
-                el.style.background = "rgba(255, 218, 70, 0.95)";
-                el.style.color = "#111";
-                el.style.font = "700 13px/1.35 system-ui, sans-serif";
-                el.style.boxShadow = "0 4px 14px rgba(0, 0, 0, 0.28)";
-                el.style.zIndex = "2147483647";
-                el.style.pointerEvents = "none";
-                el.style.opacity = "0";
-                el.style.transition = "opacity 120ms ease";
-                document.documentElement.appendChild(el);
-            }
+      if (!el) {
+        el = document.createElement("div");
+        el.style.position = "fixed";
+        el.style.left = "14px";
+        el.style.top = "14px";
+        el.style.padding = "7px 11px";
+        el.style.borderRadius = "8px";
+        el.style.background = "rgba(255, 218, 70, 0.95)";
+        el.style.color = "#111";
+        el.style.font = "700 13px/1.35 system-ui, sans-serif";
+        el.style.boxShadow = "0 4px 14px rgba(0, 0, 0, 0.28)";
+        el.style.zIndex = "2147483647";
+        el.style.pointerEvents = "none";
+        el.style.opacity = "0";
+        el.style.transition = "opacity 120ms ease";
+        document.documentElement.appendChild(el);
+      }
 
-            el.textContent = text;
-            el.style.opacity = "1";
+      el.textContent = text;
+      el.style.opacity = "1";
 
-            clearTimeout(timer);
-            timer = setTimeout(() => {
-                el.style.opacity = "0";
-            }, 1200);
-        };
-    })();
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        el.style.opacity = "0";
+      }, 1200);
+    };
+  })();
+
+  function getStoredScriptMuted() {
+    try {
+      return !!GM_getValue(STORAGE_KEYS.scriptMuted, false);
+    } catch (err) {
+      log("GM_getValue failed", err);
+      return false;
+    }
+  }
+
+  function setStoredScriptMuted(value) {
+    try {
+      GM_setValue(STORAGE_KEYS.scriptMuted, !!value);
+    } catch (err) {
+      log("GM_setValue failed", err);
+    }
+  }
+
+  function applyScriptMutedState(value, options = {}) {
+    const nextValue = !!value;
+    const changed = scriptMuted !== nextValue;
+
+    scriptMuted = nextValue;
+
+    if (scriptMuted) {
+      hideUnlockPopup();
+      stopActiveAudio(options.reason || "mute-state");
+    } else {
+      hideUnlockPopup();
+    }
+
+    if (options.showToast && changed) {
+      toast(scriptMuted ? "Hover audio muted" : "Hover audio enabled");
+    }
+
+    log("scriptMuted:", scriptMuted, options);
+  }
+
+  function initPersistentMuteState() {
+    applyScriptMutedState(getStoredScriptMuted(), {
+      showToast: false,
+      reason: "init",
+    });
+
+    try {
+      GM_addValueChangeListener(STORAGE_KEYS.scriptMuted, (_name, oldValue, newValue, remote) => {
+        if (oldValue === newValue) return;
+
+        applyScriptMutedState(!!newValue, {
+          showToast: true,
+          reason: remote ? "remote-tab-sync" : "local-tab-sync",
+        });
+      });
+    } catch (err) {
+      log("GM_addValueChangeListener failed", err);
+    }
+  }
 
   function hasUserActivation() {
     if (unlockedByUserGesture) return true;
@@ -124,18 +187,16 @@
   }
 
   function toggleScriptMuted() {
-    scriptMuted = !scriptMuted;
+    const nextValue = !scriptMuted;
 
-    hideUnlockPopup();
+    // Save first. The listener will apply it in this tab and all other tabs.
+    setStoredScriptMuted(nextValue);
 
-    if (scriptMuted) {
-      stopActiveAudio();
-      toast("Hover audio muted");
-    } else {
-      toast("Hover audio enabled");
-    }
-
-    log("scriptMuted:", scriptMuted);
+    // Also apply immediately, in case the userscript manager does not fire the listener locally.
+    applyScriptMutedState(nextValue, {
+      showToast: true,
+      reason: "manual-toggle",
+    });
   }
 
   document.addEventListener("pointerdown", (event) => {
@@ -275,7 +336,7 @@
 
     activeVideo = null;
 
-    if (reason !== "switch") {
+    if (reason !== "switch" && reason !== "mute-state" && reason !== "init" && reason !== "remote-tab-sync" && reason !== "local-tab-sync") {
       toast("Audio stopped");
     }
   }
@@ -672,6 +733,8 @@
       clearLoopEndTimer();
     }
   }
+
+  initPersistentMuteState();
 
   document.addEventListener("pointerover", handlePointerOver, true);
   document.addEventListener("pointerout", handlePointerOut, true);
