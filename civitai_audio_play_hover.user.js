@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Civitai Hover Video Audio - Synced Unlock Button
 // @namespace    https://civitai.com/
-// @version      1.3.1
-// @description  Enable synced audio on hovered Civitai videos, with delayed switching and first-use unlock button.
+// @version      1.4.1
+// @description  Enable synced audio on hovered Civitai videos, with delayed switching, first-use unlock button, and M mute toggle.
 // @author       alexds9
 // @match        https://civitai.com/*
 // @match        https://civitai.red/*
@@ -40,6 +40,7 @@
   let activeVideo = null;
   let unlockedByUserGesture = false;
   let loopEndTimer = null;
+  let scriptMuted = false;
 
   let lastPointerX = 0;
   let lastPointerY = 0;
@@ -54,39 +55,40 @@
     if (CONFIG.debug) console.log("[Civitai Hover Synced Audio]", ...args);
   };
 
-  const toast = (() => {
-    let el = null;
-    let timer = null;
+    const toast = (() => {
+        let el = null;
+        let timer = null;
 
-    return (text) => {
-      if (!CONFIG.showStatus) return;
+        return (text) => {
+            if (!CONFIG.showStatus) return;
 
-      if (!el) {
-        el = document.createElement("div");
-        el.style.position = "fixed";
-        el.style.left = "12px";
-        el.style.bottom = "12px";
-        el.style.padding = "6px 9px";
-        el.style.borderRadius = "8px";
-        el.style.background = "rgba(0, 0, 0, 0.72)";
-        el.style.color = "#fff";
-        el.style.font = "12px/1.35 system-ui, sans-serif";
-        el.style.zIndex = "2147483647";
-        el.style.pointerEvents = "none";
-        el.style.opacity = "0";
-        el.style.transition = "opacity 120ms ease";
-        document.documentElement.appendChild(el);
-      }
+            if (!el) {
+                el = document.createElement("div");
+                el.style.position = "fixed";
+                el.style.left = "14px";
+                el.style.top = "14px";
+                el.style.padding = "7px 11px";
+                el.style.borderRadius = "8px";
+                el.style.background = "rgba(255, 218, 70, 0.95)";
+                el.style.color = "#111";
+                el.style.font = "700 13px/1.35 system-ui, sans-serif";
+                el.style.boxShadow = "0 4px 14px rgba(0, 0, 0, 0.28)";
+                el.style.zIndex = "2147483647";
+                el.style.pointerEvents = "none";
+                el.style.opacity = "0";
+                el.style.transition = "opacity 120ms ease";
+                document.documentElement.appendChild(el);
+            }
 
-      el.textContent = text;
-      el.style.opacity = "1";
+            el.textContent = text;
+            el.style.opacity = "1";
 
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        el.style.opacity = "0";
-      }, 1200);
-    };
-  })();
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                el.style.opacity = "0";
+            }, 1200);
+        };
+    })();
 
   function hasUserActivation() {
     if (unlockedByUserGesture) return true;
@@ -107,12 +109,58 @@
     hideUnlockPopup();
   }
 
+  function isTypingTarget(target) {
+    if (!target || !(target instanceof Element)) return false;
+
+    const tagName = target.tagName.toLowerCase();
+
+    return (
+      tagName === "input" ||
+      tagName === "textarea" ||
+      tagName === "select" ||
+      target.isContentEditable ||
+      !!target.closest('[contenteditable="true"]')
+    );
+  }
+
+  function toggleScriptMuted() {
+    scriptMuted = !scriptMuted;
+
+    hideUnlockPopup();
+
+    if (scriptMuted) {
+      stopActiveAudio();
+      toast("Hover audio muted");
+    } else {
+      toast("Hover audio enabled");
+    }
+
+    log("scriptMuted:", scriptMuted);
+  }
+
   document.addEventListener("pointerdown", (event) => {
     if (unlockPopup && unlockPopup.contains(event.target)) return;
     markUnlocked();
   }, true);
 
-  document.addEventListener("keydown", markUnlocked, true);
+  document.addEventListener("keydown", (event) => {
+    if (isTypingTarget(event.target)) return;
+
+    const key = event.key.toLowerCase();
+
+    if (key === "escape") {
+      hideUnlockPopup();
+      stopActiveAudio();
+      return;
+    }
+
+    if (key === "m") {
+      event.preventDefault();
+      event.stopPropagation();
+      markUnlocked();
+      toggleScriptMuted();
+    }
+  }, true);
 
   document.addEventListener("click", (event) => {
     if (unlockPopup && unlockPopup.contains(event.target)) return;
@@ -239,6 +287,11 @@
       onEnded: () => {
         if (video !== activeVideo) return;
 
+        if (scriptMuted) {
+          stopActiveAudio();
+          return;
+        }
+
         if (isVideoStillHovered(video)) {
           enableAudioForVideo(video, { fromEnded: true });
         } else {
@@ -330,6 +383,12 @@
       event.preventDefault();
       event.stopPropagation();
 
+      if (scriptMuted) {
+        toast("Hover audio muted");
+        hideUnlockPopup();
+        return;
+      }
+
       const video = unlockPopupVideo;
 
       unlockedByUserGesture = true;
@@ -349,6 +408,7 @@
   }
 
   function showUnlockPopupNearCursor(video, clientX = lastPointerX, clientY = lastPointerY) {
+    if (scriptMuted) return;
     if (!CONFIG.showUnlockPopup) return;
     if (!video || !document.contains(video)) return;
 
@@ -400,6 +460,11 @@
   }
 
   async function enableAudioForVideo(video, options = {}) {
+    if (scriptMuted) {
+      hideUnlockPopup();
+      return;
+    }
+
     if (!video || !document.contains(video)) return;
 
     // Normal hover start requires the video area to still be hovered.
@@ -439,7 +504,7 @@
         await video.play();
       }
 
-      toast("Synced audio enabled");
+      //toast("Synced audio enabled");
       log("Audio enabled on visible video", {
         currentTime: video.currentTime,
         duration: video.duration,
@@ -465,6 +530,8 @@
   }
 
   function schedulePlay(video) {
+    if (scriptMuted) return;
+
     clearHoverTimer();
 
     if (!video || !document.contains(video)) return;
@@ -474,6 +541,7 @@
     hoverTimer = setTimeout(() => {
       hoverTimer = null;
 
+      if (scriptMuted) return;
       if (hoverVideo !== video) return;
       if (!document.contains(video)) return;
       if (!isVideoStillHovered(video)) return;
@@ -505,6 +573,11 @@
     loopEndTimer = setTimeout(() => {
       if (video !== activeVideo) return;
 
+      if (scriptMuted) {
+        stopActiveAudio();
+        return;
+      }
+
       if (isVideoStillHovered(video)) {
         enableAudioForVideo(video, { fromEnded: true });
       } else {
@@ -516,6 +589,8 @@
   function handlePointerOver(event) {
     lastPointerX = event.clientX;
     lastPointerY = event.clientY;
+
+    if (scriptMuted) return;
 
     if (isNodeInsideUnlockPopup(event.target)) {
       clearUnlockPopupHideTimer();
@@ -572,6 +647,8 @@
     lastPointerX = event.clientX;
     lastPointerY = event.clientY;
 
+    if (scriptMuted) return;
+
     if (isNodeInsideUnlockPopup(event.target)) {
       clearUnlockPopupHideTimer();
       return;
@@ -606,11 +683,4 @@
       stopActiveAudio();
     }
   });
-
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      hideUnlockPopup();
-      stopActiveAudio();
-    }
-  }, true);
 })();
