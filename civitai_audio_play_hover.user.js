@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Hover Video Audio - Synced Unlock Button
 // @namespace    https://civitai.com/
-// @version      1.5.0
+// @version      1.5.1
 // @description  Enable synced audio on hovered Civitai videos, with delayed switching, first-use unlock button, persistent M mute toggle.
 // @author       alexds9
 // @match        https://civitai.com/*
@@ -325,21 +325,34 @@
     }
   }
 
-  function stopActiveAudio(reason = "stop") {
-    clearHoverTimer();
-    clearLoopEndTimer();
+    function stopActiveAudio(reason = "stop", options = {}) {
+      const preserveHoverTimer = !!options.preserveHoverTimer;
 
-    if (activeVideo) {
-      removeActiveListeners(activeVideo);
-      muteVideo(activeVideo);
+      if (!preserveHoverTimer) {
+        clearHoverTimer();
+      }
+
+      clearLoopEndTimer();
+
+      if (activeVideo) {
+        removeActiveListeners(activeVideo);
+        muteVideo(activeVideo);
+      }
+
+      activeVideo = null;
+
+      if (
+        reason !== "switch" &&
+        reason !== "mute-state" &&
+        reason !== "init" &&
+        reason !== "remote-tab-sync" &&
+        reason !== "local-tab-sync" &&
+        reason !== "loop-ended-while-hovering-other" &&
+        reason !== "paused-while-hovering-other"
+      ) {
+        toast("Audio stopped");
+      }
     }
-
-    activeVideo = null;
-
-    if (reason !== "switch" && reason !== "mute-state" && reason !== "init" && reason !== "remote-tab-sync" && reason !== "local-tab-sync") {
-      toast("Audio stopped");
-    }
-  }
 
   function attachActiveListeners(video) {
     removeActiveListeners(video);
@@ -356,17 +369,21 @@
         if (isVideoStillHovered(video)) {
           enableAudioForVideo(video, { fromEnded: true });
         } else {
-          stopActiveAudio();
+          stopActiveAudio("loop-ended-while-hovering-other", {
+            preserveHoverTimer: true,
+          });
         }
       },
 
-      onPause: () => {
-        if (video !== activeVideo) return;
+        onPause: () => {
+          if (video !== activeVideo) return;
 
-        if (!isVideoStillHovered(video)) {
-          stopActiveAudio();
-        }
-      },
+          if (!isVideoStillHovered(video)) {
+            stopActiveAudio("paused-while-hovering-other", {
+              preserveHoverTimer: true,
+            });
+          }
+        },
 
       onInvalid: () => {
         if (video === activeVideo) {
@@ -620,11 +637,13 @@
     const currentTime = Number(video.currentTime);
 
     if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(currentTime)) {
-      loopEndTimer = setTimeout(() => {
-        if (video === activeVideo && !isVideoStillHovered(video)) {
-          stopActiveAudio();
-        }
-      }, 1000);
+        loopEndTimer = setTimeout(() => {
+          if (video === activeVideo && !isVideoStillHovered(video)) {
+            stopActiveAudio("loop-ended-while-hovering-other", {
+              preserveHoverTimer: true,
+            });
+          }
+        }, 1000);
       return;
     }
 
@@ -639,11 +658,13 @@
         return;
       }
 
-      if (isVideoStillHovered(video)) {
-        enableAudioForVideo(video, { fromEnded: true });
-      } else {
-        stopActiveAudio();
-      }
+        if (isVideoStillHovered(video)) {
+          enableAudioForVideo(video, { fromEnded: true });
+        } else {
+          stopActiveAudio("loop-ended-while-hovering-other", {
+            preserveHoverTimer: true,
+          });
+        }
     }, remainingMs);
   }
 
