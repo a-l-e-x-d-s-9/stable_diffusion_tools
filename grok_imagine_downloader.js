@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.16
+// @version      2.6.18
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -72,9 +72,9 @@ function releasePageLock(kind, key) {
   const SEEN_VID_URL_KEY       = "grok_seen_vid_urls_v1";
   const SEEN_VID_URL_NORM_KEY  = "grok_seen_vid_urls_norm_v1";
   const SEEN_SIGNATURE_KEY     = "grok_seen_signature_v1";
-  const MAX_WAIT_MS            = 45000; // watcher lifetime; click/filmstrip triggers reduce interactive waits while still giving Favorites time
+  const MAX_WAIT_MS            = 90000; // keep watchers alive longer; avoid 45s expirations on large edit stacks
   const SCAN_INTERVAL_MS       = 400;   // scan more frequently
-  const WATCH_RETRY_INTERVAL_MS= 500;   // retry watched viewer/filmstrip media faster after Grok swaps content
+  const WATCH_RETRY_INTERVAL_MS= 350;   // retry watched viewer/filmstrip media faster after Grok swaps content
 
     // === MP4 metadata embedding ===
     const WRITE_MP4_COMMENT = false;       // IT'S IMPOSSIBLE TO USE IT
@@ -203,6 +203,40 @@ async function headContentLength(u) {
              );
     }
 
+    function filmstripButtonForNode(el) {
+      return (el && el.closest) ? el.closest('[data-filmstrip-item="true"]') : null;
+    }
+
+    function isSelectedFilmstripButton(btn) {
+      if (!btn) return false;
+      try {
+        if (btn.getAttribute('tabindex') === '0') return true;
+        if (btn.getAttribute('aria-current') === 'true') return true;
+        if (btn.classList && btn.classList.contains('ring-white')) return true;
+      } catch (_) {}
+      return false;
+    }
+
+    function isPriorityFilmstripItem(el) {
+      const btn = filmstripButtonForNode(el);
+      if (!btn) return false;
+      const until = Number(btn.dataset.grokPriorityUntil || 0);
+      return isSelectedFilmstripButton(btn) || until > Date.now();
+    }
+
+    function isPriorityViewerMedia(el) {
+      if (!el) return false;
+      if (isFilmstripItemNode(el)) return isPriorityFilmstripItem(el);
+      if (!isEffectivelyVisible(el)) return false;
+      try {
+        const r = el.getBoundingClientRect();
+        const area = (r.width || 0) * (r.height || 0);
+        return area >= 120000 || r.width >= 240 || r.height >= 240;
+      } catch (_) {
+        return false;
+      }
+    }
+
 
 
   // Per-page force
@@ -242,6 +276,20 @@ async function headContentLength(u) {
       let p = u.pathname;
       if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
       return p;
+    }
+
+    function normRouteKey(href = location.href) {
+      // Full visible navigation-bar state. Some Grok viewer/image changes keep the same path
+      // but change query/hash/history state, so use this to trigger fast scans without
+      // cancelling current downloads.
+      try {
+        const u = new URL(href, location.origin);
+        let p = u.pathname;
+        if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+        return p + u.search + u.hash;
+      } catch (_) {
+        return String(href || location.href || "");
+      }
     }
 
       function onFavoritesRoute() {
@@ -387,6 +435,33 @@ async function headContentLength(u) {
 
     // Hook SPA navigation
     let lastRoutePath = normPath();
+    let lastRouteKey  = normRouteKey();
+
+    function scanCurrentViewerFirst() {
+      // Prioritize the currently open/selected viewer media before scanning all other
+      // candidates. This avoids large edit stacks delaying the file you actually opened.
+      try {
+        scanImages?.({ priorityOnly: true });
+        scanVideos?.({ priorityOnly: true });
+      } catch (_) {}
+    }
+
+    function scheduleMediaScans(priorityDelays = [50, 250, 900], fullDelays = [1400]) {
+      // Route/view changes can mount media in stages. Run a short priority burst first so
+      // the selected viewer media downloads immediately, then fall back to full scans.
+      if (!autoOn) return;
+      priorityDelays.forEach(ms => {
+        setTimeout(() => {
+          scanCurrentViewerFirst();
+        }, ms);
+      });
+      fullDelays.forEach(ms => {
+        setTimeout(() => {
+          try { scanImages?.(); scanVideos?.(); } catch(e){}
+        }, ms);
+      });
+    }
+
     (function hookHistory(){
       const push = history.pushState;
       const replace = history.replaceState;
@@ -400,20 +475,29 @@ async function headContentLength(u) {
       if (!onAllowedRoute()) return; // don’t run on site root etc.
 
       const newPath = normPath();
-      if (newPath === lastRoutePath) {
-        // Same-route pushState/replaceState should not cancel active downloads.
-        // Still scan once, because Grok may update viewer state without changing the path.
-        if (autoOn) {
-          setTimeout(() => { try { scanImages?.(); scanVideos?.(); } catch(e){} }, 50);
-        }
+      const newKey  = normRouteKey();
+
+      if (newKey === lastRouteKey) {
+        // Same visible URL/state. No need to reset or schedule an extra burst.
         return;
       }
 
+      const pathChanged = newPath !== lastRoutePath;
       lastRoutePath = newPath;
-      routeEpoch++;                  // invalidate all prior watchers & tasks only on real route changes
+      lastRouteKey  = newKey;
+
+      if (!pathChanged) {
+        // URL changed in the navigation bar, but the route path is the same.
+        // This is common when Grok swaps the selected viewer item. Do not cancel
+        // active downloads; just scan soon so the newly mounted media is picked up.
+        scheduleMediaScans([25, 150, 500], [1200, 2500]);
+        return;
+      }
+
+      routeEpoch++;                  // invalidate all prior watchers & tasks only on real path changes
       resetPerPageState();
-      // kick an initial scan after the route settles
-      setTimeout(() => { try { scanImages?.(); scanVideos?.(); } catch(e){} }, 150);
+      // kick scans after the route settles, with a short burst for viewer/filmstrip media
+      scheduleMediaScans([50, 250, 800], [1600, 3000]);
     }
 
 
@@ -462,19 +546,16 @@ async function headContentLength(u) {
   });
 
   // Filmstrip clicks often mount/swap the real image/video shortly after the thumbnail click.
-  // Scan twice so we catch both the immediate DOM change and the delayed media mount.
+  // Scan in a short burst so we catch both the immediate DOM change and the delayed media mount.
   document.addEventListener("click", (e) => {
     if (!autoOn) return;
     const item = e.target && e.target.closest && e.target.closest('[data-filmstrip-item="true"]');
     if (!item) return;
 
-    setTimeout(() => {
-      try { scanImages(); scanVideos(); } catch (_) {}
-    }, 100);
+    const btn = filmstripButtonForNode(item) || item;
+    try { btn.dataset.grokPriorityUntil = String(Date.now() + 15000); } catch (_) {}
 
-    setTimeout(() => {
-      try { scanImages(); scanVideos(); } catch (_) {}
-    }, 800);
+    scheduleMediaScans([25, 150, 500], [1200, 2500]);
   }, true);
 
   // Filmstrip scrolling can reveal older edits/videos without changing the route.
@@ -483,9 +564,7 @@ async function headContentLength(u) {
     const t = e.target;
     if (!t || !t.matches || !t.matches('[data-filmstrip-scroll="true"]')) return;
 
-    setTimeout(() => {
-      try { scanImages(); scanVideos(); } catch (_) {}
-    }, 100);
+    scheduleMediaScans([80], [900]);
   }, true);
 
   const mo = new MutationObserver(() => {
@@ -592,8 +671,9 @@ async function headContentLength(u) {
 
 
   // ---------------- Images ----------------
-    function scanImages() {
+    function scanImages(options = {}) {
       if (!onAllowedRoute()) return;
+      const { priorityOnly = false } = options;
 
       const q = [
     'img[alt="Generated image"]',
@@ -607,6 +687,7 @@ async function headContentLength(u) {
         // Tiny <button> thumbnails are usually UI elements.
         // Exception: edited-variant thumbnails on the left strip - those point to full images and should be downloaded.
         let isEditedThumb = false;
+        let isPriorityThumb = false;
         try {
           const r = img.getBoundingClientRect();
           if (img.closest("button") && r.width <= 90 && r.height <= 90) {
@@ -614,13 +695,18 @@ async function headContentLength(u) {
             const raw = img.getAttribute("src") || "";
             const cand = cdn || raw;
             isEditedThumb = isFilmstripItemNode(img) && isFilmstripGeneratedImageUrl(cand);
+            isPriorityThumb = isEditedThumb && isPriorityFilmstripItem(img);
             if (!isEditedThumb) return;
+            // Avoid flooding the queue with every filmstrip edit. Prefer only the selected
+            // or recently clicked thumbnail unless Force mode is active.
+            if (!forcePage && !isPriorityThumb) return;
           }
         } catch (_) {}
 
+        if (priorityOnly && !(isPriorityViewerMedia(img) || isPriorityThumb)) return;
         if (img.dataset.grokWatching === "1") return;
-        // On Favorites and edited-variant thumbs, process even if off-screen; elsewhere still require visibility
-        const requireVisible = !(onFavoritesRoute() || forcePage || isEditedThumb);
+        // On Favorites and priority filmstrip thumbs, process even if off-screen; elsewhere still require visibility
+        const requireVisible = !(onFavoritesRoute() || forcePage || isPriorityThumb);
         if (requireVisible && !isEffectivelyVisible(img)) return;
         // In Force mode, ignore anything that existed before Force was toggled on
         if (forcePage && img.dataset.grokPreForce === "1") return;
@@ -730,7 +816,9 @@ async function headContentLength(u) {
           return false;
         }
       })();
-      if (!(onFavoritesRoute() || forcePage || isEditedThumb) && !isEffectivelyVisible(imgEl)) return;
+      const isPriorityThumb = isEditedThumb && isPriorityFilmstripItem(imgEl);
+      if (isEditedThumb && !forcePage && !isPriorityThumb) return;
+      if (!(onFavoritesRoute() || forcePage || isPriorityThumb) && !isEffectivelyVisible(imgEl)) return;
       if (!forcePage && imgEl.dataset.grokDone === "1") return;
       if (forcePage && imgEl.dataset.grokDoneForce === "1") return;
       if (isVideoPosterImage(imgEl)) return;
@@ -945,12 +1033,14 @@ async function headContentLength(u) {
 
 
   // ---------------- Videos ----------------
-    function scanVideos() {
+    function scanVideos(options = {}) {
       if (!onAllowedRoute()) return;
+      const { priorityOnly = false } = options;
 
       document.querySelectorAll("video").forEach(v => {
+        if (priorityOnly && !isPriorityViewerMedia(v)) return;
         if (v.dataset.grokWatching === "1") return;
-        const requireVisible = !(onFavoritesRoute() || forcePage);
+        const requireVisible = !(onFavoritesRoute() || forcePage || priorityOnly);
         if (requireVisible && !isEffectivelyVisible(v)) return;
         // In Force mode, ignore anything that existed before Force was toggled on
         if (forcePage && v.dataset.grokPreForce === "1") return;
