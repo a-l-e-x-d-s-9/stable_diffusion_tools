@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.14
+// @version      2.6.16
 // @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
 // @author       Alex
 // @match        https://grok.com/imagine*
@@ -72,8 +72,9 @@ function releasePageLock(kind, key) {
   const SEEN_VID_URL_KEY       = "grok_seen_vid_urls_v1";
   const SEEN_VID_URL_NORM_KEY  = "grok_seen_vid_urls_norm_v1";
   const SEEN_SIGNATURE_KEY     = "grok_seen_signature_v1";
-  const MAX_WAIT_MS            = 60000; // give Favorites more time
+  const MAX_WAIT_MS            = 45000; // watcher lifetime; click/filmstrip triggers reduce interactive waits while still giving Favorites time
   const SCAN_INTERVAL_MS       = 400;   // scan more frequently
+  const WATCH_RETRY_INTERVAL_MS= 500;   // retry watched viewer/filmstrip media faster after Grok swaps content
 
     // === MP4 metadata embedding ===
     const WRITE_MP4_COMMENT = false;       // IT'S IMPOSSIBLE TO USE IT
@@ -187,6 +188,19 @@ async function headContentLength(u) {
       // On the favorites route, cards often show only "Make video" on hover – treat those as finals too
       if (onFavoritesRoute() && card.querySelector('button[aria-label="Make video"]')) return true;
       return false;
+    }
+
+    function isFilmstripItemNode(el) {
+      return !!(el && el.closest && el.closest('[data-filmstrip-item="true"], [data-filmstrip-scroll="true"]'));
+    }
+
+    function isFilmstripGeneratedImageUrl(u) {
+      const s = String(u || "");
+      return /assets\.grok\.com\/users\//i.test(s) &&
+             (
+               /\/generated\/[0-9a-f-]{36}\/image\.(jpg|jpeg|png)(\?|#|$)/i.test(s) ||
+               /\/[0-9a-f-]{36}\/content(\?|#|$)/i.test(s)
+             );
     }
 
 
@@ -372,6 +386,7 @@ async function headContentLength(u) {
 
 
     // Hook SPA navigation
+    let lastRoutePath = normPath();
     (function hookHistory(){
       const push = history.pushState;
       const replace = history.replaceState;
@@ -383,7 +398,19 @@ async function headContentLength(u) {
 
     function handleRouteChange() {
       if (!onAllowedRoute()) return; // don’t run on site root etc.
-      routeEpoch++;                  // invalidate all prior watchers & tasks
+
+      const newPath = normPath();
+      if (newPath === lastRoutePath) {
+        // Same-route pushState/replaceState should not cancel active downloads.
+        // Still scan once, because Grok may update viewer state without changing the path.
+        if (autoOn) {
+          setTimeout(() => { try { scanImages?.(); scanVideos?.(); } catch(e){} }, 50);
+        }
+        return;
+      }
+
+      lastRoutePath = newPath;
+      routeEpoch++;                  // invalidate all prior watchers & tasks only on real route changes
       resetPerPageState();
       // kick an initial scan after the route settles
       setTimeout(() => { try { scanImages?.(); scanVideos?.(); } catch(e){} }, 150);
@@ -433,6 +460,33 @@ async function headContentLength(u) {
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey && e.shiftKey && e.code === "KeyS") { e.preventDefault(); toggleAuto(); }
   });
+
+  // Filmstrip clicks often mount/swap the real image/video shortly after the thumbnail click.
+  // Scan twice so we catch both the immediate DOM change and the delayed media mount.
+  document.addEventListener("click", (e) => {
+    if (!autoOn) return;
+    const item = e.target && e.target.closest && e.target.closest('[data-filmstrip-item="true"]');
+    if (!item) return;
+
+    setTimeout(() => {
+      try { scanImages(); scanVideos(); } catch (_) {}
+    }, 100);
+
+    setTimeout(() => {
+      try { scanImages(); scanVideos(); } catch (_) {}
+    }, 800);
+  }, true);
+
+  // Filmstrip scrolling can reveal older edits/videos without changing the route.
+  document.addEventListener("scroll", (e) => {
+    if (!autoOn) return;
+    const t = e.target;
+    if (!t || !t.matches || !t.matches('[data-filmstrip-scroll="true"]')) return;
+
+    setTimeout(() => {
+      try { scanImages(); scanVideos(); } catch (_) {}
+    }, 100);
+  }, true);
 
   const mo = new MutationObserver(() => {
     const chips = document.querySelectorAll(PROMPT_SELECTOR);
@@ -533,7 +587,7 @@ async function headContentLength(u) {
           return;
         }
         if (autoOn) { try { await tryDownloadImageIfFinal(imgEl); } catch {} }
-      }, 800);
+      }, WATCH_RETRY_INTERVAL_MS);
     }
 
 
@@ -559,7 +613,7 @@ async function headContentLength(u) {
             const cdn = img.getAttribute("data-grok-cdn-src") || "";
             const raw = img.getAttribute("src") || "";
             const cand = cdn || raw;
-            isEditedThumb = /\/generated\//i.test(cand) && /\/image\.(jpg|jpeg|png)(\?|$)/i.test(cand);
+            isEditedThumb = isFilmstripItemNode(img) && isFilmstripGeneratedImageUrl(cand);
             if (!isEditedThumb) return;
           }
         } catch (_) {}
@@ -644,7 +698,7 @@ async function headContentLength(u) {
           return;
         }
         if (autoOn) await tryDownloadVideoIfFinal(videoEl);
-      }, 800);
+      }, WATCH_RETRY_INTERVAL_MS);
     }
 
 
@@ -671,7 +725,7 @@ async function headContentLength(u) {
           const cdn = imgEl.getAttribute("data-grok-cdn-src") || "";
           const raw = imgEl.getAttribute("src") || "";
           const cand = cdn || raw;
-          return /\/generated\//i.test(cand) && /\/image\.(jpg|jpeg|png)(\?|$)/i.test(cand);
+          return isFilmstripItemNode(imgEl) && isFilmstripGeneratedImageUrl(cand);
         } catch (_) {
           return false;
         }
@@ -871,11 +925,17 @@ async function headContentLength(u) {
 
             imgEl.dataset.grokSaving = "0";
         } catch (e) {
-          console.warn("[Grok downloader][IMG] save failed:", e);
+          if (!isEpochChangedError(e)) {
+            console.warn("[Grok downloader][IMG] save failed:", e);
+          } else {
+            console.debug("[Grok downloader][IMG] stale save cancelled:", e);
+          }
+
           imgEl.dataset.grokSaving = "0";
           // On failure: do NOT persist to seen; also clear force in-flight lock
           if (forcePage) forceInflightThisPage.delete(sha1);
         }
+
       } finally {
         // Always clear in-flight locks
         inflightImgUrl.delete(normSrc);
@@ -1175,7 +1235,11 @@ async function headContentLength(u) {
 
         console.log("[Grok downloader][VID]", forcePage ? "saved (FORCED)" : "saved", filename);
       } catch (e) {
-        console.warn("[Grok downloader][VID] save failed:", e);
+          if (!isEpochChangedError(e)) {
+            console.warn("[Grok downloader][VID] save failed:", e);
+          } else {
+            console.debug("[Grok downloader][VID] stale save cancelled:", e);
+          }
         // Do not mark done on failure
         videoEl.dataset.grokSaving = "0";
         // Let a later retry occur in this page/view
@@ -1732,6 +1796,10 @@ function toLatin1(str) {
     }
     throw new Error("Unsupported video URL scheme");
   }
+
+    function isEpochChangedError(e) {
+      return e === "epoch changed" || String(e || "").includes("epoch changed");
+    }
 
     function simpleDownload(url, filename, myEpoch) {
       return dlQ(() => new Promise((resolve, reject) => {
