@@ -1073,20 +1073,40 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     failed_files = results.get("failed_files", []) or []
     failed_file_count = len(failed_files)
+    failed_destination_count = int(results.get("failed", 0) or 0)
+    uploaded_count = int(results.get("uploaded", 0) or 0)
+    skipped_count = int(totals.get("skipped_planned", 0) or 0)
+    planned_count = int(totals.get("files_planned", 0) or 0)
+    incomplete_count = max(0, planned_count - uploaded_count - skipped_count)
 
     # Summary
     summary = {
-        "uploaded_files": results["uploaded"],
-        "failed_destinations": results["failed"],
+        "uploaded_files": uploaded_count,
+        "failed_destinations": failed_destination_count,
         "bytes_uploaded": results["bytes_uploaded"],
-        "planned_files": totals["files_planned"],
+        "planned_files": planned_count,
         "planned_bytes": totals["bytes_planned"],
-        "skipped_planned": totals.get("skipped_planned", 0),
-        "failed_files": failed_file_count
+        "skipped_planned": skipped_count,
+        "failed_files": failed_file_count,
+        "incomplete_planned": incomplete_count,
+        "ok": failed_destination_count == 0 and failed_file_count == 0 and incomplete_count == 0,
     }
     print(json.dumps(summary, indent=2))
 
-    # Highlight failed-files count in the terminal
+    # Highlight any failure in the terminal.
+    # A destination-level commit failure is still a failed upload, even when the
+    # same local file succeeded in another destination and therefore is not in
+    # the "failed in all destinations" list.
+    if failed_destination_count > 0:
+        logging.error(RED + f"FAILED DESTINATIONS: {failed_destination_count}" + RESET)
+    else:
+        logging.info("FAILED DESTINATIONS: 0")
+
+    if incomplete_count > 0:
+        logging.error(RED + f"INCOMPLETE PLANNED UPLOADS: {incomplete_count}" + RESET)
+    else:
+        logging.info("INCOMPLETE PLANNED UPLOADS: 0")
+
     if failed_file_count > 0:
         logging.error(RED + f"FAILED FILES (all destinations): {failed_file_count}" + RESET)
     else:
@@ -1108,8 +1128,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as e:
         logging.warning(f"Failed to write manifest: {e}")
 
-    # Exit code: non-zero if any file completely failed
-    if failed_file_count > 0:
+    # Exit code: non-zero for any failed destination or incomplete plan.
+    # Previously this only failed when a file failed in *all* destinations, which
+    # let partial multi-destination uploads look successful to the runbook.
+    if failed_destination_count > 0 or failed_file_count > 0 or incomplete_count > 0:
         return 4
     return 0
 
