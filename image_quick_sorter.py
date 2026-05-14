@@ -13,7 +13,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QFileDialog, QGraphicsView, QGraphicsScene,
     QGraphicsPixmapItem, QToolBar, QMessageBox, QStatusBar, QDialog,
-    QFormLayout, QLineEdit, QPushButton, QWidget, QHBoxLayout
+    QFormLayout, QLineEdit, QPushButton, QWidget, QHBoxLayout, QCheckBox
 )
 
 # Robust, tolerant image decode
@@ -42,9 +42,16 @@ def load_config() -> dict:
                 data = raw
     except Exception:
         pass
-    # ensure digit keys 1..9 exist
+    # Backward compatible storage:
+    #   data["1"]..data["9"]          -> destination paths (legacy)
+    #   data["slot_titles"]          -> optional labels for buttons/settings
+    #   data["slot_enabled"]         -> optional UI enabled flags
     for i in range(1, 10):
         data.setdefault(str(i), "")
+    if not isinstance(data.get("slot_titles"), dict):
+        data["slot_titles"] = {}
+    if not isinstance(data.get("slot_enabled"), dict):
+        data["slot_enabled"] = {}
     return data
 
 def save_config(cfg: dict) -> None:
@@ -541,40 +548,86 @@ class ImageView(QGraphicsView):
 # -------------------- Dest dialog --------------------
 
 class DestFoldersDialog(QDialog):
-    def __init__(self, mapping: Dict[str, str], parent: Optional[QWidget] = None):
+    def __init__(self, mapping: Dict[str, str], titles: Dict[str, str], enabled: Dict[str, bool], copy_mode: bool = False, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("Destination Folders")
         self.mapping = mapping.copy()
+        self.titles = titles.copy()
+        self.enabled = enabled.copy()
+        self.copy_mode = bool(copy_mode)
+
         form = QFormLayout(self)
-        self.edits: Dict[str, QLineEdit] = {}
+
+        self.copy_mode_check = QCheckBox("Copy mode - copy files to the selected folder and skip them only in this running session; originals stay in place for a later pass.", self)
+        self.copy_mode_check.setChecked(self.copy_mode)
+        form.addRow("Mode:", self.copy_mode_check)
+        self.enabled_checks: Dict[str, QCheckBox] = {}
+        self.title_edits: Dict[str, QLineEdit] = {}
+        self.path_edits: Dict[str, QLineEdit] = {}
+
         for key in [str(i) for i in range(1, 10)]:
-            row = QWidget(self); h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0)
-            edit = QLineEdit(self.mapping.get(key, ""), self)
-            btn = QPushButton("Browse…", self)
-            btn.clicked.connect(lambda _, k=key, e=edit: self._browse_for(k, e))
-            h.addWidget(edit, 1); h.addWidget(btn, 0)
-            form.addRow(f"Key {key} →", row)
-            self.edits[key] = edit
-        btns = QWidget(self); hb = QHBoxLayout(btns); hb.setContentsMargins(0, 0, 0, 0)
-        ok = QPushButton("OK", self); cancel = QPushButton("Cancel", self)
-        ok.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
-        hb.addStretch(1); hb.addWidget(ok); hb.addWidget(cancel); form.addRow(btns)
+            row = QWidget(self)
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+
+            chk = QCheckBox(self)
+            chk.setChecked(bool(self.enabled.get(key, False)))
+            title_edit = QLineEdit(self.titles.get(key, ""), self)
+            title_edit.setPlaceholderText(f"Option {key}")
+            path_edit = QLineEdit(self.mapping.get(key, ""), self)
+            path_edit.setPlaceholderText("Destination folder")
+            btn = QPushButton("Browse...", self)
+            btn.clicked.connect(lambda _, k=key, e=path_edit: self._browse_for(k, e))
+
+            h.addWidget(chk, 0)
+            h.addWidget(title_edit, 1)
+            h.addWidget(path_edit, 3)
+            h.addWidget(btn, 0)
+            form.addRow(f"Key {key}:", row)
+
+            self.enabled_checks[key] = chk
+            self.title_edits[key] = title_edit
+            self.path_edits[key] = path_edit
+
+        btns = QWidget(self)
+        hb = QHBoxLayout(btns)
+        hb.setContentsMargins(0, 0, 0, 0)
+        ok = QPushButton("OK", self)
+        cancel = QPushButton("Cancel", self)
+        ok.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        hb.addStretch(1)
+        hb.addWidget(ok)
+        hb.addWidget(cancel)
+        form.addRow(btns)
+
     def _browse_for(self, key: str, edit: QLineEdit):
         d = QFileDialog.getExistingDirectory(self, f"Choose folder for key {key}")
-        if d: edit.setText(d)
-    def values(self) -> Dict[str, str]:
-        return {k: e.text().strip() for k, e in self.edits.items()}
+        if d:
+            edit.setText(d)
+            self.enabled_checks[key].setChecked(True)
+
+    def values(self) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, bool], bool]:
+        paths = {k: e.text().strip() for k, e in self.path_edits.items()}
+        titles = {k: e.text().strip() for k, e in self.title_edits.items()}
+        enabled = {k: bool(e.isChecked()) for k, e in self.enabled_checks.items()}
+        return paths, titles, enabled, bool(self.copy_mode_check.isChecked())
 
 
 # -------------------- Main window --------------------
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, active_slots: Optional[List[str]] = None, copy_mode: Optional[bool] = None):
         super().__init__()
         self.setWindowTitle("Image Quick Sorter (Async)")
         self.resize(1100, 800)
 
         self._load_token = None
+        self._initial_copy_mode = copy_mode
+        # If CLI supplied any slot folders/titles, use exactly that slot set.
+        # Otherwise, fall back to saved enabled slots / legacy non-empty paths.
+        self._cli_active_slots = set(active_slots or [])
+        self._copied_sources: set[str] = set()
 
         self.view = ImageView(self)
         self.setCentralWidget(self.view)
@@ -677,6 +730,34 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self.config = load_config()
+        if self._initial_copy_mode is None:
+            self.copy_mode = bool(self.config.get("copy_mode", False))
+        else:
+            self.copy_mode = bool(self._initial_copy_mode)
+
+        # Destination mapping must exist before slot_enabled is derived and before
+        # main() applies CLI overrides after MainWindow construction.
+        self.mapping: Dict[str, str] = {
+            str(i): str(self.config.get(str(i), ""))
+            for i in range(1, 10)
+        }
+
+        self.slot_titles: Dict[str, str] = {str(i): str(self.config.get("slot_titles", {}).get(str(i), "")) for i in range(1, 10)}
+        raw_enabled = self.config.get("slot_enabled", {}) if isinstance(self.config.get("slot_enabled"), dict) else {}
+        self.slot_enabled: Dict[str, bool] = {}
+        for i in range(1, 10):
+            k = str(i)
+            if self._cli_active_slots:
+                self.slot_enabled[k] = k in self._cli_active_slots
+            elif k in raw_enabled:
+                self.slot_enabled[k] = bool(raw_enabled.get(k))
+            else:
+                # Legacy behavior: old configs did not have checkboxes, so a non-empty path is active.
+                self.slot_enabled[k] = bool(self.mapping.get(k, "").strip())
+
+        # Build visible sort buttons after config/CLI state is available.
+        self._slot_actions: Dict[str, QAction] = {}
+        self._rebuild_slot_actions()
 
         # last crop rectangle as ratios {x,y,w,h} persisted in config
         lcr = self.config.get("last_crop_ratio")
@@ -685,8 +766,54 @@ class MainWindow(QMainWindow):
         )
 
 
-        # mapping = only digit keys 1..9 from config
-        self.mapping = {k: v for k, v in self.config.items() if k.isdigit() and 1 <= int(k) <= 9}
+
+    def _slot_title(self, key: str) -> str:
+        title = self.slot_titles.get(key, "").strip()
+        return title or f"Option {key}"
+
+    def _visible_slots(self) -> List[str]:
+        return [str(i) for i in range(1, 10) if self.slot_enabled.get(str(i), False)]
+
+    def _slot_button_text(self, key: str) -> str:
+        return f"{key}: {self._slot_title(key)}"
+
+    def _rebuild_slot_actions(self) -> None:
+        if not hasattr(self, "slot_toolbar"):
+            self.slot_toolbar = QToolBar("Sort Options", self)
+            self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.slot_toolbar)
+            self.slot_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            self.slot_toolbar.setStyleSheet("""
+            QToolBar { spacing: 6px; }
+            QToolButton {
+              padding: 6px 10px;
+              border-radius: 8px;
+              border: 1px solid #d0d0d0;
+              background: #050505;
+            }
+            QToolButton:hover { background: #151515; }
+            """)
+        self.slot_toolbar.clear()
+        self._slot_actions = {}
+        slots = self._visible_slots()
+        if not slots:
+            return
+        for key in slots:
+            act = QAction(self._slot_button_text(key), self)
+            act.setShortcut(QKeySequence(key))
+            act.triggered.connect(lambda _, k=key: self.move_to_slot(k))
+            self.slot_toolbar.addAction(act)
+            self._slot_actions[key] = act
+
+    def _remove_current_from_runtime_list(self) -> None:
+        """Advance as if the file moved, without touching the source file."""
+        if not (0 <= self.index < len(self.files)):
+            return
+        del self.files[self.index]
+        if not self.files:
+            self.index = -1
+        else:
+            self.index = self.index % len(self.files)
+        self._show_current()
 
     def _to_jpeg_compatible(self, im: Image.Image, bg=(255, 255, 255)) -> Image.Image:
         """
@@ -1273,6 +1400,28 @@ class MainWindow(QMainWindow):
                 self._show_current()
                 self.status.showMessage("Undo: restored file", 3000)
 
+            elif typ == "copy":
+                src_path = op.get("src")
+                copied_path = op.get("dest")
+                orig_index = int(op.get("src_index", 0))
+
+                if copied_path and os.path.exists(copied_path):
+                    os.unlink(copied_path)
+
+                if src_path:
+                    self._copied_sources.discard(src_path)
+                    if os.path.exists(src_path) and src_path not in self.files:
+                        if self.folder and os.path.dirname(src_path) == self.folder:
+                            ins = min(max(0, orig_index), len(self.files))
+                            self.files.insert(ins, src_path)
+                            self.index = ins
+                        else:
+                            self.files.append(src_path)
+                            self.index = len(self.files) - 1
+
+                self._show_current()
+                self.status.showMessage("Undo: removed copied file", 3000)
+
             elif typ == "crop":
                 orig = op.get("orig")
                 backup = op.get("backup")
@@ -1388,6 +1537,8 @@ class MainWindow(QMainWindow):
         out = []
         for name in os.listdir(d):
             p = os.path.join(d, name)
+            if p in self._copied_sources:
+                continue
             if not os.path.isfile(p): continue
             if name.startswith("."): continue
             ext = os.path.splitext(name)[1].lower()
@@ -1510,53 +1661,82 @@ class MainWindow(QMainWindow):
         if not self._ensure_no_pending_crop():
             return
 
-        if not (0 <= self.index < len(self.files)): return
+        if not (0 <= self.index < len(self.files)):
+            return
+        if not self.slot_enabled.get(digit, False):
+            QMessageBox.information(self, "Option disabled", f"Key {digit} is disabled in Settings.")
+            return
+
         dest_root = self.mapping.get(digit, "").strip()
         if not dest_root:
             QMessageBox.information(self, "No folder set",
-                                    f"No destination folder for key {digit}. Use Settings…")
+                                    f"No destination folder for key {digit}. Use Settings...")
             return
         if not os.path.isdir(dest_root):
-            try: os.makedirs(dest_root, exist_ok=True)
+            try:
+                os.makedirs(dest_root, exist_ok=True)
             except Exception as e:
-                QMessageBox.warning(self, "Create folder failed", str(e)); return
+                QMessageBox.warning(self, "Create folder failed", str(e))
+                return
 
         src = self.files[self.index]
         base = os.path.basename(src)
         dest = os.path.join(dest_root, base)
         if os.path.exists(dest):
-            stem, ext = os.path.splitext(base); k = 1
+            stem, ext = os.path.splitext(base)
+            k = 1
             while True:
                 alt = os.path.join(dest_root, f"{stem}_{k}{ext}")
-                if not os.path.exists(alt): dest = alt; break
+                if not os.path.exists(alt):
+                    dest = alt
+                    break
                 k += 1
 
         try:
-            shutil.move(src, dest)
-            # record for undo
-            self._undo_stack.append({"op":"move", "src": src, "dest": dest, "src_index": self.index})
-            self.act_undo.setEnabled(True)
-            # remove from list and show next
-            del self.files[self.index]
-            if not self.files:
-                self.index = -1
+            if self.copy_mode:
+                shutil.copy2(src, dest)
+                self._copied_sources.add(src)
+                self._undo_stack.append({"op": "copy", "src": src, "dest": dest, "src_index": self.index})
+                self.act_undo.setEnabled(True)
+                label = self._slot_title(digit)
+                self._remove_current_from_runtime_list()
+                self.status.showMessage(f"Copied to {label}: {os.path.basename(dest)}", 3000)
             else:
-                self.index = self.index % len(self.files)
-            self._show_current()
+                shutil.move(src, dest)
+                # record for undo
+                self._undo_stack.append({"op": "move", "src": src, "dest": dest, "src_index": self.index})
+                self.act_undo.setEnabled(True)
+                # remove from list and show next
+                del self.files[self.index]
+                if not self.files:
+                    self.index = -1
+                else:
+                    self.index = self.index % len(self.files)
+                self._show_current()
+                self.status.showMessage(f"Moved to {self._slot_title(digit)}: {os.path.basename(dest)}", 3000)
         except Exception as e:
-            QMessageBox.warning(self, "Move failed", str(e)); return
+            QMessageBox.warning(self, "Sort failed", str(e))
+            return
 
 
     # ---------- settings ----------
     def edit_settings(self):
-        dlg = DestFoldersDialog(self.mapping, self)
+        dlg = DestFoldersDialog(self.mapping, self.slot_titles, self.slot_enabled, self.copy_mode, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_map = dlg.values()
-            # update both mapping and config
+            new_map, new_titles, new_enabled, new_copy_mode = dlg.values()
+            # update paths, titles, and enabled flags. Keep non-slot config values intact.
             self.mapping.update(new_map)
-            self.config.update(self.mapping)  # keep non-digit keys (like last_path) intact
+            self.slot_titles.update(new_titles)
+            self.slot_enabled.update(new_enabled)
+            self.copy_mode = bool(new_copy_mode)
+            self.config.update(self.mapping)
+            self.config["slot_titles"] = self.slot_titles
+            self.config["slot_enabled"] = self.slot_enabled
+            self.config["copy_mode"] = self.copy_mode
             save_config(self.config)
-            self.status.showMessage("Saved destination folders", 3000)
+            self._rebuild_slot_actions()
+            mode_text = "copy mode" if self.copy_mode else "move mode"
+            self.status.showMessage(f"Saved destination folders ({mode_text})", 3000)
     def closeEvent(self, ev):
         if self._ensure_no_pending_crop():
             ev.accept()
@@ -1577,8 +1757,14 @@ def parse_cli():
     p.add_argument("--image", dest="image", help="Start with this image (overrides --root-folder).")
     for i in range(1, 10):
         p.add_argument(f"--{i}", dest=f"slot{i}", help=f"Destination folder for key {i}.")
+        p.add_argument(f"--{i}-title", dest=f"slot{i}_title", help=f"Display title for key {i}.")
+        p.add_argument(f"--title-{i}", dest=f"slot{i}_title_alt", help=argparse.SUPPRESS)
+    p.add_argument("--copy-mode", action="store_true", default=None,
+                   help="Copy files to destination instead of moving them; source files are skipped only for this runtime.")
+    p.add_argument("--move-mode", dest="copy_mode", action="store_false",
+                   help="Force normal move mode, ignoring saved UI copy-mode setting.")
     p.add_argument("--save-mapping", action="store_true",
-                   help="Persist CLI slot folders into config.")
+                   help="Persist CLI slot folders/titles into config.")
     args, _ = p.parse_known_args()  # don't consume Qt args
     return args
 
@@ -1588,18 +1774,36 @@ def main():
     args = parse_cli()
 
     app = QApplication(sys.argv)
-    win = MainWindow()
-
-    # Apply slot overrides
-    updated = False
+    cli_active_slots = []
     for i in range(1, 10):
         val = getattr(args, f"slot{i}", None)
+        title = getattr(args, f"slot{i}_title", None) or getattr(args, f"slot{i}_title_alt", None)
+        if val or title:
+            cli_active_slots.append(str(i))
+
+    win = MainWindow(active_slots=cli_active_slots, copy_mode=args.copy_mode)
+
+    # Apply slot overrides. If any slot was supplied on the CLI, exactly those slots are enabled.
+    updated = False
+    for i in range(1, 10):
+        key = str(i)
+        val = getattr(args, f"slot{i}", None)
+        title = getattr(args, f"slot{i}_title", None) or getattr(args, f"slot{i}_title_alt", None)
         if val:
-            key = str(i)
             win.mapping[key] = val
-            win.config[key] = val
             updated = True
+        if title:
+            win.slot_titles[key] = title
+            updated = True
+        if cli_active_slots:
+            win.slot_enabled[key] = key in cli_active_slots
+    if cli_active_slots or updated:
+        win._rebuild_slot_actions()
     if updated and args.save_mapping:
+        win.config.update(win.mapping)
+        win.config["slot_titles"] = win.slot_titles
+        win.config["slot_enabled"] = win.slot_enabled
+        win.config["copy_mode"] = win.copy_mode
         save_config(win.config)
 
     win.show()
