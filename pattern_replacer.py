@@ -222,14 +222,21 @@ def expand_sum_inc(match: re.Match) -> str:
                 if nslots <= 0:
                     return "[sum_inc error: no slots]"
                 base = S / Decimal(nslots)
-                min_v = base * min_mult
-                max_v = base * max_mult
 
-                # Basic feasibility check (guard against weird decimals)
-                if (min_v * Decimal(nslots)) > (S + (q / 2)):
-                    return "[sum_inc error: min_mult too high for this sum]"
-                if (max_v * Decimal(nslots)) < (S - (q / 2)):
-                    return "[sum_inc error: max_mult too low for this sum]"
+                # Multipliers are applied to the signed base. For negative sums,
+                # base*min_mult is numerically higher than base*max_mult, so normalize
+                # the numeric bounds before doing feasibility checks/allocation.
+                a_v = base * min_mult
+                b_v = base * max_mult
+                low_v = min(a_v, b_v)
+                high_v = max(a_v, b_v)
+
+                # Basic feasibility check in numeric bound space.
+                # We need: low_v*nslots <= S <= high_v*nslots.
+                if (low_v * Decimal(nslots)) > (S + (q / 2)):
+                    return "[sum_inc error: lower random bound too high for this sum]"
+                if (high_v * Decimal(nslots)) < (S - (q / 2)):
+                    return "[sum_inc error: upper random bound too low for this sum]"
 
                 idxs = list(range(nslots))
                 random.shuffle(idxs)
@@ -244,11 +251,11 @@ def expand_sum_inc(match: re.Match) -> str:
                         remaining = Decimal(0)
                         break
 
-                    min_rem = min_v * Decimal(rem_slots)
-                    max_rem = max_v * Decimal(rem_slots)
+                    min_rem = low_v * Decimal(rem_slots)
+                    max_rem = high_v * Decimal(rem_slots)
 
-                    low = min_v
-                    high = max_v
+                    low = low_v
+                    high = high_v
 
                     # Ensure the pick keeps the remaining feasible
                     low2 = max(low, remaining - max_rem)
@@ -268,8 +275,8 @@ def expand_sum_inc(match: re.Match) -> str:
                 vals = [v.quantize(q, rounding=ROUND_HALF_UP) for v in vals_raw]
 
                 # Bounds in quantized space (so drift-fix stays within limits)
-                min_b = (min_v).quantize(q, rounding=ROUND_HALF_UP)
-                max_b = (max_v).quantize(q, rounding=ROUND_HALF_UP)
+                min_b = (low_v).quantize(q, rounding=ROUND_HALF_UP)
+                max_b = (high_v).quantize(q, rounding=ROUND_HALF_UP)
 
                 # Fix rounding drift without violating bounds
                 drift = (S - sum(vals, Decimal(0))).quantize(q, rounding=ROUND_HALF_UP)
@@ -535,6 +542,9 @@ _loop_re = re.compile(r'<loop_(\d+)>(.*?)</loop>', re.DOTALL)
 _rand_int_re = re.compile(r'<rand_int_(-?\d+)_(-?\d+)>')
 _rand_float_re = re.compile(r'<rand_float_(-?\d+(?:\.\d+)?)_(-?\d+(?:\.\d+)?)>')
 _sum_inc_re = re.compile(r'<sum_inc\b([^>]*)>(.*?)</sum_inc>', re.DOTALL)
+_merge_re = re.compile(r'<merge\b([^>]*)>(.*?)</merge>', re.DOTALL)
+_list_re = re.compile(r'<list\b[^>]*>(.*?)</list>', re.DOTALL)
+_source_tag_re = re.compile(r'<(?:sum_inc\b[^>]*>.*?</sum_inc>|loop_\d+>.*?</loop>)', re.DOTALL)
 
 
 def _expand_loop(text: str) -> str:
@@ -565,12 +575,173 @@ def _replace_rand_float(text: str) -> str:
     return _rand_float_re.sub(repl, text)
 
 
-def process_text(src: str) -> str:
+def _decode_attr_text(value: str | None, default: str = "") -> str:
+    if value is None:
+        return default
+    return (
+        str(value)
+        .replace(r"\n", "\n")
+        .replace(r"\t", "\t")
+        .replace(r"\s", " ")
+    )
+
+
+def _split_nonempty_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _process_text_no_merge(src: str) -> str:
     out = src
     out = _expand_loop(out)
     out = _sum_inc_re.sub(lambda m: expand_sum_inc(m), out)
     out = _replace_rand_int(out)
     out = _replace_rand_float(out)
+    return out
+
+
+def _extract_merge_sources(body: str) -> list[str]:
+    """
+    Extract list sources from a merge body.
+
+    Preferred explicit form:
+      <list>...</list>
+      <list>...</list>
+
+    Convenience form:
+      <merge ...>
+        <sum_inc ...>...</sum_inc>
+        <sum_inc ...>...</sum_inc>
+      </merge>
+
+    Each top-level <sum_inc> or <loop_N> block becomes one generated list.
+    """
+    explicit_lists = [m.group(1).strip() for m in _list_re.finditer(body)]
+    if explicit_lists:
+        return explicit_lists
+
+    sources = [m.group(0).strip() for m in _source_tag_re.finditer(body)]
+    if sources:
+        return sources
+
+    # Fallback: allow manually written lists separated by a line containing ---
+    parts = [part.strip() for part in re.split(r'(?m)^\s*---\s*$', body) if part.strip()]
+    return parts
+
+
+def _random_index_sequence(length: int, total: int) -> list[int]:
+    if length <= 0:
+        return []
+    out: list[int] = []
+    previous: int | None = None
+    while len(out) < total:
+        chunk = list(range(length))
+        random.shuffle(chunk)
+        if previous is not None and length > 1 and chunk and chunk[0] == previous:
+            # Avoid the same item at the shuffle boundary when possible.
+            swap_i = 1
+            while swap_i < len(chunk) and chunk[swap_i] == previous:
+                swap_i += 1
+            if swap_i < len(chunk):
+                chunk[0], chunk[swap_i] = chunk[swap_i], chunk[0]
+        out.extend(chunk)
+        previous = out[-1]
+    return out[:total]
+
+
+def _merge_index_orders(mode: str, list_count: int, lengths: list[int], total: int) -> list[list[int]]:
+    mode = (mode or "a_order_b_order").strip().lower()
+    mode = mode.replace("-", "_")
+
+    aliases = {
+        "order": "a_order_b_order",
+        "zip": "a_order_b_order",
+        "normal": "a_order_b_order",
+        "same": "a_order_b_order",
+        "reverse": "a_order_b_reverse",
+        "opposite": "a_order_b_reverse",
+        "a_order_b_opposite": "a_order_b_reverse",
+        "random": "a_order_b_random_no_repeat",
+        "order_random": "a_order_b_random_no_repeat",
+        "b_random": "a_order_b_random_no_repeat",
+        "shuffle_b": "a_order_b_random_no_repeat",
+        "both_random": "both_random_no_repeat",
+        "shuffle_all": "both_random_no_repeat",
+    }
+    mode = aliases.get(mode, mode)
+
+    orders: list[list[int]] = []
+    for li, length in enumerate(lengths):
+        if length <= 0:
+            orders.append([])
+            continue
+
+        if mode == "both_random_no_repeat":
+            orders.append(_random_index_sequence(length, total))
+        elif li == 0:
+            orders.append([i % length for i in range(total)])
+        elif mode == "a_order_b_reverse":
+            orders.append([(length - 1) - (i % length) for i in range(total)])
+        elif mode == "a_order_b_random_no_repeat":
+            orders.append(_random_index_sequence(length, total))
+        else:
+            # a_order_b_order and unknown modes both fall back to stable order.
+            orders.append([i % length for i in range(total)])
+
+    return orders
+
+
+def expand_merge(match: re.Match) -> str:
+    attrs = _parse_attrs(match.group(1) or "")
+    body = match.group(2) or ""
+
+    sources = _extract_merge_sources(body)
+    if len(sources) < 2:
+        return "[merge error: need at least 2 generated lists or <list> blocks]"
+
+    lists: list[list[str]] = []
+    for src in sources:
+        expanded = _process_text_no_merge(src)
+        rows = _split_nonempty_lines(expanded)
+        if not rows:
+            return "[merge error: one source produced no rows]"
+        lists.append(rows)
+
+    length_mode = (attrs.get("length") or attrs.get("count") or "max").strip().lower()
+    lengths = [len(x) for x in lists]
+    if length_mode in ("min", "shortest"):
+        total = min(lengths)
+    elif length_mode in ("a", "first", "list1", "left"):
+        total = lengths[0]
+    elif length_mode in ("b", "second", "list2", "right") and len(lengths) >= 2:
+        total = lengths[1]
+    else:
+        total = max(lengths)
+
+    if total <= 0:
+        return "[merge error: no rows to emit]"
+
+    mode = attrs.get("mode") or attrs.get("merge") or "a_order_b_order"
+    sep = _decode_attr_text(attrs.get("sep"), "")
+    row_sep = _decode_attr_text(attrs.get("row_sep") or attrs.get("line_sep"), "\n")
+
+    orders = _merge_index_orders(mode, len(lists), lengths, total)
+
+    lines: list[str] = []
+    for i in range(total):
+        parts = []
+        for li, rows in enumerate(lists):
+            parts.append(rows[orders[li][i]])
+        lines.append(sep.join(parts))
+
+    return row_sep.join(lines)
+
+
+def process_text(src: str) -> str:
+    out = src
+    # Merge must run before regular tag expansion, so each inner generator remains
+    # a separate list source instead of becoming one flat text block.
+    out = _merge_re.sub(lambda m: expand_merge(m), out)
+    out = _process_text_no_merge(out)
     return out
 
 # ------------------------------- UI widgets --------------------------------
