@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Imagine Quota Checker Panel
 // @namespace    alexds9.scripts
-// @version      1.0.0
-// @description  Compact draggable Grok Imagine quota checker using Grok's own quota_info endpoint.
+// @version      1.3.1
+// @description  Draggable Grok Imagine quota checker with fixed compact/minimized behavior.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
 // @run-at       document-idle
@@ -29,6 +29,7 @@
   const K_FOLDED = LS_PREFIX + "folded";
   const K_AUTO = LS_PREFIX + "autoRefresh";
   const K_INTERVAL = LS_PREFIX + "intervalSeconds";
+  const K_COMPACT = LS_PREFIX + "compact";
 
   const API_URL = "https://grok.com/rest/media/imagine/quota_info";
 
@@ -50,6 +51,7 @@
     lastData: null,
     lastError: null,
     folded: lsGet(K_FOLDED, "0") === "1",
+    compact: lsGet(K_COMPACT, "0") === "1",
   };
 
   function lsGet(key, fallback) {
@@ -293,6 +295,160 @@
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         white-space: pre-wrap;
       }
+
+      #grok-quota-panel.gqp-compact {
+        width: 345px;
+        padding: 6px;
+        border-radius: 10px;
+        font-size: 11px;
+        line-height: 1.15;
+      }
+      #grok-quota-panel.gqp-compact .gqp-header {
+        gap: 4px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-title {
+        font-size: 12px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-btn {
+        padding: 3px 5px;
+        border-radius: 7px;
+        font-size: 10px;
+        line-height: 1.1;
+      }
+      #grok-quota-panel.gqp-compact .gqp-content {
+        margin-top: 5px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-controls {
+        gap: 5px;
+        margin-bottom: 5px;
+      }
+      #grok-quota-panel.gqp-compact input[type="number"] {
+        width: 46px;
+        height: 22px;
+        padding: 2px 4px;
+        border-radius: 6px;
+        font-size: 10px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-note {
+        display: none;
+      }
+      #grok-quota-panel.gqp-compact .gqp-grid {
+        gap: 3px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-card {
+        display: grid;
+        grid-template-columns: minmax(82px, 1fr) 52px 42px 36px 72px;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 5px;
+        border-radius: 7px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-card-head {
+        display: contents;
+        margin-bottom: 0;
+      }
+      #grok-quota-panel.gqp-compact .gqp-service-title {
+        font-size: 11px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #grok-quota-panel.gqp-compact .gqp-badge {
+        padding: 2px 4px;
+        font-size: 8px;
+        text-align: center;
+      }
+      #grok-quota-panel.gqp-compact .gqp-stats {
+        display: contents;
+      }
+      #grok-quota-panel.gqp-compact .gqp-stat {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        border-radius: 0;
+      }
+      #grok-quota-panel.gqp-compact .gqp-label {
+        display: none;
+      }
+      #grok-quota-panel.gqp-compact .gqp-value {
+        font-size: 11px;
+        font-weight: 800;
+        text-align: right;
+      }
+      #grok-quota-panel.gqp-compact .gqp-status {
+        margin-top: 4px;
+        padding: 4px 5px;
+        border-radius: 7px;
+        max-height: 38px;
+        font-size: 10px;
+      }
+      #grok-quota-panel.gqp-folded {
+        width: 318px;
+        max-width: calc(100vw - 24px);
+        padding: 8px;
+      }
+      #grok-quota-panel.gqp-folded .gqp-header {
+        display: grid;
+        grid-template-columns: minmax(56px, 1fr) auto auto auto;
+        gap: 6px;
+        align-items: center;
+      }
+      #grok-quota-panel.gqp-folded .gqp-title {
+        min-width: 0;
+        flex: none;
+        line-height: 1.15;
+      }
+      #grok-quota-panel.gqp-folded .gqp-btn {
+        min-width: 0;
+        flex: none;
+        white-space: nowrap;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded {
+        width: 302px;
+        max-width: calc(100vw - 24px);
+        padding: 7px;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-header {
+        display: grid;
+        grid-template-columns: minmax(50px, 1fr) auto auto auto;
+        gap: 5px;
+        align-items: center;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-title {
+        min-width: 0;
+        flex: none;
+        font-size: 12px;
+        line-height: 1.05;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-btn {
+        flex: none;
+        white-space: nowrap;
+        padding-left: 5px;
+        padding-right: 5px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-status {
+        max-height: 20px;
+        height: 20px;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      #grok-quota-panel.gqp-compact .gqp-legend {
+        display: grid;
+      }
+      #grok-quota-panel .gqp-legend {
+        display: none;
+        grid-template-columns: minmax(82px, 1fr) 52px 42px 36px 72px;
+        gap: 4px;
+        padding: 0 5px 2px 5px;
+        color: rgba(255,255,255,0.48);
+        font-size: 9px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+      #grok-quota-panel .gqp-legend span:not(:first-child) { text-align: right; }
+
       #grok-quota-panel .gqp-warn { color: #ffcc66; font-weight: 800; }
       #grok-quota-panel .gqp-err { color: #ff8b8b; font-weight: 800; }
     `;
@@ -372,6 +528,13 @@
     const div = el("div", { textContent: line });
     if (kind === "error") div.className = "gqp-err";
     if (kind === "warn") div.className = "gqp-warn";
+
+    const panel = document.getElementById("grok-quota-panel");
+    if (panel && panel.classList.contains("gqp-compact")) {
+      status.textContent = "";
+      status.appendChild(div);
+      return;
+    }
 
     status.prepend(div);
   }
@@ -461,6 +624,24 @@
     panel.style.right = "auto";
   }
 
+  function keepPanelOnScreen(panel) {
+    if (!panel) return;
+    const r = panel.getBoundingClientRect();
+    const margin = 8;
+    let left = r.left;
+    let top = r.top;
+
+    if (r.right > window.innerWidth - margin) left = window.innerWidth - r.width - margin;
+    if (r.bottom > window.innerHeight - margin) top = window.innerHeight - r.height - margin;
+    if (left < margin) left = margin;
+    if (top < margin) top = margin;
+
+    panel.style.left = Math.round(left) + "px";
+    panel.style.top = Math.round(top) + "px";
+    panel.style.right = "auto";
+    saveJson(K_POS, { x: Math.round(left), y: Math.round(top) });
+  }
+
   function enableDrag(panel, handle) {
     let dragging = false;
     let startX = 0;
@@ -513,6 +694,7 @@
     const panel = el("div");
     panel.id = "grok-quota-panel";
     if (S.folded) panel.classList.add("gqp-folded");
+    if (S.compact) panel.classList.add("gqp-compact");
 
     const header = el("div");
     header.className = "gqp-header";
@@ -524,12 +706,17 @@
     refreshBtn.id = "gqp-refresh";
     refreshBtn.className = "gqp-btn";
 
+    const compactBtn = el("button", { textContent: S.compact ? "Normal" : "Compact" });
+    compactBtn.id = "gqp-compact-toggle";
+    compactBtn.className = "gqp-btn";
+
     const foldBtn = el("button", { textContent: S.folded ? "Open" : "Minimize" });
     foldBtn.id = "gqp-fold";
     foldBtn.className = "gqp-btn";
 
     header.appendChild(title);
     header.appendChild(refreshBtn);
+    header.appendChild(compactBtn);
     header.appendChild(foldBtn);
 
     const content = el("div");
@@ -557,11 +744,15 @@
     intervalLabel.appendChild(el("span", { textContent: "sec" }));
 
     const note = el("span", { textContent: "Private Grok endpoint. Manual refresh is safest." });
-    note.className = "gqp-warn";
+    note.className = "gqp-warn gqp-note";
 
     controls.appendChild(autoLabel);
     controls.appendChild(intervalLabel);
     controls.appendChild(note);
+
+    const legend = el("div");
+    legend.className = "gqp-legend";
+    ["Type", "State", "Quota", "Reset", "Next"].forEach((x) => legend.appendChild(el("span", { textContent: x })));
 
     const grid = el("div");
     grid.id = "gqp-grid";
@@ -576,6 +767,7 @@
     status.className = "gqp-status";
 
     content.appendChild(controls);
+    content.appendChild(legend);
     content.appendChild(grid);
     content.appendChild(status);
 
@@ -585,14 +777,46 @@
 
     applySavedPos(panel);
     enableDrag(panel, header);
+    requestAnimationFrame(() => keepPanelOnScreen(panel));
+    window.addEventListener("resize", () => keepPanelOnScreen(panel));
 
-    refreshBtn.addEventListener("click", loadQuota);
+    refreshBtn.addEventListener("click", () => {
+      // If the panel is minimized, Refresh should also open it so the result is visible.
+      if (S.folded) {
+        S.folded = false;
+        panel.classList.remove("gqp-folded");
+        foldBtn.textContent = "Minimize";
+        lsSet(K_FOLDED, "0");
+        requestAnimationFrame(() => keepPanelOnScreen(panel));
+      }
+
+      loadQuota();
+    });
+
+    compactBtn.addEventListener("click", () => {
+      S.compact = !S.compact;
+      panel.classList.toggle("gqp-compact", S.compact);
+      compactBtn.textContent = S.compact ? "Normal" : "Compact";
+      lsSet(K_COMPACT, S.compact ? "1" : "0");
+
+      // When minimized, switching mode should also open the quota info area,
+      // both Compact -> Normal and Normal -> Compact.
+      if (S.folded) {
+        S.folded = false;
+        panel.classList.remove("gqp-folded");
+        foldBtn.textContent = "Minimize";
+        lsSet(K_FOLDED, "0");
+      }
+
+      requestAnimationFrame(() => keepPanelOnScreen(panel));
+    });
 
     foldBtn.addEventListener("click", () => {
       S.folded = !S.folded;
       panel.classList.toggle("gqp-folded", S.folded);
       foldBtn.textContent = S.folded ? "Open" : "Minimize";
       lsSet(K_FOLDED, S.folded ? "1" : "0");
+      requestAnimationFrame(() => keepPanelOnScreen(panel));
     });
 
     autoCheck.addEventListener("change", () => {
