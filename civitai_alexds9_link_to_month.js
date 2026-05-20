@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Alexds9 HF Collection Link
 // @namespace    http://tampermonkey.net/
-// @version      1.01
+// @version      1.02
 // @description  On Civitai model pages by alexds9, convert Month Year text in the model description into a Hugging Face collection link.
 // @author       OpenAI
 // @match        https://civitai.com/models/*
@@ -16,38 +16,64 @@
 
     const TARGET_USERNAME = 'alexds9';
     const HF_ORG = 'AIxFuneStudio';
+    const DEBUG = false;
 
     const MONTHS = [
         'January', 'February', 'March', 'April', 'May', 'June',
         'July', 'August', 'September', 'October', 'November', 'December'
     ];
 
+    // Keep this reasonably future-proof. The script is harmless if no matching text exists.
     const MONTH_RE = new RegExp(
-        '\\b(' + MONTHS.join('|') + ')\\s+(2025|2026)\\b',
+        '\\b(' + MONTHS.join('|') + ')\\s+(2025|2026|2027|2028|2029|2030)\\b',
         'gi'
     );
 
     function log(...args) {
-        console.log('[alexds9-hf-link]', ...args);
+        if (DEBUG) console.log('[alexds9-hf-link]', ...args);
     }
 
     function normalizeText(s) {
         return (s || '').replace(/\s+/g, ' ').trim();
     }
 
+    function isAllowedCivitaiHost() {
+        return /^civitai\.(com|green|red)$/i.test(location.hostname);
+    }
+
     function isModelPage() {
-        return /^https:\/\/civitai\.com\/models\/\d+/i.test(location.href);
+        return isAllowedCivitaiHost() && /^\/models\/\d+/i.test(location.pathname);
+    }
+
+    function extractUsernameFromHref(href) {
+        if (!href) return null;
+
+        try {
+            const url = new URL(href, location.origin);
+            if (!/^civitai\.(com|green|red)$/i.test(url.hostname)) return null;
+
+            const m = url.pathname.match(/^\/user\/([^/?#]+)/i);
+            if (!m) return null;
+
+            return decodeURIComponent(m[1] || '').trim() || null;
+        } catch (_) {
+            const m = href.match(/(?:^|\/+)user\/([^/?#]+)/i);
+            return m ? decodeURIComponent(m[1] || '').trim() : null;
+        }
     }
 
     function getCreatorUsername() {
-        const userLinks = Array.from(document.querySelectorAll('a[href^="/user/"]'));
-        for (const a of userLinks) {
-            const href = a.getAttribute('href') || '';
-            const m = href.match(/^\/user\/([^/?#]+)/i);
-            if (!m) continue;
+        // Civitai has changed between relative and absolute user links on different domains.
+        const userLinks = Array.from(document.querySelectorAll(
+            'a[href^="/user/"], a[href*="/user/"]'
+        ));
 
-            const username = (m[1] || '').trim();
+        const usernames = [];
+
+        for (const a of userLinks) {
+            const username = extractUsernameFromHref(a.getAttribute('href') || '');
             if (!username) continue;
+            usernames.push(username);
 
             const text = normalizeText(a.textContent || '');
             if (text.toLowerCase().includes(username.toLowerCase())) {
@@ -61,46 +87,54 @@
                     return username;
                 }
             }
-
-            return username;
         }
-        return null;
+
+        // Fallback: if the target creator appears anywhere as a user link, accept it.
+        // This avoids false negatives when Civitai renders avatars/user names differently.
+        const target = usernames.find(u => u.toLowerCase() === TARGET_USERNAME.toLowerCase());
+        if (target) return target;
+
+        return usernames[0] || null;
+    }
+
+    function hasMonthYearText(el) {
+        if (!el) return false;
+        const text = normalizeText(el.textContent || '');
+        if (!text) return false;
+
+        const ok = MONTH_RE.test(text);
+        MONTH_RE.lastIndex = 0;
+        return ok;
     }
 
     function findDescriptionRoot() {
         const preferredSelectors = [
-            '.mantine-Spoiler-content',
-            '[role="region"]',
+            // Civitai description/html renderer variants seen over time.
             '.RenderHtml_htmlRenderer__z8vxT',
-            '.mantine-TypographyStylesProvider-root'
+            '[class*="RenderHtml_htmlRenderer"]',
+            '.mantine-TypographyStylesProvider-root',
+            '[class*="TypographyStylesProvider"]',
+            '.mantine-Spoiler-content',
+            '[class*="Spoiler-content"]',
+            '[data-testid*="description" i]',
+            '[class*="description" i]',
+            'article'
         ];
 
         for (const sel of preferredSelectors) {
             const nodes = Array.from(document.querySelectorAll(sel));
             for (const el of nodes) {
-                const text = normalizeText(el.textContent);
-                if (!text) continue;
-                if (MONTH_RE.test(text)) {
-                    MONTH_RE.lastIndex = 0;
-                    return el;
-                }
-                MONTH_RE.lastIndex = 0;
+                if (hasMonthYearText(el)) return el;
             }
         }
 
-        const allDivs = Array.from(document.querySelectorAll('div, section, article'));
-        for (const el of allDivs) {
-            const text = normalizeText(el.textContent);
-            if (!text) continue;
+        // Fallback: choose the smallest useful container that contains Month Year text.
+        // This avoids returning a huge top-level page wrapper when possible.
+        const candidates = Array.from(document.querySelectorAll('p, li, div, section'))
+            .filter(hasMonthYearText)
+            .sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
 
-            if (MONTH_RE.test(text)) {
-                MONTH_RE.lastIndex = 0;
-                return el;
-            }
-            MONTH_RE.lastIndex = 0;
-        }
-
-        return null;
+        return candidates[0] || null;
     }
 
     function buildHfUrl(month, year) {
@@ -120,6 +154,7 @@
     function replaceMonthYearInTextNode(textNode) {
         const text = textNode.nodeValue;
         if (!text) return false;
+
         if (!MONTH_RE.test(text)) {
             MONTH_RE.lastIndex = 0;
             return false;
@@ -128,7 +163,9 @@
 
         const parent = textNode.parentElement;
         if (!parent) return false;
-        if (parent.closest('a[href]')) return false;
+
+        // Do not change existing links, buttons, scripts, or style blocks.
+        if (parent.closest('a[href], button, script, style, textarea, input')) return false;
 
         const frag = document.createDocumentFragment();
         let lastIndex = 0;
@@ -163,8 +200,12 @@
             frag.appendChild(document.createTextNode(text.slice(lastIndex)));
         }
 
-        textNode.parentNode.replaceChild(frag, textNode);
-        return true;
+        if (textNode.parentNode) {
+            textNode.parentNode.replaceChild(frag, textNode);
+            return true;
+        }
+
+        return false;
     }
 
     function processDescription(root) {
@@ -176,6 +217,7 @@
             {
                 acceptNode(node) {
                     if (!node.nodeValue) return NodeFilter.FILTER_SKIP;
+
                     if (!MONTH_RE.test(node.nodeValue)) {
                         MONTH_RE.lastIndex = 0;
                         return NodeFilter.FILTER_SKIP;
@@ -184,7 +226,9 @@
 
                     const parent = node.parentElement;
                     if (!parent) return NodeFilter.FILTER_SKIP;
-                    if (parent.closest('a[href]')) return NodeFilter.FILTER_SKIP;
+                    if (parent.closest('a[href], button, script, style, textarea, input')) {
+                        return NodeFilter.FILTER_SKIP;
+                    }
 
                     return NodeFilter.FILTER_ACCEPT;
                 }
@@ -212,11 +256,15 @@
 
         const username = getCreatorUsername();
         if (!username || username.toLowerCase() !== TARGET_USERNAME.toLowerCase()) {
+            log('Not target creator:', username);
             return;
         }
 
         const descRoot = findDescriptionRoot();
-        if (!descRoot) return;
+        if (!descRoot) {
+            log('Description root not found');
+            return;
+        }
 
         const changed = processDescription(descRoot);
         if (changed) {
@@ -227,7 +275,7 @@
     let scheduled = false;
     let observer = null;
 
-    function scheduleProcess() {
+    function scheduleProcess(delay = 300) {
         if (scheduled) return;
         scheduled = true;
 
@@ -238,14 +286,14 @@
             } catch (err) {
                 console.error('[alexds9-hf-link] Error:', err);
             }
-        }, 300);
+        }, delay);
     }
 
     function initObserver() {
         if (observer) observer.disconnect();
 
         observer = new MutationObserver(() => {
-            scheduleProcess();
+            scheduleProcess(300);
         });
 
         observer.observe(document.documentElement || document.body, {
@@ -255,14 +303,19 @@
     }
 
     function init() {
-        processPage();
+        // Run a few times because Civitai is SPA-rendered and the creator/description can arrive late.
+        scheduleProcess(100);
+        scheduleProcess(700);
+        setTimeout(() => scheduleProcess(0), 1500);
+        setTimeout(() => scheduleProcess(0), 3000);
+
         initObserver();
 
         let lastUrl = location.href;
         setInterval(() => {
             if (location.href !== lastUrl) {
                 lastUrl = location.href;
-                scheduleProcess();
+                scheduleProcess(500);
             }
         }, 1000);
     }
