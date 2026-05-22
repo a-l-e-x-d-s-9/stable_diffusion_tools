@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      1.7.6
+// @version      1.8.0
 // @description  Draggable Grok Imagine usage tracker with readable counters, notifications, backup reminders, notes, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -40,6 +40,7 @@
   const K_BACKUP_INTERVAL_DAYS = LS_PREFIX + "backupIntervalDays";
   const K_LAST_BACKUP_EXPORT = LS_PREFIX + "lastBackupExportAt";
   const K_LAST_BACKUP_REMINDER = LS_PREFIX + "lastBackupReminderAt";
+  const K_LIMIT_LOCKS = LS_PREFIX + "limitLocks";
 
   const API_URL = "https://grok.com/rest/media/imagine/quota_info";
   const GENERATION_URL_PART = "/rest/app-chat/conversations/new";
@@ -50,6 +51,8 @@
   const MAX_INTERVAL_SECONDS = 3600;
   const IMAGE_PENDING_GRACE_MS = 2 * 60 * 1000;
   const PENDING_SWEEP_INTERVAL_MS = 15 * 1000;
+  const VIDEO_ACCEPTED_COUNT_DELAY_MS = 12 * 1000;
+  const VIDEO_FAILURE_WATCH_MS = 45 * 1000;
   const MAX_RECENT_ITEMS = 600;
   const DEFAULT_HISTORY_DAYS = 90;
   const MIN_HISTORY_DAYS = 1;
@@ -76,6 +79,7 @@
     usage: null,
     lastImageRequest: null,
     pendingSweepTimer: null,
+    pendingVideoAttempts: [],
     lastNotifyAt: {},
   };
 
@@ -252,7 +256,7 @@
         border: 1px solid rgba(255,255,255,0.08);
         border-radius: 10px;
         display: grid;
-        grid-template-columns: minmax(110px, 1fr) 68px 82px 60px 64px 98px;
+        grid-template-columns: minmax(88px, 0.82fr) 96px 116px;
         align-items: center;
         gap: 6px;
         padding: 6px 7px;
@@ -326,8 +330,7 @@
         font-size: 12px;
       }
 
-      #grok-quota-panel.gqp-compact {
-        width: 345px;
+      ^0px;
         padding: 6px;
         border-radius: 10px;
         font-size: 13px;
@@ -367,7 +370,7 @@
       }
       #grok-quota-panel.gqp-compact .gqp-card {
         display: grid;
-        grid-template-columns: minmax(66px, 1fr) 48px 56px 34px 34px 62px;
+        grid-template-columns: minmax(82px, 0.9fr) 80px 96px;
         align-items: center;
         gap: 4px;
         padding: 4px 5px;
@@ -488,7 +491,7 @@
       }
       #grok-quota-panel .gqp-legend {
         display: grid;
-        grid-template-columns: minmax(110px, 1fr) 68px 82px 60px 64px 98px;
+        grid-template-columns: minmax(88px, 0.82fr) 96px 116px;
         gap: 4px;
         padding: 0 5px 2px 5px;
         color: rgba(255,255,255,0.48);
@@ -800,6 +803,35 @@
         line-height: 1 !important;
       }
 
+
+      /* v1.8.0: 3-column readable layout with exact renewal time visible */
+      #grok-quota-panel .gqp-card {
+        grid-template-columns: minmax(88px, 0.82fr) 96px 116px !important;
+      }
+      #grok-quota-panel .gqp-legend {
+        grid-template-columns: minmax(88px, 0.82fr) 96px 116px !important;
+      }
+      #grok-quota-panel .gqp-value {
+        text-overflow: clip;
+      }
+      #grok-quota-panel .gqp-stat:last-child .gqp-value {
+        font-size: 13px;
+        letter-spacing: -0.2px;
+      }
+      #grok-quota-panel.gqp-compact {
+        width: 360px !important;
+      }
+      #grok-quota-panel.gqp-compact .gqp-card {
+        grid-template-columns: minmax(82px, 0.9fr) 80px 96px !important;
+      }
+      #grok-quota-panel.gqp-compact .gqp-legend {
+        grid-template-columns: minmax(82px, 0.9fr) 80px 96px !important;
+      }
+      #grok-quota-panel.gqp-compact .gqp-stat:last-child .gqp-value {
+        font-size: 11px;
+        letter-spacing: -0.3px;
+      }
+
       #grok-quota-panel .gqp-err { color: #ff8b8b; font-weight: 800; }
 
       /* v1.7.2 layout cleanup */
@@ -826,8 +858,7 @@
       #grok-quota-panel .gqp-value.safe { color: #9fffcf; }
       #grok-quota-panel .gqp-value.warn { color: #ffdf7e; }
       #grok-quota-panel .gqp-value.danger { color: #ff9b9b; }
-      #grok-quota-panel.gqp-compact {
-        width: 410px;
+      ^0px;
       }
       #grok-quota-panel.gqp-folded,
       #grok-quota-panel.gqp-compact.gqp-folded {
@@ -912,8 +943,7 @@
       #grok-quota-panel .gqp-legend {
         font-size: 13px;
       }
-      #grok-quota-panel.gqp-compact {
-        width: 350px;
+      ^0px;
         font-size: 12px;
       }
       #grok-quota-panel.gqp-compact .gqp-title {
@@ -1161,6 +1191,8 @@
   }
 
   function refreshUsageOnly() {
+    // Touch locks so expired lockouts are removed before rendering.
+    for (const service of SERVICES) getActiveLimitLock(service.key);
     const u = loadUsage();
     pruneRecentUsage(u);
     const grid = document.getElementById("gqp-grid");
@@ -1375,6 +1407,10 @@
 
     if (!obj || typeof obj !== "object") return;
 
+    if (payloadLooksLikeFailure(obj)) {
+      markRecentPendingVideoFailures(payloadLooksLikeQuotaLimit(obj) ? "quota/limit message from imagine WebSocket" : "imagine WebSocket failure message");
+    }
+
     if (obj.type === "image" && obj.blob) {
       rememberImagePayload(obj);
     }
@@ -1454,6 +1490,313 @@
     return { serviceKey: "image", amount: Math.max(1, candidateCount || 1), detail: modelName || "speed image" };
   }
 
+
+  function isVideoServiceKey(serviceKey) {
+    return serviceKey === "video" || serviceKey === "video720p";
+  }
+
+  function textLooksLikeLimitOrFailure(text) {
+    const lower = String(text || "").toLowerCase();
+    if (!lower) return false;
+
+    // Broad, but only applied to generation responses and imagine WebSocket messages.
+    // This prevents quota-refused video attempts from being counted as generated videos.
+    const badNeedles = [
+      "quota",
+      "limit",
+      "rate limit",
+      "too many",
+      "try again",
+      "not available",
+      "insufficient",
+      "exceeded",
+      "exhausted",
+      "blocked",
+      "denied",
+      "failed",
+      "failure",
+      "error",
+      "cannot",
+      "can't",
+      "refused",
+      "rejected",
+      "429",
+      "403",
+    ];
+
+    return badNeedles.some((needle) => lower.includes(needle));
+  }
+
+
+  function textLooksLikeQuotaLimit(text) {
+    const lower = String(text || "").toLowerCase();
+    if (!lower) return false;
+    return (
+      lower.includes("too many requests") ||
+      lower.includes("quota") ||
+      lower.includes("rate limit") ||
+      lower.includes("limit reached") ||
+      lower.includes("usage limit") ||
+      lower.includes("exceeded") ||
+      lower.includes("exhausted") ||
+      lower.includes("429")
+    );
+  }
+
+  function payloadLooksLikeQuotaLimit(obj) {
+    if (!obj || typeof obj !== "object") return false;
+    try {
+      const code = obj.error && obj.error.code != null ? Number(obj.error.code) : (obj.code != null ? Number(obj.code) : null);
+      const msg = String((obj.error && obj.error.message) || obj.message || obj.reason || obj.detail || "");
+      if (code === 8 && textLooksLikeQuotaLimit(msg)) return true;
+      if (textLooksLikeQuotaLimit(msg)) return true;
+      return textLooksLikeQuotaLimit(JSON.stringify(obj));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function payloadLooksLikeFailure(obj) {
+    if (!obj || typeof obj !== "object") return false;
+
+    const fields = [
+      obj.type,
+      obj.status,
+      obj.current_status,
+      obj.error,
+      obj.error_code,
+      obj.code,
+      obj.message,
+      obj.reason,
+      obj.detail,
+      obj.title,
+    ];
+
+    if (fields.some((x) => textLooksLikeLimitOrFailure(x))) return true;
+
+    try {
+      return textLooksLikeLimitOrFailure(JSON.stringify(obj));
+    } catch (_) {
+      return false;
+    }
+  }
+
+
+  function loadLimitLocks() {
+    const raw = loadJson(K_LIMIT_LOCKS, {});
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return raw;
+  }
+
+  function saveLimitLocks(obj) {
+    saveJson(K_LIMIT_LOCKS, obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {});
+  }
+
+  function getActiveLimitLock(serviceKey) {
+    const locks = loadLimitLocks();
+    const lock = locks[serviceKey];
+    if (!lock || typeof lock !== "object") return null;
+
+    const renewAtMs = new Date(lock.renewAt || 0).getTime();
+    if (!Number.isFinite(renewAtMs) || renewAtMs <= Date.now()) {
+      delete locks[serviceKey];
+      saveLimitLocks(locks);
+      return null;
+    }
+
+    return lock;
+  }
+
+  function secondsUntilTimestamp(value) {
+    const t = new Date(value || 0).getTime();
+    if (!Number.isFinite(t)) return 0;
+    return Math.max(0, Math.round((t - Date.now()) / 1000));
+  }
+
+  function formatRenewAt(value) {
+    if (!value) return "-";
+    try {
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return String(value);
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      const month = String(d.getMonth() + 1).padStart(2, "0");
+      return hh + ":" + mm + " " + day + "/" + month;
+    } catch (_) {
+      return String(value);
+    }
+  }
+
+  function getRefreshLabel(serviceKey, fallbackWindowSeconds) {
+    const lock = getActiveLimitLock(serviceKey);
+    if (lock) {
+      return formatRenewAt(lock.renewAt);
+    }
+    return formatReset(fallbackWindowSeconds);
+  }
+
+  function recordLimitReachedForService(serviceKey, reason) {
+    const service = SERVICES.find((x) => x.key === serviceKey);
+    if (!service) return;
+
+    const now = Date.now();
+    const windowSec = Math.max(60, Number(getWindowSeconds(serviceKey)) || 3600);
+    const renewAt = new Date(now + windowSec * 1000).toISOString();
+
+    const locks = loadLimitLocks();
+    locks[serviceKey] = {
+      serviceKey,
+      reachedAt: new Date(now).toISOString(),
+      renewAt,
+      windowSizeSeconds: windowSec,
+      reason: reason || "quota limit reached",
+    };
+    saveLimitLocks(locks);
+
+    const h = loadHistory();
+    const d = ensureHistoryDay(h, getLocalDayKey());
+    const rec = d.quota[serviceKey];
+
+    rec.samples = Math.max(1, Number(rec.samples) || 0);
+    rec.lastObservedAt = new Date(now).toISOString();
+    rec.lastAvailable = false;
+    rec.limitHits = (Number(rec.limitHits) || 0) + 1;
+    rec.quotaReached = true;
+    rec.windowSizeSeconds = windowSec;
+    rec.maxWaitSeconds = Math.max(Number(rec.maxWaitSeconds) || 0, windowSec);
+    rec.lastNextAvailableAt = renewAt;
+
+    const windowUsed = getWindowCount(serviceKey);
+    rec.maxWindowUsed = Math.max(Number(rec.maxWindowUsed) || 0, Number(windowUsed) || 0);
+    if (windowUsed > 0) {
+      rec.quotaEstimate = rec.quotaEstimate == null ? windowUsed : Math.max(Number(rec.quotaEstimate) || 0, windowUsed);
+      rec.effectiveLimit = Math.max(Number(rec.effectiveLimit) || 0, Number(rec.quotaEstimate) || 0, Number(getDefaultLimits()[serviceKey]) || 0);
+    }
+
+    d.notes = Array.isArray(d.notes) ? d.notes : [];
+    d.notes.unshift({
+      at: new Date(now).toISOString(),
+      type: "limit_reached",
+      serviceKey,
+      detail: reason || "quota limit reached",
+      renewAt,
+    });
+    d.notes = d.notes.slice(0, 60);
+    saveHistory(h);
+
+    refreshUsageOnly();
+    setStatus(service.title + " limit reached. Estimated renewal: " + formatRenewAt(renewAt) + ".", "warn");
+    showFloatingNotice(service.title + " limit reached - renews at " + formatRenewAt(renewAt));
+  }
+
+  async function responseLooksAcceptedForGeneration(response) {
+    if (!response) {
+      return { accepted: false, reason: "missing response", quotaLimited: false };
+    }
+
+    if (!response.ok) {
+      return {
+        accepted: false,
+        reason: "HTTP " + response.status,
+        quotaLimited: response.status === 429,
+      };
+    }
+
+    let bodyText = "";
+    try {
+      bodyText = await response.clone().text();
+    } catch (_) {
+      // If HTTP is OK but the userscript cannot read the body, wait for the
+      // delayed count. WebSocket failure watcher can still cancel before count.
+      return { accepted: true, reason: "HTTP OK, response body unreadable", quotaLimited: false };
+    }
+
+    let obj = null;
+    try {
+      obj = bodyText ? JSON.parse(bodyText) : null;
+    } catch (_) {}
+
+    if (payloadLooksLikeQuotaLimit(obj) || textLooksLikeQuotaLimit(bodyText)) {
+      return { accepted: false, reason: "quota/limit reached", quotaLimited: true };
+    }
+
+    if (payloadLooksLikeFailure(obj) || textLooksLikeLimitOrFailure(bodyText)) {
+      return { accepted: false, reason: "response indicates failure", quotaLimited: false };
+    }
+
+    return { accepted: true, reason: "request accepted", quotaLimited: false };
+  }
+
+  function createPendingVideoAttempt(hit) {
+    const now = Date.now();
+    const attempt = {
+      id: "video:" + now + ":" + Math.random().toString(36).slice(2, 10),
+      serviceKey: hit.serviceKey,
+      amount: Math.max(1, Number(hit.amount) || 1),
+      detail: hit.detail || "video",
+      createdAt: now,
+      acceptedAt: null,
+      failedAt: null,
+      counted: false,
+      countTimer: null,
+      cleanupTimer: null,
+    };
+
+    S.pendingVideoAttempts.push(attempt);
+    S.pendingVideoAttempts = S.pendingVideoAttempts.slice(-20);
+    setStatus("Video request detected; waiting for acceptance before counting.");
+    return attempt;
+  }
+
+  function markVideoAttemptFailed(attempt, reason, options) {
+    if (!attempt || attempt.counted || attempt.failedAt) return;
+    attempt.failedAt = Date.now();
+
+    if (attempt.countTimer) clearTimeout(attempt.countTimer);
+    if (attempt.cleanupTimer) clearTimeout(attempt.cleanupTimer);
+
+    const quotaLimited = !!(options && options.quotaLimited) || textLooksLikeQuotaLimit(reason);
+    if (quotaLimited) {
+      recordLimitReachedForService(attempt.serviceKey, reason || "quota limit reached");
+    }
+
+    setStatus("Rejected/limited. Not counted: " + (reason || "failure detected"), "warn");
+
+    setTimeout(() => {
+      S.pendingVideoAttempts = S.pendingVideoAttempts.filter((x) => x !== attempt);
+    }, 5000);
+  }
+
+  function markRecentPendingVideoFailures(reason) {
+    const now = Date.now();
+    for (const attempt of S.pendingVideoAttempts.slice()) {
+      if (!attempt || attempt.counted || attempt.failedAt) continue;
+      if (now - Number(attempt.createdAt || 0) > VIDEO_FAILURE_WATCH_MS) continue;
+      markVideoAttemptFailed(attempt, reason || "failure message detected", { quotaLimited: textLooksLikeQuotaLimit(reason) });
+    }
+  }
+
+  function markVideoAttemptAccepted(attempt, reason) {
+    if (!attempt || attempt.counted || attempt.failedAt) return;
+    attempt.acceptedAt = Date.now();
+    setStatus("Video request accepted; will count after short failure-watch delay.");
+
+    attempt.countTimer = setTimeout(() => {
+      if (!attempt || attempt.counted || attempt.failedAt) return;
+
+      attempt.counted = true;
+      recordCountedUsage(attempt.serviceKey, attempt.amount, "video_request_accepted", attempt.detail, null, "video");
+      setStatus("Counted accepted video request locally.");
+
+      S.pendingVideoAttempts = S.pendingVideoAttempts.filter((x) => x !== attempt);
+    }, VIDEO_ACCEPTED_COUNT_DELAY_MS);
+
+    attempt.cleanupTimer = setTimeout(() => {
+      S.pendingVideoAttempts = S.pendingVideoAttempts.filter((x) => x !== attempt);
+    }, VIDEO_FAILURE_WATCH_MS + 5000);
+  }
+
   function installGenerationCounterInterceptor() {
     if (window.__grokQuotaLocalCounterInstalled) return;
     window.__grokQuotaLocalCounterInstalled = true;
@@ -1465,6 +1808,8 @@
 
       const method = String(init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
       let bodyText = null;
+      let hit = null;
+      let pendingVideoAttempt = null;
 
       try {
         if (init && typeof init.body === "string") {
@@ -1473,11 +1818,10 @@
           bodyText = await input.clone().text();
         }
 
-        const hit = classifyGenerationRequest(url, method, bodyText);
+        hit = classifyGenerationRequest(url, method, bodyText);
         if (hit) {
-          if (hit.serviceKey === "video" || hit.serviceKey === "video720p") {
-            // Video currently has no reliable result blob signal, so keep counting at request time.
-            recordCountedUsage(hit.serviceKey, hit.amount, "request_sent", hit.detail, null, "video");
+          if (isVideoServiceKey(hit.serviceKey)) {
+            pendingVideoAttempt = createPendingVideoAttempt(hit);
           } else {
             // Images are counted from the imagine WebSocket result stream to avoid assuming 1 vs 4.
             rememberLastImageRequest(hit);
@@ -1485,10 +1829,33 @@
           }
         }
       } catch (e) {
-        console.warn("[GrokQuota] Local counter interceptor error:", e);
+        console.warn("[GrokUsage] Local counter pre-fetch interceptor error:", e);
       }
 
-      return originalFetch.apply(this, arguments);
+      let response;
+      try {
+        response = await originalFetch.apply(this, arguments);
+      } catch (e) {
+        if (pendingVideoAttempt) markVideoAttemptFailed(pendingVideoAttempt, "network error", { quotaLimited: false });
+        throw e;
+      }
+
+      if (pendingVideoAttempt) {
+        try {
+          const result = await responseLooksAcceptedForGeneration(response.clone ? response.clone() : response);
+          if (result.accepted) {
+            markVideoAttemptAccepted(pendingVideoAttempt, result.reason);
+          } else {
+            markVideoAttemptFailed(pendingVideoAttempt, result.reason, { quotaLimited: !!result.quotaLimited });
+          }
+        } catch (e) {
+          console.warn("[GrokUsage] Local counter post-fetch interceptor error:", e);
+          // Fail closed for videos: if we cannot inspect acceptance, do not count immediately.
+          markVideoAttemptFailed(pendingVideoAttempt, "could not verify request acceptance", { quotaLimited: false });
+        }
+      }
+
+      return response;
     };
   }
 
@@ -1509,12 +1876,12 @@
             try {
               handleImagineWsPayload(event && event.data);
             } catch (e) {
-              console.warn("[GrokQuota] WebSocket image counter error:", e);
+              console.warn("[GrokUsage] WebSocket image counter error:", e);
             }
           });
         }
       } catch (e) {
-        console.warn("[GrokQuota] WebSocket wrapper error:", e);
+        console.warn("[GrokUsage] WebSocket wrapper error:", e);
       }
       return ws;
     }
@@ -1770,7 +2137,8 @@
     if (q.quotaReached) parts.push("hit");
     else parts.push("not hit");
     parts.push("limit " + getRecentLimitForDay(day, key));
-    if (q.maxWaitSeconds) parts.push("wait " + fmtDuration(q.maxWaitSeconds));
+    if (q.lastNextAvailableAt) parts.push("renew " + formatRenewAt(q.lastNextAvailableAt));
+    else if (q.maxWaitSeconds) parts.push("wait " + fmtDuration(q.maxWaitSeconds));
     if (q.windowSizeSeconds) parts.push("win " + fmtDuration(q.windowSizeSeconds));
     return parts.join(", ");
   }
@@ -2347,6 +2715,7 @@
 
 
   function badgeClassForService(serviceKey, data) {
+    if (getActiveLimitLock(serviceKey)) return "danger";
     const q = data && data[serviceKey] ? data[serviceKey] : null;
     const threshold = Math.max(0, Number(lsGet(K_NOTIFY_THRESHOLD, String(DEFAULT_NOTIFY_THRESHOLD))) || 0);
     if (q && q.available === false) return "danger";
@@ -2369,14 +2738,15 @@
       const q = data && data[service.key] ? data[service.key] : null;
       const used = getWindowCount(service.key);
       const limit = getEffectiveLimitForService(service.key);
-      const remaining = q && q.remainingQueries != null ? String(q.remainingQueries) : "-";
+      const lock = getActiveLimitLock(service.key);
+      const remaining = q && q.remainingQueries != null ? String(q.remainingQueries) : (lock ? "0" : "-");
       const badge = el("div");
       badge.className = "gqp-qbadge " + badgeClassForService(service.key, data);
       const title = el("div", { textContent: serviceShort(service.key) });
       title.className = "gqp-qb-title";
-      const main = el("div", { textContent: used + "/" + limit + " | L" + remaining });
+      const main = el("div", { textContent: used + "/" + limit + (lock ? " | " + getRefreshLabel(service.key, getWindowSeconds(service.key)) : " | L" + remaining) });
       main.className = "gqp-qb-main";
-      badge.title = service.title + " | window used/effective limit: " + used + "/" + limit + " | site left: " + remaining;
+      badge.title = service.title + " | window used/effective limit: " + used + "/" + limit + (lock ? " | estimated renewal: " + formatLocalTime(lock.renewAt) : " | site left: " + remaining);
       badge.appendChild(title);
       badge.appendChild(main);
       box.appendChild(badge);
@@ -2387,6 +2757,8 @@
     const cls = badgeClassForService(service.key, S.lastData || null);
     const used = localUsageLabel(service.key);
     const windowSeconds = data && data.windowSizeSeconds ? Number(data.windowSizeSeconds) : getWindowSeconds(service.key);
+    const refreshLabel = getRefreshLabel(service.key, windowSeconds);
+    const lock = getActiveLimitLock(service.key);
 
     const card = el("div");
     card.className = "gqp-card " + cls;
@@ -2398,11 +2770,11 @@
     stats.className = "gqp-stats";
 
     addStat(stats, "Used/Limit", used, cls);
-    addStat(stats, "Refresh", formatReset(windowSeconds), "");
+    addStat(stats, "Refresh", refreshLabel, lock ? "danger" : "");
 
     card.appendChild(title);
     card.appendChild(stats);
-    card.title = service.title + " | current window used/effective limit: " + used + " | refresh window: " + formatReset(windowSeconds);
+    card.title = service.title + " | current window used/effective limit: " + used + " | refresh: " + refreshLabel + (lock ? " | estimated renewal: " + formatLocalTime(lock.renewAt) : "");
     return card;
   }
 
@@ -2803,7 +3175,7 @@
         const changed = pruneRecentUsage(u);
         if (changed) refreshUsageOnly();
       } catch (e) {
-        console.warn("[GrokQuota] Pending sweep error:", e);
+        console.warn("[GrokUsage] Pending sweep error:", e);
       }
     }, PENDING_SWEEP_INTERVAL_MS);
   }
