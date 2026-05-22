@@ -13,7 +13,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QFileDialog, QGraphicsView, QGraphicsScene,
     QGraphicsPixmapItem, QToolBar, QMessageBox, QStatusBar, QDialog,
-    QFormLayout, QLineEdit, QPushButton, QWidget, QHBoxLayout, QCheckBox
+    QFormLayout, QLineEdit, QPushButton, QWidget, QHBoxLayout, QCheckBox, QLabel
 )
 
 # Robust, tolerant image decode
@@ -633,6 +633,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.view)
 
         self.status = QStatusBar(self); self.setStatusBar(self.status)
+        self.image_counter_label = QLabel("No image", self)
+        self.image_counter_label.setMinimumWidth(170)
+        self.image_counter_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.status.addPermanentWidget(self.image_counter_label)
         self.view.requestOpenPath.connect(self.open_path)
 
         tb = QToolBar("Main", self)
@@ -954,9 +958,11 @@ class MainWindow(QMainWindow):
         self._show_current()
 
         if method == "os":
-            self.status.showMessage(f"Moved to OS trash: {base}", 3000)
+            self._update_image_counter_label()
+            self.status.showMessage(f"{self._current_image_info_text()} | Moved to OS trash: {base}", 3000)
         elif method == "legacy":
-            self.status.showMessage(f"Moved to .trash: {os.path.basename(legacy_path)}", 3000)
+            self._update_image_counter_label()
+            self.status.showMessage(f"{self._current_image_info_text()} | Moved to .trash: {os.path.basename(legacy_path)}", 3000)
         else:
             self.status.showMessage("Nothing to delete", 2000)
 
@@ -1547,6 +1553,14 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"Loaded {len(out)} images from {d}", 4000)
         return out
 
+    def _current_image_info_text(self) -> str:
+        if 0 <= self.index < len(self.files):
+            return f"Image {self.index + 1}/{len(self.files)}"
+        return "No image"
+
+    def _update_image_counter_label(self) -> None:
+        self.image_counter_label.setText(self._current_image_info_text())
+
     def _show_current(self):
         if 0 <= self.index < len(self.files):
             path = self.files[self.index]
@@ -1571,6 +1585,8 @@ class MainWindow(QMainWindow):
             # True oriented resolution
             ow, oh = self.view._get_oriented_size()
             res = f"{ow}×{oh}" if (ow and oh) else "?"
+            info = self._current_image_info_text()
+            self._update_image_counter_label()
             self.status.showMessage(f"{res} [{self.index + 1}/{len(self.files)}] {path}")
 
             # persist last image path
@@ -1578,6 +1594,7 @@ class MainWindow(QMainWindow):
             save_config(self.config)
         else:
             self.view.clear_image()
+            self._update_image_counter_label()
             self.status.showMessage("No image")
 
     def _on_load_done(self, path: str, img: QImage, token: object):
@@ -1700,7 +1717,8 @@ class MainWindow(QMainWindow):
                 self.act_undo.setEnabled(True)
                 label = self._slot_title(digit)
                 self._remove_current_from_runtime_list()
-                self.status.showMessage(f"Copied to {label}: {os.path.basename(dest)}", 3000)
+                self._update_image_counter_label()
+                self.status.showMessage(f"{self._current_image_info_text()} | Copied to {label}: {os.path.basename(dest)}", 3000)
             else:
                 shutil.move(src, dest)
                 # record for undo
@@ -1713,7 +1731,8 @@ class MainWindow(QMainWindow):
                 else:
                     self.index = self.index % len(self.files)
                 self._show_current()
-                self.status.showMessage(f"Moved to {self._slot_title(digit)}: {os.path.basename(dest)}", 3000)
+                self._update_image_counter_label()
+                self.status.showMessage(f"{self._current_image_info_text()} | Moved to {self._slot_title(digit)}: {os.path.basename(dest)}", 3000)
         except Exception as e:
             QMessageBox.warning(self, "Sort failed", str(e))
             return
