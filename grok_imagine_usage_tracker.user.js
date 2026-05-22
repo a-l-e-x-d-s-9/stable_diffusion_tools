@@ -1,0 +1,2826 @@
+// ==UserScript==
+// @name         Grok Imagine Usage Tracker
+// @namespace    alexds9.scripts
+// @version      1.7.6
+// @description  Draggable Grok Imagine usage tracker with readable counters, notifications, backup reminders, notes, and usage history.
+// @match        https://grok.com/*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  /*
+    Converted from:
+    https://github.com/mashiourcse/grok_quota_check_extension
+
+    Safety notes:
+    - No third-party requests.
+    - No cookies permission.
+    - Uses fetch(..., { credentials: "include" }) only to grok.com.
+    - No GM_xmlhttpRequest.
+    - No page scraping.
+  */
+
+  const LS_PREFIX = "grok_quota_panel.";
+  const K_POS = LS_PREFIX + "pos";
+  const K_FOLDED = LS_PREFIX + "folded";
+  const K_AUTO = LS_PREFIX + "autoRefresh";
+  const K_INTERVAL = LS_PREFIX + "intervalSeconds";
+  const K_COMPACT = LS_PREFIX + "compact";
+  const K_USAGE = LS_PREFIX + "localUsage";
+  const K_HISTORY = LS_PREFIX + "history";
+  const K_HISTORY_DAYS = LS_PREFIX + "historyDays";
+  const K_DEFAULT_LIMITS = LS_PREFIX + "defaultQuotaLimits";
+  const K_NOTIFY_ENABLED = LS_PREFIX + "notifyEnabled";
+  const K_NOTIFY_THRESHOLD = LS_PREFIX + "notifyThreshold";
+  const K_NOTIFY_SERVICES = LS_PREFIX + "notifyServices";
+  const K_BACKUP_INTERVAL_DAYS = LS_PREFIX + "backupIntervalDays";
+  const K_LAST_BACKUP_EXPORT = LS_PREFIX + "lastBackupExportAt";
+  const K_LAST_BACKUP_REMINDER = LS_PREFIX + "lastBackupReminderAt";
+
+  const API_URL = "https://grok.com/rest/media/imagine/quota_info";
+  const GENERATION_URL_PART = "/rest/app-chat/conversations/new";
+  const IMAGINE_LISTEN_WS_PART = "/ws/imagine/listen";
+
+  const DEFAULT_INTERVAL_SECONDS = 180;
+  const MIN_INTERVAL_SECONDS = 30;
+  const MAX_INTERVAL_SECONDS = 3600;
+  const IMAGE_PENDING_GRACE_MS = 2 * 60 * 1000;
+  const PENDING_SWEEP_INTERVAL_MS = 15 * 1000;
+  const MAX_RECENT_ITEMS = 600;
+  const DEFAULT_HISTORY_DAYS = 90;
+  const MIN_HISTORY_DAYS = 1;
+  const MAX_HISTORY_DAYS = 3650;
+  const DEFAULT_BACKUP_REMINDER_DAYS = 14;
+  const DEFAULT_NOTIFY_THRESHOLD = 5;
+  const DEFAULT_QUOTA_LIMITS = { image: 600, imagePro: 72, imageEdit: 36, video: 30, video720p: 20 };
+
+  const SERVICES = [
+    { key: "image", title: "Speed Image" },
+    { key: "imagePro", title: "Quality Image" },
+    { key: "imageEdit", title: "Edit Image" },
+    { key: "video", title: "480p Video" },
+    { key: "video720p", title: "720p Video" },
+  ];
+
+  const S = {
+    loading: false,
+    timer: null,
+    lastData: null,
+    lastError: null,
+    folded: lsGet(K_FOLDED, "0") === "1",
+    compact: lsGet(K_COMPACT, "0") === "1",
+    usage: null,
+    lastImageRequest: null,
+    pendingSweepTimer: null,
+    lastNotifyAt: {},
+  };
+
+  function lsGet(key, fallback) {
+    try {
+      const v = localStorage.getItem(key);
+      return v == null ? fallback : v;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function lsSet(key, value) {
+    try {
+      localStorage.setItem(key, String(value));
+    } catch (_) {}
+  }
+
+  function loadJson(key, fallback) {
+    try {
+      const v = localStorage.getItem(key);
+      return v ? JSON.parse(v) : fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function saveJson(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (_) {}
+  }
+
+  function clamp(n, lo, hi) {
+    n = Number(n);
+    if (!Number.isFinite(n)) return lo;
+    return Math.max(lo, Math.min(hi, n));
+  }
+
+  function el(tag, props) {
+    const x = document.createElement(tag);
+    if (props) Object.assign(x, props);
+    return x;
+  }
+
+  function css(node, text) {
+    node.style.cssText = text;
+    return node;
+  }
+
+  function formatLocalTime(value) {
+    if (!value) return "-";
+    try {
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return String(value);
+      return d.toLocaleString([], {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch (_) {
+      return String(value);
+    }
+  }
+
+  function formatReset(seconds) {
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n <= 0) return "-";
+    if (n < 3600) return Math.round(n / 60) + "m";
+    if (n % 3600 === 0) return Math.round(n / 3600) + "h";
+    return (n / 3600).toFixed(1) + "h";
+  }
+
+  function isActiveQuota(data) {
+    if (!data || !data.available) return false;
+    return data.remainingQueries == null || Number(data.remainingQueries) > 0;
+  }
+
+  function addStyle() {
+    if (document.getElementById("grok-quota-panel-style")) return;
+
+    const st = el("style");
+    st.id = "grok-quota-panel-style";
+    st.textContent = `
+      #grok-quota-panel {
+        position: fixed;
+        top: 82px;
+        right: 16px;
+        width: 560px;
+        z-index: 999999;
+        background: rgba(18, 18, 20, 0.96);
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 12px;
+        padding: 9px;
+        font: 14px/1.25 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Arial, sans-serif;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+        box-sizing: border-box;
+      }
+      #grok-quota-panel * { box-sizing: border-box; }
+      #grok-quota-panel.gqp-folded {
+        width: 228px;
+        padding-bottom: 8px;
+      }
+      #grok-quota-panel .gqp-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: move;
+        user-select: none;
+      }
+      #grok-quota-panel .gqp-title {
+        flex: 1 1 auto;
+        color: #4ade80;
+        font-weight: 800;
+        font-size: 16px;
+        letter-spacing: 0.2px;
+      }
+      #grok-quota-panel .gqp-btn {
+        border: 1px solid rgba(255,255,255,0.14);
+        background: rgba(255,255,255,0.08);
+        color: #fff;
+        border-radius: 9px;
+        padding: 6px 9px;
+        cursor: pointer;
+        font-weight: 800;
+        font-size: 13px;
+      }
+      #grok-quota-panel .gqp-btn:hover {
+        background: rgba(255,255,255,0.14);
+      }
+      #grok-quota-panel .gqp-btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      #grok-quota-panel .gqp-content {
+        margin-top: 7px;
+      }
+      #grok-quota-panel.gqp-folded .gqp-content {
+        display: none;
+      }
+      #grok-quota-panel .gqp-controls {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 7px;
+      }
+      #grok-quota-panel label {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        color: rgba(255,255,255,0.78);
+        user-select: none;
+      }
+      #grok-quota-panel input[type="number"] {
+        width: 66px;
+        height: 31px;
+        padding: 4px 7px;
+        background: #2b2b2b;
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.18);
+        border-radius: 8px;
+        font: inherit;
+      }
+      #grok-quota-panel .gqp-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 5px;
+      }
+      #grok-quota-panel .gqp-card {
+        background: rgba(255,255,255,0.045);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px;
+        display: grid;
+        grid-template-columns: minmax(110px, 1fr) 68px 82px 60px 64px 98px;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 7px;
+      }
+      #grok-quota-panel .gqp-card-head {
+        display: contents;
+      }
+      #grok-quota-panel .gqp-service-title {
+        font-weight: 900;
+        font-size: 15px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #grok-quota-panel .gqp-badge {
+        border-radius: 999px;
+        padding: 3px 7px;
+        font-size: 10px;
+        font-weight: 900;
+        letter-spacing: 0.3px;
+        border: 1px solid rgba(255,255,255,0.12);
+        text-align: center;
+      }
+      #grok-quota-panel .gqp-badge.active {
+        color: #9fffcf;
+        background: rgba(0,255,140,0.10);
+        border-color: rgba(0,255,140,0.25);
+      }
+      #grok-quota-panel .gqp-badge.limited {
+        color: #ffb4b4;
+        background: rgba(255,60,60,0.10);
+        border-color: rgba(255,60,60,0.25);
+      }
+      #grok-quota-panel .gqp-stats {
+        display: contents;
+      }
+      #grok-quota-panel .gqp-stat {
+        background: transparent;
+        border: 0;
+        border-radius: 0;
+        padding: 0;
+        min-width: 0;
+      }
+      #grok-quota-panel .gqp-label {
+        display: none;
+        font-size: 10px;
+        color: rgba(255,255,255,0.55);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 3px;
+      }
+      #grok-quota-panel .gqp-value {
+        font-weight: 900;
+        font-size: 14px;
+        text-align: right;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #grok-quota-panel .gqp-status {
+        margin-top: 8px;
+        padding: 7px;
+        background: rgba(0,0,0,0.28);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 9px;
+        color: rgba(255,255,255,0.72);
+        max-height: 68px;
+        overflow: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        white-space: pre-wrap;
+        font-size: 12px;
+      }
+
+      #grok-quota-panel.gqp-compact {
+        width: 345px;
+        padding: 6px;
+        border-radius: 10px;
+        font-size: 13px;
+        line-height: 1.15;
+      }
+      #grok-quota-panel.gqp-compact .gqp-header {
+        gap: 4px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-title {
+        font-size: 14px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-btn {
+        padding: 3px 5px;
+        border-radius: 7px;
+        font-size: 10px;
+        line-height: 1.1;
+      }
+      #grok-quota-panel.gqp-compact .gqp-content {
+        margin-top: 5px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-controls {
+        gap: 5px;
+        margin-bottom: 5px;
+      }
+      #grok-quota-panel.gqp-compact input[type="number"] {
+        width: 46px;
+        height: 22px;
+        padding: 2px 4px;
+        border-radius: 6px;
+        font-size: 10px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-note {
+        display: none;
+      }
+      #grok-quota-panel.gqp-compact .gqp-grid {
+        gap: 3px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-card {
+        display: grid;
+        grid-template-columns: minmax(66px, 1fr) 48px 56px 34px 34px 62px;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 5px;
+        border-radius: 7px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-card-head {
+        display: contents;
+        margin-bottom: 0;
+      }
+      #grok-quota-panel.gqp-compact .gqp-service-title {
+        font-size: 13px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #grok-quota-panel.gqp-compact .gqp-badge {
+        padding: 2px 4px;
+        font-size: 8px;
+        text-align: center;
+      }
+      #grok-quota-panel.gqp-compact .gqp-stats {
+        display: contents;
+      }
+      #grok-quota-panel.gqp-compact .gqp-stat {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        border-radius: 0;
+      }
+      #grok-quota-panel.gqp-compact .gqp-label {
+        display: none;
+      }
+      #grok-quota-panel.gqp-compact .gqp-value {
+        font-size: 13px;
+        font-weight: 800;
+        text-align: right;
+      }
+      #grok-quota-panel.gqp-compact .gqp-status {
+        margin-top: 4px;
+        padding: 4px 5px;
+        border-radius: 7px;
+        max-height: 38px;
+        font-size: 10px;
+      }
+      #grok-quota-panel.gqp-folded {
+        width: 345px;
+        max-width: calc(100vw - 24px);
+        padding: 7px;
+      }
+      #grok-quota-panel.gqp-folded .gqp-header {
+        display: grid;
+        grid-template-columns: minmax(82px, 1fr) repeat(5, 32px);
+        gap: 6px;
+        align-items: center;
+      }
+      #grok-quota-panel.gqp-folded .gqp-title {
+        min-width: 0;
+        flex: none;
+        font-size: 13px;
+        line-height: 1.05;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #grok-quota-panel.gqp-folded .gqp-btn {
+        min-width: 0;
+        width: 32px;
+        height: 32px;
+        flex: none;
+        white-space: nowrap;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded {
+        width: 345px;
+        max-width: calc(100vw - 24px);
+        padding: 7px;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-header {
+        display: grid;
+        grid-template-columns: minmax(82px, 1fr) repeat(5, 32px);
+        gap: 6px;
+        align-items: center;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-title {
+        min-width: 0;
+        flex: none;
+        font-size: 13px;
+        line-height: 1.05;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-btn {
+        min-width: 0;
+        width: 32px;
+        height: 32px;
+        flex: none;
+        white-space: nowrap;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-status {
+        max-height: 20px;
+        height: 20px;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      #grok-quota-panel.gqp-compact .gqp-legend {
+        display: grid;
+      }
+      #grok-quota-panel .gqp-legend {
+        display: grid;
+        grid-template-columns: minmax(110px, 1fr) 68px 82px 60px 64px 98px;
+        gap: 4px;
+        padding: 0 5px 2px 5px;
+        color: rgba(255,255,255,0.48);
+        font-size: 13px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+      #grok-quota-panel .gqp-legend span:not(:first-child) { text-align: right; }
+      #grok-quota-panel .gqp-counter-row {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin: 0 0 8px 0;
+      }
+      #grok-quota-panel .gqp-counter-note {
+        color: rgba(255,255,255,0.72);
+        font-size: 13px;
+        font-weight: 700;
+      }
+      #grok-quota-panel.gqp-compact .gqp-counter-row {
+        gap: 4px;
+        margin-bottom: 4px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-counter-note {
+        display: none;
+      }
+
+      #grok-quota-panel .gqp-warn { color: #ffcc66; font-weight: 800; }
+
+      #grok-quota-panel .gqp-icon-btn {
+        min-width: 30px;
+        padding-left: 6px;
+        padding-right: 6px;
+        font-size: 14px;
+        line-height: 1;
+      }
+      .gqp-modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.45);
+        z-index: 1000000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 18px;
+      }
+      .gqp-modal {
+        width: min(980px, calc(100vw - 36px));
+        max-height: min(780px, calc(100vh - 36px));
+        overflow: hidden;
+        background: rgba(20,20,22,0.98);
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.14);
+        border-radius: 12px;
+        box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+        font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Arial, sans-serif;
+        display: flex;
+        flex-direction: column;
+      }
+      .gqp-modal * { box-sizing: border-box; }
+      .gqp-modal-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.10);
+      }
+      .gqp-modal-title {
+        flex: 1 1 auto;
+        font-weight: 900;
+        color: #4ade80;
+        font-size: 14px;
+      }
+      .gqp-modal-body {
+        padding: 10px 12px 12px;
+        overflow: auto;
+      }
+      .gqp-modal-row {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 7px;
+      }
+      .gqp-modal label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: rgba(255,255,255,0.78);
+      }
+      .gqp-modal input[type="number"],
+      .gqp-modal select {
+        height: 28px;
+        padding: 4px 6px;
+        background: #2b2b2b;
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.18);
+        border-radius: 8px;
+        font: inherit;
+      }
+      .gqp-modal button {
+        border: 1px solid rgba(255,255,255,0.14);
+        background: rgba(255,255,255,0.08);
+        color: #fff;
+        border-radius: 9px;
+        padding: 6px 9px;
+        cursor: pointer;
+        font-weight: 800;
+        font-size: 13px;
+      }
+      .gqp-modal button:hover {
+        background: rgba(255,255,255,0.14);
+      }
+      .gqp-history-table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+      .gqp-history-table th,
+      .gqp-history-table td {
+        border-bottom: 1px solid rgba(255,255,255,0.08);
+        padding: 5px 6px;
+        text-align: right;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .gqp-history-table th:first-child,
+      .gqp-history-table td:first-child {
+        text-align: left;
+      }
+      .gqp-history-table th {
+        position: sticky;
+        top: 0;
+        background: #202024;
+        z-index: 1;
+        color: rgba(255,255,255,0.72);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+      .gqp-limit-hit {
+        color: #ffcc66;
+        font-weight: 900;
+      }
+      .gqp-muted {
+        color: rgba(255,255,255,0.55);
+      }
+
+
+      #grok-quota-panel .gqp-badges {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 5px;
+        margin: 0 0 7px 0;
+      }
+      #grok-quota-panel .gqp-qbadge {
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 9px;
+        padding: 5px 6px;
+        background: rgba(255,255,255,0.06);
+        min-width: 0;
+        text-align: center;
+        font-weight: 900;
+        line-height: 1.12;
+      }
+      #grok-quota-panel .gqp-qbadge .gqp-qb-title {
+        font-size: 12px;
+        opacity: 0.85;
+      }
+      #grok-quota-panel .gqp-qbadge .gqp-qb-main {
+        font-size: 15px;
+        margin-top: 2px;
+      }
+      #grok-quota-panel .gqp-qbadge.safe {
+        color: #9fffcf;
+        background: rgba(0,255,140,0.10);
+        border-color: rgba(0,255,140,0.25);
+      }
+      #grok-quota-panel .gqp-qbadge.warn {
+        color: #ffdf7e;
+        background: rgba(255,200,30,0.12);
+        border-color: rgba(255,200,30,0.28);
+      }
+      #grok-quota-panel .gqp-qbadge.danger {
+        color: #ff9b9b;
+        background: rgba(255,60,60,0.12);
+        border-color: rgba(255,60,60,0.30);
+      }
+      #grok-quota-panel.gqp-compact .gqp-badges {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 3px;
+        margin-bottom: 4px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-qbadge {
+        padding: 3px 2px;
+        border-radius: 7px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-qbadge .gqp-qb-title { font-size: 9px; }
+      #grok-quota-panel.gqp-compact .gqp-qbadge .gqp-qb-main { font-size: 11px; }
+      .gqp-floating-notice {
+        position: fixed;
+        left: 14px;
+        top: 14px;
+        z-index: 1000001;
+        max-width: min(520px, calc(100vw - 28px));
+        background: rgba(20,20,20,0.78);
+        color: #ffdf7e;
+        border: 1px solid rgba(255,220,80,0.35);
+        border-radius: 12px;
+        padding: 10px 12px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+        font: 16px/1.25 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Arial, sans-serif;
+        font-weight: 900;
+        pointer-events: none;
+      }
+      .gqp-history-table tbody tr:nth-child(odd) { background: rgba(255,255,255,0.025); }
+      .gqp-history-table tbody tr:hover { background: rgba(74,222,128,0.08); }
+      .gqp-history-table tfoot td {
+        position: sticky;
+        bottom: 0;
+        background: #202024;
+        color: #fff;
+        font-weight: 900;
+        border-top: 1px solid rgba(255,255,255,0.15);
+      }
+      .gqp-history-table th:first-child,
+      .gqp-history-table td:first-child {
+        position: sticky;
+        left: 0;
+        z-index: 2;
+        background: #202024;
+      }
+      .gqp-history-table tbody td:first-child { background: #1c1c20; }
+      .gqp-note-cell {
+        text-align: center !important;
+        cursor: pointer;
+        font-size: 15px;
+      }
+
+
+      /* v1.7.6: final minimized toolbar override - keep folded view tight and compact-sized */
+      #grok-quota-panel.gqp-folded {
+        width: 315px !important;
+        max-width: calc(100vw - 24px) !important;
+        padding: 6px !important;
+      }
+      #grok-quota-panel.gqp-folded .gqp-header {
+        display: grid !important;
+        grid-template-columns: minmax(76px, 1fr) repeat(5, 28px) !important;
+        gap: 4px !important;
+        align-items: center !important;
+      }
+      #grok-quota-panel.gqp-folded .gqp-title {
+        font-size: 13px !important;
+        line-height: 1.05 !important;
+        min-width: 0 !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        letter-spacing: 0 !important;
+      }
+      #grok-quota-panel.gqp-folded .gqp-btn {
+        width: 28px !important;
+        height: 28px !important;
+        min-width: 0 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-size: 13px !important;
+        border-radius: 8px !important;
+        line-height: 1 !important;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded {
+        width: 315px !important;
+        max-width: calc(100vw - 24px) !important;
+        padding: 6px !important;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-header {
+        display: grid !important;
+        grid-template-columns: minmax(76px, 1fr) repeat(5, 28px) !important;
+        gap: 4px !important;
+        align-items: center !important;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-title {
+        font-size: 13px !important;
+        line-height: 1.05 !important;
+        min-width: 0 !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        letter-spacing: 0 !important;
+      }
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-btn {
+        width: 28px !important;
+        height: 28px !important;
+        min-width: 0 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-size: 13px !important;
+        border-radius: 8px !important;
+        line-height: 1 !important;
+      }
+
+      #grok-quota-panel .gqp-err { color: #ff8b8b; font-weight: 800; }
+
+      /* v1.7.2 layout cleanup */
+      #grok-quota-panel {
+        width: 470px;
+      }
+      #grok-quota-panel .gqp-title {
+        font-size: 17px;
+        min-width: 92px;
+      }
+      #grok-quota-panel .gqp-card,
+      #grok-quota-panel.gqp-compact .gqp-card {
+        grid-template-columns: minmax(170px, 1fr) 108px 72px;
+      }
+      #grok-quota-panel .gqp-legend,
+      #grok-quota-panel.gqp-compact .gqp-legend {
+        grid-template-columns: minmax(170px, 1fr) 108px 72px;
+      }
+      #grok-quota-panel .gqp-service-title,
+      #grok-quota-panel.gqp-compact .gqp-service-title {
+        font-size: 14px;
+        min-width: 0;
+      }
+      #grok-quota-panel .gqp-value.safe { color: #9fffcf; }
+      #grok-quota-panel .gqp-value.warn { color: #ffdf7e; }
+      #grok-quota-panel .gqp-value.danger { color: #ff9b9b; }
+      #grok-quota-panel.gqp-compact {
+        width: 410px;
+      }
+      #grok-quota-panel.gqp-folded,
+      #grok-quota-panel.gqp-compact.gqp-folded {
+        width: 450px;
+        max-width: calc(100vw - 24px);
+        padding: 8px;
+      }
+      #grok-quota-panel.gqp-folded .gqp-header,
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-header {
+        display: grid;
+        grid-template-columns: minmax(100px, 1fr) auto auto auto auto auto;
+        gap: 6px;
+      }
+      #grok-quota-panel.gqp-folded .gqp-title,
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-title {
+        font-size: 16px;
+        white-space: nowrap;
+      }
+      #grok-quota-panel.gqp-folded .gqp-btn,
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-btn {
+        padding: 5px 8px;
+        font-size: 12px;
+      }
+      #grok-quota-panel.gqp-folded .gqp-icon-btn,
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-icon-btn {
+        min-width: 30px;
+        padding-left: 6px;
+        padding-right: 6px;
+      }
+      #grok-quota-panel .gqp-counter-row {
+        margin-bottom: 6px;
+      }
+      #grok-quota-panel .gqp-counter-note {
+        font-size: 12px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-counter-note {
+        display: inline;
+        font-size: 11px;
+      }
+      #grok-quota-panel .gqp-badges {
+        display: none !important;
+      }
+
+
+      /* v1.7.3 usability/layout fixes */
+      #grok-quota-panel {
+        width: 500px;
+        font-size: 15px;
+      }
+      #grok-quota-panel .gqp-title {
+        font-size: 19px;
+        min-width: 112px;
+      }
+      #grok-quota-panel .gqp-header {
+        gap: 7px;
+      }
+      #grok-quota-panel .gqp-btn {
+        min-width: 34px;
+        min-height: 32px;
+        padding: 6px 8px;
+        font-size: 15px;
+        line-height: 1;
+      }
+      #grok-quota-panel .gqp-icon-btn {
+        min-width: 34px;
+        padding-left: 8px;
+        padding-right: 8px;
+      }
+      #grok-quota-panel .gqp-counter-note {
+        font-size: 13px;
+      }
+      #grok-quota-panel .gqp-card,
+      #grok-quota-panel .gqp-legend {
+        grid-template-columns: minmax(190px, 1fr) 120px 76px;
+      }
+      #grok-quota-panel .gqp-service-title {
+        font-size: 16px;
+      }
+      #grok-quota-panel .gqp-value {
+        font-size: 16px;
+      }
+      #grok-quota-panel .gqp-legend {
+        font-size: 13px;
+      }
+      #grok-quota-panel.gqp-compact {
+        width: 350px;
+        font-size: 12px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-title {
+        font-size: 15px;
+        min-width: 92px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-header {
+        gap: 5px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-btn {
+        min-width: 28px;
+        min-height: 26px;
+        padding: 4px 6px;
+        font-size: 12px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-card,
+      #grok-quota-panel.gqp-compact .gqp-legend {
+        grid-template-columns: minmax(134px, 1fr) 88px 56px;
+        gap: 4px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-service-title {
+        font-size: 12px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-value {
+        font-size: 12px;
+      }
+      #grok-quota-panel.gqp-compact .gqp-legend {
+        font-size: 10px;
+      }
+      #grok-quota-panel.gqp-folded,
+      #grok-quota-panel.gqp-compact.gqp-folded {
+        width: 390px;
+        max-width: calc(100vw - 24px);
+        padding: 8px;
+      }
+      #grok-quota-panel.gqp-folded .gqp-header,
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-header {
+        display: grid;
+        grid-template-columns: minmax(112px, 1fr) 34px 34px 34px 34px 34px;
+        gap: 6px;
+        align-items: center;
+      }
+      #grok-quota-panel.gqp-folded .gqp-title,
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-title {
+        font-size: 17px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #grok-quota-panel.gqp-folded .gqp-btn,
+      #grok-quota-panel.gqp-compact.gqp-folded .gqp-btn {
+        min-width: 32px;
+        width: 32px;
+        height: 30px;
+        padding: 4px 0;
+        font-size: 14px;
+        text-align: center;
+      }
+      .gqp-modal-head {
+        cursor: move;
+        user-select: none;
+      }
+      .gqp-modal-close-x {
+        min-width: 30px;
+        width: 30px;
+        height: 28px;
+        padding: 0 !important;
+        font-size: 16px !important;
+        line-height: 1 !important;
+      }
+      .gqp-modal-actions {
+        position: sticky;
+        bottom: 0;
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        padding: 10px 0 0;
+        margin-top: 10px;
+        background: rgba(20,20,22,0.98);
+        border-top: 1px solid rgba(255,255,255,0.10);
+      }
+      .gqp-save-btn {
+        color: #9fffcf !important;
+        background: rgba(0,255,140,0.12) !important;
+        border-color: rgba(0,255,140,0.30) !important;
+      }
+      .gqp-close-btn {
+        color: #ddd !important;
+      }
+      .gqp-danger-toggle,
+      .gqp-danger-zone button {
+        color: #ff9b9b !important;
+        background: rgba(255,60,60,0.10) !important;
+        border-color: rgba(255,60,60,0.30) !important;
+      }
+      .gqp-danger-zone {
+        display: none;
+        border: 1px solid rgba(255,60,60,0.35);
+        background: rgba(255,60,60,0.07);
+        border-radius: 10px;
+        padding: 8px;
+        margin-top: 8px;
+        color: #ff9b9b;
+      }
+      .gqp-danger-zone.open {
+        display: flex;
+      }
+
+    `;
+    document.head.appendChild(st);
+  }
+
+
+  function defaultUsage() {
+    return {
+      schema: 2,
+      day: getLocalDayKey(),
+      total: { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 },
+      today: { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 },
+      windowSeconds: { image: 86400, imagePro: 7200, imageEdit: 86400, video: 7200, video720p: 7200 },
+      recent: [],
+      events: [],
+    };
+  }
+
+  function getLocalDayKey() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return y + "-" + m + "-" + day;
+  }
+
+  function normalizeUsage(raw) {
+    const base = defaultUsage();
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return base;
+
+    const out = Object.assign({}, base, raw);
+    out.total = Object.assign({}, base.total, raw.total || {});
+    out.today = Object.assign({}, base.today, raw.today || {});
+    out.windowSeconds = Object.assign({}, base.windowSeconds, raw.windowSeconds || {});
+    out.recent = Array.isArray(raw.recent) ? raw.recent.slice(-MAX_RECENT_ITEMS) : [];
+    out.events = Array.isArray(raw.events) ? raw.events.slice(-200) : [];
+
+    const todayKey = getLocalDayKey();
+    if (out.day !== todayKey) {
+      out.day = todayKey;
+      out.today = Object.assign({}, base.today);
+    }
+
+    for (const service of SERVICES) {
+      out.total[service.key] = Math.max(0, Number(out.total[service.key]) || 0);
+      out.today[service.key] = Math.max(0, Number(out.today[service.key]) || 0);
+      out.windowSeconds[service.key] = Math.max(60, Number(out.windowSeconds[service.key]) || Number(base.windowSeconds[service.key]) || 3600);
+    }
+
+    out.recent = out.recent
+      .filter((item) => item && typeof item === "object" && item.serviceKey && item.key)
+      .map((item) => ({
+        key: String(item.key),
+        serviceKey: String(item.serviceKey),
+        kind: String(item.kind || "image"),
+        detail: String(item.detail || ""),
+        firstSeenAt: Number(item.firstSeenAt) || Date.now(),
+        lastSeenAt: Number(item.lastSeenAt) || Number(item.firstSeenAt) || Date.now(),
+        maxPercentage: Math.max(0, Math.min(100, Number(item.maxPercentage) || 0)),
+        counted: !!item.counted,
+        countedAt: item.countedAt != null ? Number(item.countedAt) || null : null,
+        expiresAt: item.expiresAt != null ? Number(item.expiresAt) || null : null,
+      }))
+      .slice(-MAX_RECENT_ITEMS);
+
+    return out;
+  }
+
+  function loadUsage() {
+    S.usage = normalizeUsage(loadJson(K_USAGE, null));
+    saveUsage();
+    return S.usage;
+  }
+
+  function saveUsage() {
+    if (!S.usage) S.usage = normalizeUsage(null);
+    saveJson(K_USAGE, S.usage);
+  }
+
+  function resetTodayUsage() {
+    const u = loadUsage();
+    u.day = getLocalDayKey();
+    u.today = defaultUsage().today;
+    u.events.unshift({ at: new Date().toISOString(), type: "reset_today" });
+    u.events = u.events.slice(0, 200);
+    saveUsage();
+    refreshUsageOnly();
+    setStatus("Local today counters reset.", "warn");
+  }
+
+  function resetAllUsage() {
+    S.usage = defaultUsage();
+    saveUsage();
+    refreshUsageOnly();
+    setStatus("All local counters reset.", "warn");
+  }
+
+  function getWindowSeconds(serviceKey, usageObj) {
+    const liveSec = S.lastData && S.lastData[serviceKey] && Number(S.lastData[serviceKey].windowSizeSeconds);
+    if (Number.isFinite(liveSec) && liveSec > 0) return liveSec;
+    const u = usageObj || S.usage || loadUsage();
+    const stored = u && u.windowSeconds ? Number(u.windowSeconds[serviceKey]) : 0;
+    if (Number.isFinite(stored) && stored > 0) return stored;
+    return Number(defaultUsage().windowSeconds[serviceKey]) || 3600;
+  }
+
+  function updateWindowSizesFromQuota(data) {
+    if (!data || typeof data !== "object") return;
+    const u = loadUsage();
+    let changed = false;
+    for (const service of SERVICES) {
+      const sec = Number(data[service.key] && data[service.key].windowSizeSeconds);
+      if (Number.isFinite(sec) && sec > 0 && Number(u.windowSeconds[service.key]) !== sec) {
+        u.windowSeconds[service.key] = sec;
+        changed = true;
+      }
+    }
+    if (changed) saveUsage();
+  }
+
+  function getWindowCount(serviceKey, usageObj) {
+    const u = usageObj || S.usage || loadUsage();
+    const now = Date.now();
+    let total = 0;
+    for (const item of (u.recent || [])) {
+      if (item.serviceKey !== serviceKey) continue;
+      if (!item.counted) continue;
+      if (!Number.isFinite(item.expiresAt) || item.expiresAt <= now) continue;
+      total += 1;
+    }
+    return total;
+  }
+
+  function localUsageLabel(serviceKey) {
+    const used = getWindowCount(serviceKey);
+    const limit = getEffectiveLimitForService(serviceKey);
+    return String(used) + "/" + String(limit);
+  }
+
+  function refreshUsageOnly() {
+    const u = loadUsage();
+    pruneRecentUsage(u);
+    const grid = document.getElementById("gqp-grid");
+    if (grid) renderCards(grid, S.lastData);
+    const summary = document.getElementById("gqp-counter-summary");
+    if (summary) summary.textContent = getUsageSummary();
+  }
+
+  function getUsageSummary() {
+    const u = S.usage || loadUsage();
+    const wi = getWindowCount("image", u) + getWindowCount("imagePro", u) + getWindowCount("imageEdit", u);
+    const wv = getWindowCount("video", u) + getWindowCount("video720p", u);
+    const ti = Number(u.today.image || 0) + Number(u.today.imagePro || 0) + Number(u.today.imageEdit || 0);
+    const tv = Number(u.today.video || 0) + Number(u.today.video720p || 0);
+    const ai = Number(u.total.image || 0) + Number(u.total.imagePro || 0) + Number(u.total.imageEdit || 0);
+    const av = Number(u.total.video || 0) + Number(u.total.video720p || 0);
+    return "Window: " + wi + " images, " + wv + " videos | Today: " + ti + ", " + tv + " | All: " + ai + ", " + av;
+  }
+
+  function incrementUsageCounters(u, serviceKey, amount, reason, detail) {
+    const n = Math.max(1, Number(amount) || 1);
+    u.today[serviceKey] = (Number(u.today[serviceKey]) || 0) + n;
+    u.total[serviceKey] = (Number(u.total[serviceKey]) || 0) + n;
+    u.events.unshift({
+      at: new Date().toISOString(),
+      serviceKey,
+      amount: n,
+      reason: reason || "detected_request",
+      detail: detail || "",
+    });
+    u.events = u.events.slice(0, 200);
+    recordHistoryUsage(serviceKey, n, detail || reason || "");
+  }
+
+  function pruneRecentUsage(u, nowArg) {
+    const now = Number(nowArg) || Date.now();
+    let changed = false;
+    u.recent = (u.recent || []).filter((item) => {
+      if (!item || !item.key || !item.serviceKey) {
+        changed = true;
+        return false;
+      }
+
+      if (!item.counted) {
+        if (item.kind === "image" && now - Number(item.firstSeenAt || now) >= IMAGE_PENDING_GRACE_MS) {
+          finalizeRecentItem(u, item, "pending_image_timeout", item.detail || "pending image timeout", now);
+          changed = true;
+          return true;
+        }
+        if (now - Number(item.lastSeenAt || item.firstSeenAt || now) > Math.max(IMAGE_PENDING_GRACE_MS * 3, getWindowSeconds(item.serviceKey, u) * 1000)) {
+          changed = true;
+          return false;
+        }
+        return true;
+      }
+
+      if (Number.isFinite(item.expiresAt) && item.expiresAt > now) return true;
+      changed = true;
+      return false;
+    }).slice(-MAX_RECENT_ITEMS);
+
+    if (changed) saveUsage();
+    return changed;
+  }
+
+  function finalizeRecentItem(u, item, reason, detail, nowArg) {
+    if (!item || item.counted) return false;
+    const now = Number(nowArg) || Date.now();
+    item.counted = true;
+    item.countedAt = now;
+    item.expiresAt = now + getWindowSeconds(item.serviceKey, u) * 1000;
+    incrementUsageCounters(u, item.serviceKey, 1, reason, detail || item.detail || "");
+    return true;
+  }
+
+  function recordCountedUsage(serviceKey, amount, reason, detail, recentKey, kind) {
+    const service = SERVICES.find((x) => x.key === serviceKey);
+    if (!service) return;
+
+    const n = Math.max(1, Number(amount) || 1);
+    const u = loadUsage();
+    pruneRecentUsage(u);
+    const now = Date.now();
+
+    for (let i = 0; i < n; i++) {
+      const key = String(recentKey || (kind || "event") + ":" + serviceKey + ":" + now + ":" + i + ":" + Math.random().toString(36).slice(2, 8));
+      const item = {
+        key,
+        serviceKey,
+        kind: kind || "event",
+        detail: detail || "",
+        firstSeenAt: now,
+        lastSeenAt: now,
+        maxPercentage: 100,
+        counted: true,
+        countedAt: now,
+        expiresAt: now + getWindowSeconds(serviceKey, u) * 1000,
+      };
+      u.recent.push(item);
+    }
+
+    incrementUsageCounters(u, serviceKey, n, reason || "detected_request", detail || "");
+    u.recent = u.recent.slice(-MAX_RECENT_ITEMS);
+    saveUsage();
+    refreshUsageOnly();
+    setStatus("Counted " + n + " " + service.title + " locally.");
+  }
+
+  function rememberLastImageRequest(hit) {
+    if (!hit || !hit.serviceKey) return;
+    S.lastImageRequest = {
+      serviceKey: hit.serviceKey,
+      detail: hit.detail || "image request",
+      at: Date.now(),
+    };
+  }
+
+  function currentImageServiceFromLastRequest() {
+    const last = S.lastImageRequest;
+    if (!last || !last.serviceKey) return { serviceKey: "image", detail: "websocket image result" };
+    if (Date.now() - Number(last.at || 0) > 5 * 60 * 1000) return { serviceKey: "image", detail: "websocket image result" };
+    return { serviceKey: last.serviceKey, detail: last.detail || "websocket image result" };
+  }
+
+  function getImagePayloadKey(obj) {
+    if (!obj || typeof obj !== "object") return "";
+    return String(
+      obj.id ||
+      obj.job_id ||
+      obj.url ||
+      ((obj.request_id || "") + ":" + (obj.order != null ? obj.order : "") + ":" + (obj.grid_index != null ? obj.grid_index : ""))
+    ).trim();
+  }
+
+  function getImageServiceFromPayload(obj) {
+    if (obj && obj.is_alteration) return { serviceKey: "imageEdit", detail: "image alteration" };
+    if (obj && obj.is_pro === true) return { serviceKey: "imagePro", detail: "quality image" };
+    if (obj && obj.is_pro === false) return { serviceKey: "image", detail: "speed image" };
+    return currentImageServiceFromLastRequest();
+  }
+
+  function rememberImagePayload(obj) {
+    if (!obj || typeof obj !== "object") return;
+    const key = getImagePayloadKey(obj);
+    if (!key) return;
+
+    const pct = Math.max(0, Math.min(100, Number(obj.percentage_complete) || 0));
+    const inferred = getImageServiceFromPayload(obj);
+    const serviceKey = inferred.serviceKey || "image";
+    const detail = [
+      inferred.detail || "image",
+      obj.prompt ? String(obj.prompt).slice(0, 80) : "",
+      obj.id || obj.job_id || "",
+    ].filter(Boolean).join(" | ");
+
+    const u = loadUsage();
+    pruneRecentUsage(u);
+    const now = Date.now();
+
+    let item = (u.recent || []).find((x) => x.key === key);
+    if (!item) {
+      item = {
+        key,
+        serviceKey,
+        kind: "image",
+        detail,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        maxPercentage: pct,
+        counted: false,
+        countedAt: null,
+        expiresAt: null,
+      };
+      u.recent.push(item);
+    } else {
+      item.lastSeenAt = now;
+      item.maxPercentage = Math.max(Number(item.maxPercentage) || 0, pct);
+      item.serviceKey = serviceKey || item.serviceKey;
+      if (detail) item.detail = detail;
+    }
+
+    let countedNow = false;
+    if (!item.counted && pct >= 100) {
+      countedNow = finalizeRecentItem(u, item, "image_completed", detail, now);
+    }
+
+    u.recent = u.recent.slice(-MAX_RECENT_ITEMS);
+    saveUsage();
+    refreshUsageOnly();
+
+    if (countedNow) {
+      const service = SERVICES.find((x) => x.key === item.serviceKey);
+      setStatus("Counted 1 " + (service ? service.title : "image") + " from imagine WebSocket.");
+    } else if (!item.counted) {
+      setStatus("Pending image detected at " + pct + "% - waiting for final image or timeout.");
+    }
+  }
+
+  function handleImagineWsPayload(payload) {
+    if (!payload) return;
+
+    let obj = payload;
+    if (typeof payload === "string") {
+      obj = safeParseJson(payload);
+      if (!obj) return;
+    }
+
+    if (Array.isArray(obj)) {
+      obj.forEach(handleImagineWsPayload);
+      return;
+    }
+
+    if (!obj || typeof obj !== "object") return;
+
+    if (obj.type === "image" && obj.blob) {
+      rememberImagePayload(obj);
+    }
+  }
+
+  function safeParseJson(text) {
+    try {
+      if (typeof text !== "string") return null;
+      return JSON.parse(text);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function bodyLooksLikeImageRequest(body, bodyText) {
+    const lower = String(bodyText || "").toLowerCase();
+    const modelName = String(body && body.modelName || "").toLowerCase();
+    const modelMap = body?.responseMetadata?.modelConfigOverride?.modelMap || {};
+
+    return !!(
+      modelMap.imageGenModelConfig ||
+      body?.toolOverrides?.imageGen ||
+      body?.toolOverrides?.imageEdit ||
+      modelName.includes("image") ||
+      modelName.includes("imagine") ||
+      lower.includes("imagegenmodelconfig") ||
+      lower.includes("image_gen") ||
+      lower.includes("imagen")
+    );
+  }
+
+  function classifyGenerationRequest(url, method, bodyText) {
+    if (!url || !String(url).includes(GENERATION_URL_PART)) return null;
+    if (String(method || "GET").toUpperCase() !== "POST") return null;
+
+    const body = safeParseJson(bodyText);
+    if (!body || typeof body !== "object") return null;
+
+    const modelName = String(body.modelName || "").toLowerCase();
+    const modelMap = body?.responseMetadata?.modelConfigOverride?.modelMap || {};
+    const videoConfig = modelMap.videoGenModelConfig || body?.toolOverrides?.videoGen || null;
+    const isVideo = !!videoConfig || modelName === "imagine-video-gen" || modelName.includes("video");
+
+    if (isVideo) {
+      const res = String(videoConfig?.resolutionName || videoConfig?.resolution || "").toLowerCase();
+      const serviceKey = res.includes("720") ? "video720p" : "video";
+      return { serviceKey, amount: 1, detail: modelName || "video" };
+    }
+
+    if (!bodyLooksLikeImageRequest(body, bodyText)) return null;
+
+    const lower = String(bodyText || "").toLowerCase();
+    const imageConfig = modelMap.imageGenModelConfig || body?.toolOverrides?.imageGen || {};
+    const candidateCount = Number(
+      imageConfig?.numImages ||
+      imageConfig?.numberOfImages ||
+      imageConfig?.imageCount ||
+      imageConfig?.n ||
+      body?.responseMetadata?.imageCount ||
+      body?.imageCount ||
+      0
+    );
+
+    const hasAttachment = Array.isArray(body.fileAttachments) && body.fileAttachments.length > 0;
+    const isEdit = !!body?.toolOverrides?.imageEdit || lower.includes("imageedit") || lower.includes("image_edit") || (hasAttachment && lower.includes("edit"));
+    const isQuality =
+      modelName.includes("pro") ||
+      modelName.includes("quality") ||
+      lower.includes("imagepro") ||
+      lower.includes("quality") ||
+      lower.includes("high_quality") ||
+      lower.includes("imagine-image-gen-pro");
+
+    if (isEdit) return { serviceKey: "imageEdit", amount: Math.max(1, candidateCount || 1), detail: modelName || "image edit" };
+    if (isQuality) return { serviceKey: "imagePro", amount: Math.max(1, candidateCount || 4), detail: modelName || "quality image" };
+
+    return { serviceKey: "image", amount: Math.max(1, candidateCount || 1), detail: modelName || "speed image" };
+  }
+
+  function installGenerationCounterInterceptor() {
+    if (window.__grokQuotaLocalCounterInstalled) return;
+    window.__grokQuotaLocalCounterInstalled = true;
+
+    const originalFetch = window.fetch;
+    window.fetch = async function (input, init) {
+      let url = input;
+      if (input instanceof Request) url = input.url;
+
+      const method = String(init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+      let bodyText = null;
+
+      try {
+        if (init && typeof init.body === "string") {
+          bodyText = init.body;
+        } else if (input instanceof Request && !init?.body && method === "POST") {
+          bodyText = await input.clone().text();
+        }
+
+        const hit = classifyGenerationRequest(url, method, bodyText);
+        if (hit) {
+          if (hit.serviceKey === "video" || hit.serviceKey === "video720p") {
+            // Video currently has no reliable result blob signal, so keep counting at request time.
+            recordCountedUsage(hit.serviceKey, hit.amount, "request_sent", hit.detail, null, "video");
+          } else {
+            // Images are counted from the imagine WebSocket result stream to avoid assuming 1 vs 4.
+            rememberLastImageRequest(hit);
+            setStatus("Image request detected; waiting for WebSocket image results.");
+          }
+        }
+      } catch (e) {
+        console.warn("[GrokQuota] Local counter interceptor error:", e);
+      }
+
+      return originalFetch.apply(this, arguments);
+    };
+  }
+
+  function installImagineWebSocketInterceptor() {
+    if (window.__grokQuotaImagineWsInstalled) return;
+    window.__grokQuotaImagineWsInstalled = true;
+
+    const OriginalWebSocket = window.WebSocket;
+    if (!OriginalWebSocket) return;
+
+    function WrappedWebSocket(url, protocols) {
+      const ws = protocols !== undefined ? new OriginalWebSocket(url, protocols) : new OriginalWebSocket(url);
+      try {
+        const wsUrl = String(url && url.url ? url.url : url || "");
+        if (wsUrl.includes(IMAGINE_LISTEN_WS_PART)) {
+          setStatus("Watching imagine WebSocket for image results.");
+          ws.addEventListener("message", (event) => {
+            try {
+              handleImagineWsPayload(event && event.data);
+            } catch (e) {
+              console.warn("[GrokQuota] WebSocket image counter error:", e);
+            }
+          });
+        }
+      } catch (e) {
+        console.warn("[GrokQuota] WebSocket wrapper error:", e);
+      }
+      return ws;
+    }
+
+    try {
+      Object.setPrototypeOf(WrappedWebSocket, OriginalWebSocket);
+      WrappedWebSocket.prototype = OriginalWebSocket.prototype;
+      Object.defineProperty(WrappedWebSocket, "name", { value: "WebSocket" });
+    } catch (_) {}
+
+    window.WebSocket = WrappedWebSocket;
+  }
+
+
+  function getHistoryDays() {
+    return clamp(parseInt(lsGet(K_HISTORY_DAYS, String(DEFAULT_HISTORY_DAYS)), 10), MIN_HISTORY_DAYS, MAX_HISTORY_DAYS);
+  }
+
+
+  function defaultNotifyServices() {
+    return { image: true, imagePro: true, imageEdit: true, video: true, video720p: true };
+  }
+
+  function getDefaultLimits() {
+    const raw = loadJson(K_DEFAULT_LIMITS, null);
+    const out = Object.assign({}, DEFAULT_QUOTA_LIMITS, raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {});
+    for (const service of SERVICES) {
+      out[service.key] = Math.max(1, Number(out[service.key]) || Number(DEFAULT_QUOTA_LIMITS[service.key]) || 1);
+    }
+    return out;
+  }
+
+  function saveDefaultLimits(obj) {
+    const out = Object.assign({}, getDefaultLimits(), obj || {});
+    for (const service of SERVICES) out[service.key] = Math.max(1, Number(out[service.key]) || 1);
+    saveJson(K_DEFAULT_LIMITS, out);
+  }
+
+  function getNotifyServices() {
+    const raw = loadJson(K_NOTIFY_SERVICES, null);
+    return Object.assign(defaultNotifyServices(), raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {});
+  }
+
+  function saveNotifyServices(obj) {
+    saveJson(K_NOTIFY_SERVICES, Object.assign(defaultNotifyServices(), obj || {}));
+  }
+
+  function getBackupIntervalDays() {
+    return clamp(parseInt(lsGet(K_BACKUP_INTERVAL_DAYS, String(DEFAULT_BACKUP_REMINDER_DAYS)), 10), 1, 3650);
+  }
+
+  function getEffectiveLimitForService(serviceKey) {
+    const defaults = getDefaultLimits();
+    let limit = Number(defaults[serviceKey]) || 1;
+    const h = loadHistory();
+    for (const dayKey of Object.keys(h.days || {})) {
+      const q = h.days[dayKey] && h.days[dayKey].quota && h.days[dayKey].quota[serviceKey];
+      if (!q) continue;
+      if (q.quotaReached && q.quotaEstimate != null) limit = Math.max(limit, Number(q.quotaEstimate) || 0);
+      if (q.maxWindowUsed != null) limit = Math.max(limit, Number(q.maxWindowUsed) || 0);
+      if (q.effectiveLimit != null) limit = Math.max(limit, Number(q.effectiveLimit) || 0);
+    }
+    return Math.max(1, Math.round(limit));
+  }
+
+  function getRecentLimitForDay(day, serviceKey) {
+    const defaults = getDefaultLimits();
+    const q = day && day.quota && day.quota[serviceKey] ? day.quota[serviceKey] : null;
+    const defaultLimit = Number(defaults[serviceKey]) || 1;
+    if (!q) return defaultLimit;
+    return Math.max(
+      defaultLimit,
+      Number(q.effectiveLimit) || 0,
+      Number(q.maxWindowUsed) || 0,
+      q.quotaReached ? Number(q.quotaEstimate) || 0 : 0
+    );
+  }
+
+  function defaultHistory() {
+    return {
+      schema: 1,
+      exportedAt: null,
+      days: {},
+    };
+  }
+
+  function normalizeHistory(raw) {
+    const base = defaultHistory();
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return base;
+    const out = Object.assign({}, base, raw);
+    out.days = raw.days && typeof raw.days === "object" && !Array.isArray(raw.days) ? raw.days : {};
+    return out;
+  }
+
+  function loadHistory() {
+    return normalizeHistory(loadJson(K_HISTORY, null));
+  }
+
+  function saveHistory(history) {
+    const h = normalizeHistory(history);
+    h.exportedAt = new Date().toISOString();
+    saveJson(K_HISTORY, h);
+  }
+
+  function ensureHistoryDay(history, dayKey) {
+    const h = history || loadHistory();
+    const key = dayKey || getLocalDayKey();
+    if (!h.days[key]) {
+      h.days[key] = {
+        date: key,
+        used: { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 },
+        quota: {},
+        notes: [],
+        note: "",
+      };
+    }
+    const d = h.days[key];
+    d.used = Object.assign({ image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 }, d.used || {});
+    d.note = String(d.note || "");
+    d.quota = d.quota && typeof d.quota === "object" && !Array.isArray(d.quota) ? d.quota : {};
+    for (const service of SERVICES) {
+      if (!d.quota[service.key]) {
+        d.quota[service.key] = {
+          samples: 0,
+          minRemaining: null,
+          maxRemaining: null,
+          lastRemaining: null,
+          windowSizeSeconds: null,
+          limitHits: 0,
+          quotaReached: false,
+          quotaEstimate: null,
+          maxWaitSeconds: 0,
+          lastNextAvailableAt: null,
+          lastAvailable: null,
+          lastObservedAt: null,
+          maxWindowUsed: 0,
+          effectiveLimit: null,
+        };
+      }
+    }
+    return d;
+  }
+
+  function recordHistoryUsage(serviceKey, amount, detail) {
+    const service = SERVICES.find((x) => x.key === serviceKey);
+    if (!service) return;
+    const n = Math.max(1, Number(amount) || 1);
+    const h = loadHistory();
+    const d = ensureHistoryDay(h, getLocalDayKey());
+    d.used[serviceKey] = (Number(d.used[serviceKey]) || 0) + n;
+    d.notes = Array.isArray(d.notes) ? d.notes : [];
+    d.notes.unshift({
+      at: new Date().toISOString(),
+      type: "usage",
+      serviceKey,
+      amount: n,
+      detail: detail || "",
+    });
+    d.notes = d.notes.slice(0, 60);
+    saveHistory(h);
+  }
+
+  function secondsUntil(value) {
+    if (!value) return 0;
+    const t = new Date(value).getTime();
+    if (!Number.isFinite(t)) return 0;
+    return Math.max(0, Math.round((t - Date.now()) / 1000));
+  }
+
+  function recordQuotaHistory(data) {
+    if (!data || typeof data !== "object") return;
+    const h = loadHistory();
+    const d = ensureHistoryDay(h, getLocalDayKey());
+    let changed = false;
+
+    for (const service of SERVICES) {
+      const q = data[service.key];
+      if (!q || typeof q !== "object") continue;
+
+      const rec = d.quota[service.key];
+      const remainingRaw = q.remainingQueries;
+      const remaining = remainingRaw == null ? null : Number(remainingRaw);
+      const available = !!q.available;
+      const windowSec = Number(q.windowSizeSeconds);
+      const waitSec = q.nextAvailableAt ? secondsUntil(q.nextAvailableAt) : 0;
+      const windowUsed = getWindowCount(service.key);
+      const defaultLimit = getDefaultLimits()[service.key] || 1;
+
+      rec.samples = (Number(rec.samples) || 0) + 1;
+      rec.lastObservedAt = new Date().toISOString();
+      rec.lastAvailable = available;
+      rec.maxWindowUsed = Math.max(Number(rec.maxWindowUsed) || 0, Number(windowUsed) || 0);
+      rec.effectiveLimit = Math.max(Number(rec.effectiveLimit) || 0, Number(defaultLimit) || 0, Number(rec.maxWindowUsed) || 0);
+
+      if (Number.isFinite(remaining)) {
+        rec.lastRemaining = remaining;
+        rec.minRemaining = rec.minRemaining == null ? remaining : Math.min(Number(rec.minRemaining), remaining);
+        rec.maxRemaining = rec.maxRemaining == null ? remaining : Math.max(Number(rec.maxRemaining), remaining);
+
+        const estimated = windowUsed + remaining;
+        if (estimated > 0) {
+          rec.quotaEstimate = rec.quotaEstimate == null ? estimated : Math.max(Number(rec.quotaEstimate) || 0, estimated);
+          rec.effectiveLimit = Math.max(Number(rec.effectiveLimit) || 0, Number(rec.quotaEstimate) || 0);
+        }
+      }
+
+      if (Number.isFinite(windowSec) && windowSec > 0) rec.windowSizeSeconds = windowSec;
+      if (q.nextAvailableAt) rec.lastNextAvailableAt = q.nextAvailableAt;
+      if (waitSec > Number(rec.maxWaitSeconds || 0)) rec.maxWaitSeconds = waitSec;
+
+      if (!available || (Number.isFinite(remaining) && remaining <= 0)) {
+        rec.limitHits = (Number(rec.limitHits) || 0) + 1;
+        rec.quotaReached = true;
+        if (windowUsed > 0) {
+          rec.quotaEstimate = rec.quotaEstimate == null ? windowUsed : Math.max(Number(rec.quotaEstimate) || 0, windowUsed);
+          rec.effectiveLimit = Math.max(Number(rec.effectiveLimit) || 0, Number(rec.quotaEstimate) || 0);
+        }
+        if (!rec.maxWaitSeconds && Number.isFinite(windowSec) && windowSec > 0) rec.maxWaitSeconds = windowSec;
+      }
+
+      changed = true;
+    }
+
+    if (changed) saveHistory(h);
+  }
+
+  function serviceShort(serviceKey) {
+    if (serviceKey === "image") return "S";
+    if (serviceKey === "imagePro") return "Q";
+    if (serviceKey === "imageEdit") return "E";
+    if (serviceKey === "video") return "V";
+    if (serviceKey === "video720p") return "720";
+    return serviceKey;
+  }
+
+  function fmtDuration(seconds) {
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n <= 0) return "-";
+    if (n < 60) return Math.round(n) + "s";
+    if (n < 3600) return Math.round(n / 60) + "m";
+    if (n < 86400) return (n / 3600).toFixed(n % 3600 === 0 ? 0 : 1) + "h";
+    return (n / 86400).toFixed(1) + "d";
+  }
+
+  function sumUsed(day, keys) {
+    return keys.reduce((acc, key) => acc + (Number(day.used && day.used[key]) || 0), 0);
+  }
+
+  function quotaCell(day, key) {
+    const q = day.quota && day.quota[key] ? day.quota[key] : null;
+    if (!q || !q.samples) return "limit " + getRecentLimitForDay(day, key);
+    const parts = [];
+    if (q.quotaReached) parts.push("hit");
+    else parts.push("not hit");
+    parts.push("limit " + getRecentLimitForDay(day, key));
+    if (q.maxWaitSeconds) parts.push("wait " + fmtDuration(q.maxWaitSeconds));
+    if (q.windowSizeSeconds) parts.push("win " + fmtDuration(q.windowSizeSeconds));
+    return parts.join(", ");
+  }
+
+  function historyRows(daysBack) {
+    const h = loadHistory();
+    const n = clamp(Number(daysBack) || DEFAULT_HISTORY_DAYS, MIN_HISTORY_DAYS, MAX_HISTORY_DAYS);
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - n + 1);
+    const startMs = start.getTime();
+
+    return Object.keys(h.days || {})
+      .filter((key) => {
+        const t = new Date(key + "T00:00:00").getTime();
+        return Number.isFinite(t) && t >= startMs;
+      })
+      .sort((a, b) => b.localeCompare(a))
+      .map((key) => {
+        const day = h.days[key] || { date: key, used: {}, quota: {}, note: "" };
+        day.date = day.date || key;
+        day.used = day.used || {};
+        day.quota = day.quota || {};
+        day.note = String(day.note || "");
+        return day;
+      });
+  }
+
+  function closeGqpModal() {
+    const old = document.getElementById("gqp-modal-backdrop");
+    if (old) old.remove();
+  }
+
+  function createModal(titleText) {
+    closeGqpModal();
+
+    const backdrop = el("div");
+    backdrop.id = "gqp-modal-backdrop";
+    backdrop.className = "gqp-modal-backdrop";
+
+    const modal = el("div");
+    modal.className = "gqp-modal";
+
+    const head = el("div");
+    head.className = "gqp-modal-head";
+
+    const title = el("div", { textContent: titleText });
+    title.className = "gqp-modal-title";
+
+    const closeBtn = el("button", { textContent: "×" });
+    closeBtn.className = "gqp-modal-close-x";
+    closeBtn.title = "Close";
+    closeBtn.addEventListener("click", closeGqpModal);
+
+    head.appendChild(title);
+    head.appendChild(closeBtn);
+
+    const body = el("div");
+    body.className = "gqp-modal-body";
+
+    modal.appendChild(head);
+    modal.appendChild(body);
+    backdrop.appendChild(modal);
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) closeGqpModal();
+    });
+    document.documentElement.appendChild(backdrop);
+
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    head.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      if (e.target && e.target.closest && e.target.closest("button,input,label,select")) return;
+      const r = modal.getBoundingClientRect();
+      dragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      startLeft = r.left;
+      startTop = r.top;
+      backdrop.style.alignItems = "flex-start";
+      backdrop.style.justifyContent = "flex-start";
+      modal.style.position = "fixed";
+      modal.style.left = startLeft + "px";
+      modal.style.top = startTop + "px";
+      e.preventDefault();
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      const maxLeft = Math.max(0, window.innerWidth - modal.offsetWidth - 8);
+      const maxTop = Math.max(0, window.innerHeight - modal.offsetHeight - 8);
+      const left = clamp(startLeft + e.clientX - startX, 8, maxLeft);
+      const top = clamp(startTop + e.clientY - startY, 8, maxTop);
+      modal.style.left = left + "px";
+      modal.style.top = top + "px";
+    });
+
+    window.addEventListener("mouseup", () => {
+      dragging = false;
+    });
+
+    return { backdrop, modal, head, body, closeBtn };
+  }
+
+  function downloadTextFile(filename, text, mime) {
+    const blob = new Blob([String(text || "")], { type: mime || "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = el("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+      a.remove();
+    }, 0);
+  }
+
+  function exportHistoryJson() {
+    const payload = {
+      schema: "grok_quota_panel.history_export",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      historyDays: getHistoryDays(),
+      usage: loadUsage(),
+      history: loadHistory(),
+    };
+    downloadTextFile("grok_quota_history_" + getLocalDayKey() + ".json", JSON.stringify(payload, null, 2), "application/json");
+    lsSet(K_LAST_BACKUP_EXPORT, new Date().toISOString());
+  }
+
+  function mergeHistoryObjects(base, incoming) {
+    const out = normalizeHistory(base);
+    const inc = normalizeHistory(incoming);
+    for (const dayKey of Object.keys(inc.days || {})) {
+      if (!out.days[dayKey]) {
+        out.days[dayKey] = inc.days[dayKey];
+        continue;
+      }
+
+      const dst = ensureHistoryDay(out, dayKey);
+      const srcDay = inc.days[dayKey] || {};
+      const srcUsed = srcDay.used || {};
+      if (srcDay.note && !dst.note) dst.note = String(srcDay.note || "");
+      for (const service of SERVICES) {
+        dst.used[service.key] = Math.max(Number(dst.used[service.key]) || 0, Number(srcUsed[service.key]) || 0);
+        const srcQ = srcDay.quota && srcDay.quota[service.key] ? srcDay.quota[service.key] : null;
+        const dstQ = dst.quota[service.key];
+        if (!srcQ) continue;
+
+        dstQ.samples = Math.max(Number(dstQ.samples) || 0, Number(srcQ.samples) || 0);
+        dstQ.minRemaining = dstQ.minRemaining == null ? srcQ.minRemaining : (srcQ.minRemaining == null ? dstQ.minRemaining : Math.min(Number(dstQ.minRemaining), Number(srcQ.minRemaining)));
+        dstQ.maxRemaining = dstQ.maxRemaining == null ? srcQ.maxRemaining : (srcQ.maxRemaining == null ? dstQ.maxRemaining : Math.max(Number(dstQ.maxRemaining), Number(srcQ.maxRemaining)));
+        dstQ.lastRemaining = srcQ.lastRemaining != null ? srcQ.lastRemaining : dstQ.lastRemaining;
+        dstQ.windowSizeSeconds = srcQ.windowSizeSeconds || dstQ.windowSizeSeconds;
+        dstQ.limitHits = Math.max(Number(dstQ.limitHits) || 0, Number(srcQ.limitHits) || 0);
+        dstQ.quotaReached = !!(dstQ.quotaReached || srcQ.quotaReached);
+        dstQ.quotaEstimate = dstQ.quotaEstimate == null ? srcQ.quotaEstimate : (srcQ.quotaEstimate == null ? dstQ.quotaEstimate : Math.max(Number(dstQ.quotaEstimate), Number(srcQ.quotaEstimate)));
+        dstQ.maxWaitSeconds = Math.max(Number(dstQ.maxWaitSeconds) || 0, Number(srcQ.maxWaitSeconds) || 0);
+        dstQ.lastNextAvailableAt = srcQ.lastNextAvailableAt || dstQ.lastNextAvailableAt;
+        dstQ.lastAvailable = srcQ.lastAvailable != null ? srcQ.lastAvailable : dstQ.lastAvailable;
+        dstQ.lastObservedAt = srcQ.lastObservedAt || dstQ.lastObservedAt;
+        dstQ.maxWindowUsed = Math.max(Number(dstQ.maxWindowUsed) || 0, Number(srcQ.maxWindowUsed) || 0);
+        dstQ.effectiveLimit = Math.max(Number(dstQ.effectiveLimit) || 0, Number(srcQ.effectiveLimit) || 0);
+      }
+    }
+    return out;
+  }
+
+  function importHistoryJson(file, onDone) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || "{}"));
+        const incomingHistory = parsed.history && parsed.history.days ? parsed.history : parsed;
+        if (!incomingHistory || !incomingHistory.days) throw new Error("No history.days found.");
+
+        const merge = window.confirm("Import mode:\\n\\nOK = Merge with existing history\\nCancel = Override existing history");
+        if (merge) {
+          saveHistory(mergeHistoryObjects(loadHistory(), incomingHistory));
+        } else {
+          if (!window.confirm("Override existing quota history?")) return;
+          saveHistory(normalizeHistory(incomingHistory));
+        }
+
+        if (parsed.usage && window.confirm("Also import local usage counters from this file?")) {
+          S.usage = normalizeUsage(parsed.usage);
+          saveUsage();
+          refreshUsageOnly();
+        }
+
+        setStatus("Quota history imported.");
+        if (typeof onDone === "function") onDone();
+      } catch (e) {
+        window.alert("Import failed: " + (e && e.message ? e.message : String(e)));
+      }
+    };
+    reader.readAsText(file);
+  }
+
+
+  function showFloatingNotice(text) {
+    const old = document.getElementById("gqp-floating-notice");
+    if (old) old.remove();
+    const box = el("div", { textContent: text });
+    box.id = "gqp-floating-notice";
+    box.className = "gqp-floating-notice";
+    document.documentElement.appendChild(box);
+    setTimeout(() => {
+      if (box && box.isConnected) box.remove();
+    }, 3000);
+  }
+
+  function checkQuotaNotifications(data) {
+    if (lsGet(K_NOTIFY_ENABLED, "0") !== "1") return;
+    if (!data || typeof data !== "object") return;
+    const threshold = Math.max(0, Number(lsGet(K_NOTIFY_THRESHOLD, String(DEFAULT_NOTIFY_THRESHOLD))) || 0);
+    const enabled = getNotifyServices();
+    const now = Date.now();
+
+    for (const service of SERVICES) {
+      if (!enabled[service.key]) continue;
+      const q = data[service.key];
+      if (!q || typeof q !== "object") continue;
+      const remaining = q.remainingQueries == null ? null : Number(q.remainingQueries);
+      const shouldWarn = q.available === false || (Number.isFinite(remaining) && remaining <= threshold);
+      if (!shouldWarn) continue;
+      const last = Number(S.lastNotifyAt[service.key] || 0);
+      if (now - last < 60 * 1000) continue;
+      S.lastNotifyAt[service.key] = now;
+      const wait = q.nextAvailableAt ? secondsUntil(q.nextAvailableAt) : 0;
+      const leftText = Number.isFinite(remaining) ? remaining + " left" : "limited";
+      const waitText = wait ? " | next in " + fmtDuration(wait) : "";
+      showFloatingNotice(service.title + ": " + leftText + waitText);
+      break;
+    }
+  }
+
+  function checkBackupReminder() {
+    const intervalDays = getBackupIntervalDays();
+    const lastExport = new Date(lsGet(K_LAST_BACKUP_EXPORT, "") || 0).getTime();
+    const lastReminder = new Date(lsGet(K_LAST_BACKUP_REMINDER, "") || 0).getTime();
+    const now = Date.now();
+    const dueMs = intervalDays * 86400 * 1000;
+    if (Number.isFinite(lastExport) && lastExport > 0 && now - lastExport < dueMs) return;
+    if (Number.isFinite(lastReminder) && lastReminder > 0 && now - lastReminder < 86400 * 1000) return;
+    lsSet(K_LAST_BACKUP_REMINDER, new Date().toISOString());
+    setStatus("Backup reminder: export quota history JSON.", "warn");
+    showFloatingNotice("Backup reminder: export quota history JSON");
+  }
+
+  function editDayNote(dayKey, onDone) {
+    const h = loadHistory();
+    const d = ensureHistoryDay(h, dayKey);
+    const current = String(d.note || "");
+    const next = window.prompt("Note for " + dayKey + ":", current);
+    if (next == null) return;
+    d.note = String(next || "").trim();
+    saveHistory(h);
+    if (typeof onDone === "function") onDone();
+  }
+
+  function openSettingsWindow() {
+    const m = createModal("Usage Settings");
+    const body = m.body;
+
+    const row = el("div");
+    row.className = "gqp-modal-row";
+
+    const daysLabel = el("label");
+    daysLabel.appendChild(el("span", { textContent: "History days" }));
+    const daysInput = el("input");
+    daysInput.type = "number";
+    daysInput.min = String(MIN_HISTORY_DAYS);
+    daysInput.max = String(MAX_HISTORY_DAYS);
+    daysInput.step = "1";
+    daysInput.value = String(getHistoryDays());
+    daysLabel.appendChild(daysInput);
+
+    const notifyLabel = el("label");
+    const notifyCheck = el("input");
+    notifyCheck.type = "checkbox";
+    notifyCheck.checked = lsGet(K_NOTIFY_ENABLED, "0") === "1";
+    notifyLabel.appendChild(notifyCheck);
+    notifyLabel.appendChild(el("span", { textContent: "Low quota popup" }));
+
+    const thresholdLabel = el("label");
+    thresholdLabel.appendChild(el("span", { textContent: "when left <=" }));
+    const thresholdInput = el("input");
+    thresholdInput.type = "number";
+    thresholdInput.min = "0";
+    thresholdInput.max = "9999";
+    thresholdInput.step = "1";
+    thresholdInput.value = lsGet(K_NOTIFY_THRESHOLD, String(DEFAULT_NOTIFY_THRESHOLD));
+    thresholdLabel.appendChild(thresholdInput);
+
+    const backupLabel = el("label");
+    backupLabel.appendChild(el("span", { textContent: "Backup reminder days" }));
+    const backupInput = el("input");
+    backupInput.type = "number";
+    backupInput.min = "1";
+    backupInput.max = "3650";
+    backupInput.step = "1";
+    backupInput.value = String(getBackupIntervalDays());
+    backupLabel.appendChild(backupInput);
+
+    row.appendChild(daysLabel);
+    row.appendChild(notifyLabel);
+    row.appendChild(thresholdLabel);
+    row.appendChild(backupLabel);
+
+    const servicesRow = el("div");
+    servicesRow.className = "gqp-modal-row";
+    servicesRow.appendChild(el("span", { textContent: "Notify types:" }));
+    const notifyServices = getNotifyServices();
+    const serviceChecks = {};
+    for (const service of SERVICES) {
+      const lab = el("label");
+      const cb = el("input");
+      cb.type = "checkbox";
+      cb.checked = !!notifyServices[service.key];
+      serviceChecks[service.key] = cb;
+      lab.appendChild(cb);
+      lab.appendChild(el("span", { textContent: service.title }));
+      servicesRow.appendChild(lab);
+    }
+
+    const limitsRow = el("div");
+    limitsRow.className = "gqp-modal-row";
+    limitsRow.appendChild(el("span", { textContent: "Default limits:" }));
+    const defaultLimits = getDefaultLimits();
+    const limitInputs = {};
+    for (const service of SERVICES) {
+      const lab = el("label");
+      lab.appendChild(el("span", { textContent: serviceShort(service.key) }));
+      const inp = el("input");
+      inp.type = "number";
+      inp.min = "1";
+      inp.max = "999999";
+      inp.step = "1";
+      inp.value = String(defaultLimits[service.key]);
+      limitInputs[service.key] = inp;
+      lab.appendChild(inp);
+      limitsRow.appendChild(lab);
+    }
+
+    const info = el("div");
+    info.className = "gqp-muted";
+    info.textContent = "Default limits are used until the script learns a larger reached limit or sees more generations in one rolling window. Low quota popup appears in the upper-left for 3 seconds.";
+
+    const dangerToggleRow = el("div");
+    dangerToggleRow.className = "gqp-modal-row";
+    const dangerToggleBtn = el("button", { textContent: "Show danger zone" });
+    dangerToggleBtn.className = "gqp-danger-toggle";
+    dangerToggleRow.appendChild(dangerToggleBtn);
+
+    const dangerRow = el("div");
+    dangerRow.className = "gqp-modal-row gqp-danger-zone";
+    dangerRow.appendChild(el("span", { textContent: "Danger zone:" }));
+
+    function confirmDangerReset(label) {
+      if (!window.confirm(label + "? This cannot be undone.")) return false;
+      const typed = window.prompt("Type RESET to confirm:", "");
+      return String(typed || "").trim() === "RESET";
+    }
+
+    const resetTodayBtn = el("button", { textContent: "Reset Today" });
+    resetTodayBtn.addEventListener("click", () => {
+      if (confirmDangerReset("Reset today's local usage counters")) resetTodayUsage();
+    });
+
+    const resetAllBtn = el("button", { textContent: "Reset All" });
+    resetAllBtn.addEventListener("click", () => {
+      if (confirmDangerReset("Reset ALL local usage counters")) resetAllUsage();
+    });
+
+    dangerRow.appendChild(resetTodayBtn);
+    dangerRow.appendChild(resetAllBtn);
+
+    dangerToggleBtn.addEventListener("click", () => {
+      const open = !dangerRow.classList.contains("open");
+      dangerRow.classList.toggle("open", open);
+      dangerToggleBtn.textContent = open ? "Hide danger zone" : "Show danger zone";
+    });
+
+    const actions = el("div");
+    actions.className = "gqp-modal-actions";
+    const closeBtn = el("button", { textContent: "Close" });
+    closeBtn.className = "gqp-close-btn";
+    closeBtn.addEventListener("click", closeGqpModal);
+
+    const saveBtn = el("button", { textContent: "Save Settings" });
+    saveBtn.className = "gqp-save-btn";
+    saveBtn.addEventListener("click", () => {
+      const n = clamp(parseInt(daysInput.value, 10), MIN_HISTORY_DAYS, MAX_HISTORY_DAYS);
+      lsSet(K_HISTORY_DAYS, String(n));
+      lsSet(K_NOTIFY_ENABLED, notifyCheck.checked ? "1" : "0");
+      lsSet(K_NOTIFY_THRESHOLD, String(Math.max(0, parseInt(thresholdInput.value, 10) || 0)));
+      lsSet(K_BACKUP_INTERVAL_DAYS, String(clamp(parseInt(backupInput.value, 10), 1, 3650)));
+
+      const ns = {};
+      for (const service of SERVICES) ns[service.key] = !!serviceChecks[service.key].checked;
+      saveNotifyServices(ns);
+
+      const limits = {};
+      for (const service of SERVICES) limits[service.key] = Math.max(1, parseInt(limitInputs[service.key].value, 10) || 1);
+      saveDefaultLimits(limits);
+
+      refreshUsageOnly();
+      setStatus("Usage settings saved.");
+      closeGqpModal();
+    });
+
+    actions.appendChild(closeBtn);
+    actions.appendChild(saveBtn);
+
+    body.appendChild(row);
+    body.appendChild(servicesRow);
+    body.appendChild(limitsRow);
+    body.appendChild(info);
+    body.appendChild(dangerToggleRow);
+    body.appendChild(dangerRow);
+    body.appendChild(actions);
+  }
+
+  function openHistoryWindow() {
+    const m = createModal("Usage and Quota History");
+    const body = m.body;
+
+    const top = el("div");
+    top.className = "gqp-modal-row";
+
+    const daysLabel = el("label");
+    daysLabel.appendChild(el("span", { textContent: "Days" }));
+    const daysInput = el("input");
+    daysInput.type = "number";
+    daysInput.min = String(MIN_HISTORY_DAYS);
+    daysInput.max = String(MAX_HISTORY_DAYS);
+    daysInput.step = "1";
+    daysInput.value = String(getHistoryDays());
+    daysLabel.appendChild(daysInput);
+
+    const refreshBtn = el("button", { textContent: "Refresh Table" });
+    const exportBtn = el("button", { textContent: "Export JSON" });
+    const importBtn = el("button", { textContent: "Import JSON" });
+    const fileInput = el("input");
+    fileInput.type = "file";
+    fileInput.accept = "application/json,.json";
+    fileInput.style.display = "none";
+
+    top.appendChild(daysLabel);
+    top.appendChild(refreshBtn);
+    top.appendChild(exportBtn);
+    top.appendChild(importBtn);
+    top.appendChild(fileInput);
+
+    const activeOnlyLabel = el("label");
+    const activeOnly = el("input");
+    activeOnly.type = "checkbox";
+    activeOnlyLabel.appendChild(activeOnly);
+    activeOnlyLabel.appendChild(el("span", { textContent: "active only" }));
+
+    const hitsOnlyLabel = el("label");
+    const hitsOnly = el("input");
+    hitsOnly.type = "checkbox";
+    hitsOnlyLabel.appendChild(hitsOnly);
+    hitsOnlyLabel.appendChild(el("span", { textContent: "limit hits only" }));
+
+    top.appendChild(activeOnlyLabel);
+    top.appendChild(hitsOnlyLabel);
+
+    const info = el("div");
+    info.className = "gqp-muted";
+    info.style.marginBottom = "8px";
+    info.textContent = "Columns: S = Speed Image, Q = Quality Image, E = Edit Image, V = 480p Video, 720 = 720p Video. Note icon is hoverable and clickable. Quota cells show hit/not hit, effective limit, longest wait, and refresh window.";
+
+    const tableWrap = el("div");
+    tableWrap.style.maxHeight = "560px";
+    tableWrap.style.overflow = "auto";
+
+    function render() {
+      const n = clamp(parseInt(daysInput.value, 10), MIN_HISTORY_DAYS, MAX_HISTORY_DAYS);
+      lsSet(K_HISTORY_DAYS, String(n));
+      tableWrap.textContent = "";
+
+      const table = el("table");
+      table.className = "gqp-history-table";
+
+      const thead = el("thead");
+      const hr = el("tr");
+      ["Date", "Note", "S Used", "Q Used", "E Used", "V Used", "720 Used", "S Quota", "Q Quota", "E Quota", "V Quota", "720 Quota"].forEach((name) => {
+        hr.appendChild(el("th", { textContent: name }));
+      });
+      thead.appendChild(hr);
+      table.appendChild(thead);
+
+      const tbody = el("tbody");
+      const totals = { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 };
+      let shownRows = 0;
+      for (const day of historyRows(n)) {
+        const usedTotal = sumUsed(day, ["image", "imagePro", "imageEdit", "video", "video720p"]);
+        const hit = SERVICES.some((service) => day.quota && day.quota[service.key] && day.quota[service.key].quotaReached);
+        if (activeOnly.checked && usedTotal <= 0 && !hit && !day.note) continue;
+        if (hitsOnly.checked && !hit) continue;
+
+        const tr = el("tr");
+        const dateCell = el("td", { textContent: day.date });
+        tr.appendChild(dateCell);
+
+        const noteText = String(day.note || "");
+        const noteCell = el("td", { textContent: noteText ? "📝" : "✏️" });
+        noteCell.className = "gqp-note-cell";
+        noteCell.title = noteText || "Click to add note";
+        noteCell.addEventListener("click", () => editDayNote(day.date, render));
+        tr.appendChild(noteCell);
+
+        const usedCells = ["image", "imagePro", "imageEdit", "video", "video720p"];
+        for (const key of usedCells) {
+          const value = Number(day.used && day.used[key]) || 0;
+          totals[key] += value;
+          const td = el("td", { textContent: String(value) });
+          tr.appendChild(td);
+        }
+
+        ["image", "imagePro", "imageEdit", "video", "video720p"].forEach((key) => {
+          const value = quotaCell(day, key);
+          const td = el("td", { textContent: value });
+          td.title = value;
+          if (String(value).includes("hit")) td.className = "gqp-limit-hit";
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+        shownRows += 1;
+      }
+      table.appendChild(tbody);
+
+      const tfoot = el("tfoot");
+      const totalRow = el("tr");
+      ["Totals", "", String(totals.image), String(totals.imagePro), String(totals.imageEdit), String(totals.video), String(totals.video720p), "", "", "", "", ""].forEach((value) => {
+        totalRow.appendChild(el("td", { textContent: value }));
+      });
+      tfoot.appendChild(totalRow);
+      table.appendChild(tfoot);
+
+      if (!shownRows) {
+        const empty = el("div", { textContent: "No matching history rows." });
+        empty.className = "gqp-muted";
+        tableWrap.appendChild(empty);
+      } else {
+        tableWrap.appendChild(table);
+      }
+    }
+
+    refreshBtn.addEventListener("click", render);
+    activeOnly.addEventListener("change", render);
+    hitsOnly.addEventListener("change", render);
+    exportBtn.addEventListener("click", exportHistoryJson);
+    importBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => {
+      importHistoryJson(fileInput.files && fileInput.files[0], render);
+      fileInput.value = "";
+    });
+
+    body.appendChild(top);
+    body.appendChild(info);
+    body.appendChild(tableWrap);
+    render();
+  }
+
+
+  function badgeClassForService(serviceKey, data) {
+    const q = data && data[serviceKey] ? data[serviceKey] : null;
+    const threshold = Math.max(0, Number(lsGet(K_NOTIFY_THRESHOLD, String(DEFAULT_NOTIFY_THRESHOLD))) || 0);
+    if (q && q.available === false) return "danger";
+    const remaining = q && q.remainingQueries != null ? Number(q.remainingQueries) : null;
+    if (Number.isFinite(remaining) && remaining <= 0) return "danger";
+    if (Number.isFinite(remaining) && remaining <= threshold) return "warn";
+    const used = getWindowCount(serviceKey);
+    const limit = getEffectiveLimitForService(serviceKey);
+    if (used >= limit) return "danger";
+    if (used >= Math.max(1, Math.floor(limit * 0.8))) return "warn";
+    return "safe";
+  }
+
+  function renderQuotaBadges() {
+    const box = document.getElementById("gqp-quota-badges");
+    if (!box) return;
+    box.textContent = "";
+    const data = S.lastData || null;
+    for (const service of SERVICES) {
+      const q = data && data[service.key] ? data[service.key] : null;
+      const used = getWindowCount(service.key);
+      const limit = getEffectiveLimitForService(service.key);
+      const remaining = q && q.remainingQueries != null ? String(q.remainingQueries) : "-";
+      const badge = el("div");
+      badge.className = "gqp-qbadge " + badgeClassForService(service.key, data);
+      const title = el("div", { textContent: serviceShort(service.key) });
+      title.className = "gqp-qb-title";
+      const main = el("div", { textContent: used + "/" + limit + " | L" + remaining });
+      main.className = "gqp-qb-main";
+      badge.title = service.title + " | window used/effective limit: " + used + "/" + limit + " | site left: " + remaining;
+      badge.appendChild(title);
+      badge.appendChild(main);
+      box.appendChild(badge);
+    }
+  }
+
+  function makeCard(service, data) {
+    const cls = badgeClassForService(service.key, S.lastData || null);
+    const used = localUsageLabel(service.key);
+    const windowSeconds = data && data.windowSizeSeconds ? Number(data.windowSizeSeconds) : getWindowSeconds(service.key);
+
+    const card = el("div");
+    card.className = "gqp-card " + cls;
+
+    const title = el("div", { textContent: service.title });
+    title.className = "gqp-service-title";
+
+    const stats = el("div");
+    stats.className = "gqp-stats";
+
+    addStat(stats, "Used/Limit", used, cls);
+    addStat(stats, "Refresh", formatReset(windowSeconds), "");
+
+    card.appendChild(title);
+    card.appendChild(stats);
+    card.title = service.title + " | current window used/effective limit: " + used + " | refresh window: " + formatReset(windowSeconds);
+    return card;
+  }
+
+  function addStat(parent, label, value, extraClass) {
+    const box = el("div");
+    box.className = "gqp-stat";
+
+    const lab = el("div", { textContent: label });
+    lab.className = "gqp-label";
+
+    const val = el("div", { textContent: value });
+    val.className = "gqp-value" + (extraClass ? " " + extraClass : "");
+    val.title = label + ": " + value;
+
+    box.appendChild(lab);
+    box.appendChild(val);
+    parent.appendChild(box);
+  }
+
+  function renderCards(grid, data) {
+    grid.textContent = "";
+
+    let added = 0;
+    for (const service of SERVICES) {
+      const serviceData = data && data[service.key] ? data[service.key] : null;
+      grid.appendChild(makeCard(service, serviceData));
+      added += 1;
+    }
+
+    if (!added) {
+      const empty = el("div", { textContent: "No known quota fields found in response." });
+      empty.className = "gqp-card gqp-warn";
+      grid.appendChild(empty);
+    }
+  }
+
+  function setStatus(msg, kind) {
+    const status = document.getElementById("gqp-status");
+    if (!status) return;
+
+    const time = new Date().toLocaleTimeString();
+    const line = "[" + time + "] " + msg;
+
+    const div = el("div", { textContent: line });
+    if (kind === "error") div.className = "gqp-err";
+    if (kind === "warn") div.className = "gqp-warn";
+
+    const panel = document.getElementById("grok-quota-panel");
+    if (panel && panel.classList.contains("gqp-compact")) {
+      status.textContent = "";
+      status.appendChild(div);
+      return;
+    }
+
+    status.prepend(div);
+  }
+
+  async function loadQuota() {
+    if (S.loading) return;
+    S.loading = true;
+
+    const refreshBtn = document.getElementById("gqp-refresh");
+    const grid = document.getElementById("gqp-grid");
+    if (refreshBtn) refreshBtn.disabled = true;
+
+    setStatus("Loading quota...");
+
+    try {
+      const response = await fetch(API_URL, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "accept": "*/*",
+          "content-type": "application/json",
+        },
+        body: "{}",
+      });
+
+      if (!response.ok) {
+        throw new Error("HTTP " + response.status);
+      }
+
+      const data = await response.json();
+      S.lastData = data;
+      S.lastError = null;
+      updateWindowSizesFromQuota(data);
+      recordQuotaHistory(data);
+      checkQuotaNotifications(data);
+
+      if (grid) renderCards(grid, data);
+        setStatus("Quota updated.");
+    } catch (err) {
+      S.lastError = err;
+      if (grid) {
+        grid.textContent = "";
+        const box = el("div", { textContent: "Error: " + (err && err.message ? err.message : String(err)) });
+        box.className = "gqp-card gqp-err";
+        grid.appendChild(box);
+      }
+      setStatus("Error: " + (err && err.message ? err.message : String(err)), "error");
+    } finally {
+      S.loading = false;
+      if (refreshBtn) refreshBtn.disabled = false;
+    }
+  }
+
+  function clearTimer() {
+    if (S.timer) {
+      clearInterval(S.timer);
+      S.timer = null;
+    }
+  }
+
+  function getIntervalSeconds() {
+    const raw = parseInt(lsGet(K_INTERVAL, String(DEFAULT_INTERVAL_SECONDS)), 10);
+    return clamp(raw, MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS);
+  }
+
+  function applyAutoRefresh() {
+    clearTimer();
+
+    const enabled = lsGet(K_AUTO, "0") === "1";
+    if (!enabled) return;
+
+    const sec = getIntervalSeconds();
+    S.timer = setInterval(loadQuota, sec * 1000);
+  }
+
+  function normalizePos(pos) {
+    if (!pos || typeof pos !== "object") return null;
+    const x = Number(pos.x);
+    const y = Number(pos.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return { x, y };
+  }
+
+  function applySavedPos(panel) {
+    const pos = normalizePos(loadJson(K_POS, null));
+    if (!pos) return;
+
+    panel.style.left = clamp(pos.x, 0, Math.max(0, window.innerWidth - 80)) + "px";
+    panel.style.top = clamp(pos.y, 0, Math.max(0, window.innerHeight - 40)) + "px";
+    panel.style.right = "auto";
+  }
+
+  function keepPanelOnScreen(panel) {
+    if (!panel) return;
+    const r = panel.getBoundingClientRect();
+    const margin = 8;
+    let left = r.left;
+    let top = r.top;
+
+    if (r.right > window.innerWidth - margin) left = window.innerWidth - r.width - margin;
+    if (r.bottom > window.innerHeight - margin) top = window.innerHeight - r.height - margin;
+    if (left < margin) left = margin;
+    if (top < margin) top = margin;
+
+    panel.style.left = Math.round(left) + "px";
+    panel.style.top = Math.round(top) + "px";
+    panel.style.right = "auto";
+    saveJson(K_POS, { x: Math.round(left), y: Math.round(top) });
+  }
+
+  function enableDrag(panel, handle) {
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    handle.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      if (e.target && e.target.closest && e.target.closest("button,input,label")) return;
+
+      const r = panel.getBoundingClientRect();
+      dragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      startLeft = r.left;
+      startTop = r.top;
+
+      panel.style.left = r.left + "px";
+      panel.style.top = r.top + "px";
+      panel.style.right = "auto";
+
+      e.preventDefault();
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+
+      const nextLeft = clamp(startLeft + e.clientX - startX, 0, Math.max(0, window.innerWidth - 80));
+      const nextTop = clamp(startTop + e.clientY - startY, 0, Math.max(0, window.innerHeight - 40));
+
+      panel.style.left = nextLeft + "px";
+      panel.style.top = nextTop + "px";
+    });
+
+    window.addEventListener("mouseup", () => {
+      if (!dragging) return;
+      dragging = false;
+
+      const r = panel.getBoundingClientRect();
+      saveJson(K_POS, { x: Math.round(r.left), y: Math.round(r.top) });
+    });
+  }
+
+  function createUI() {
+    if (document.getElementById("grok-quota-panel")) return;
+
+    addStyle();
+
+    const panel = el("div");
+    panel.id = "grok-quota-panel";
+    if (S.folded) panel.classList.add("gqp-folded");
+    if (S.compact) panel.classList.add("gqp-compact");
+
+    const header = el("div");
+    header.className = "gqp-header";
+
+    const title = el("div", { textContent: "Grok Usage" });
+    title.className = "gqp-title";
+
+    const settingsBtn = el("button", { textContent: "⚙️" });
+    settingsBtn.className = "gqp-btn gqp-icon-btn";
+    settingsBtn.title = "Usage settings";
+
+    const historyBtn = el("button", { textContent: "📊" });
+    historyBtn.className = "gqp-btn gqp-icon-btn";
+    historyBtn.title = "Usage and quota history";
+
+    const refreshBtn = el("button", { textContent: "🔄" });
+    refreshBtn.id = "gqp-refresh";
+    refreshBtn.className = "gqp-btn gqp-icon-btn";
+    refreshBtn.title = "Refresh";
+
+    const compactBtn = el("button", { textContent: S.compact ? "🔎" : "📏" });
+    compactBtn.id = "gqp-compact-toggle";
+    compactBtn.className = "gqp-btn gqp-icon-btn";
+    compactBtn.title = S.compact ? "Normal view" : "Compact view";
+
+    const foldBtn = el("button", { textContent: S.folded ? "📂" : "➖" });
+    foldBtn.id = "gqp-fold";
+    foldBtn.className = "gqp-btn gqp-icon-btn";
+    foldBtn.title = S.folded ? "Open" : "Minimize";
+
+    header.appendChild(title);
+    header.appendChild(settingsBtn);
+    header.appendChild(historyBtn);
+    header.appendChild(refreshBtn);
+    header.appendChild(compactBtn);
+    header.appendChild(foldBtn);
+
+    const content = el("div");
+    content.className = "gqp-content";
+
+    const controls = el("div");
+    controls.className = "gqp-controls";
+
+    const autoLabel = el("label");
+    const autoCheck = el("input");
+    autoCheck.type = "checkbox";
+    autoCheck.checked = lsGet(K_AUTO, "0") === "1";
+    autoLabel.appendChild(autoCheck);
+    autoLabel.appendChild(el("span", { textContent: "Auto" }));
+
+    const intervalLabel = el("label");
+    intervalLabel.appendChild(el("span", { textContent: "Every" }));
+    const intervalInput = el("input");
+    intervalInput.type = "number";
+    intervalInput.min = String(MIN_INTERVAL_SECONDS);
+    intervalInput.max = String(MAX_INTERVAL_SECONDS);
+    intervalInput.step = "30";
+    intervalInput.value = String(getIntervalSeconds());
+    intervalLabel.appendChild(intervalInput);
+    intervalLabel.appendChild(el("span", { textContent: "sec" }));
+
+    const note = el("span", { textContent: "Private Grok endpoint. Manual refresh is safest." });
+    note.className = "gqp-warn gqp-note";
+
+    controls.appendChild(autoLabel);
+    controls.appendChild(intervalLabel);
+    controls.appendChild(note);
+
+    const counterRow = el("div");
+    counterRow.className = "gqp-counter-row";
+
+    const counterSummary = el("span", { textContent: getUsageSummary() });
+    counterSummary.id = "gqp-counter-summary";
+    counterSummary.className = "gqp-counter-note";
+
+    counterRow.appendChild(counterSummary);
+
+    const legend = el("div");
+    legend.className = "gqp-legend";
+    ["Type", "Used/Limit", "Refresh"].forEach((x) => legend.appendChild(el("span", { textContent: x })));
+
+    const grid = el("div");
+    grid.id = "gqp-grid";
+    grid.className = "gqp-grid";
+
+    renderCards(grid, S.lastData);
+
+    const status = el("div", { textContent: "" });
+    status.id = "gqp-status";
+    status.className = "gqp-status";
+
+    content.appendChild(controls);
+    content.appendChild(counterRow);
+    content.appendChild(legend);
+    content.appendChild(grid);
+    content.appendChild(status);
+
+    panel.appendChild(header);
+    panel.appendChild(content);
+    document.documentElement.appendChild(panel);
+
+    applySavedPos(panel);
+    enableDrag(panel, header);
+    requestAnimationFrame(() => keepPanelOnScreen(panel));
+    window.addEventListener("resize", () => keepPanelOnScreen(panel));
+
+    settingsBtn.addEventListener("click", openSettingsWindow);
+    historyBtn.addEventListener("click", openHistoryWindow);
+
+    refreshBtn.addEventListener("click", () => {
+      // If the panel is minimized, Refresh should also open it so the result is visible.
+      if (S.folded) {
+        S.folded = false;
+        panel.classList.remove("gqp-folded");
+        foldBtn.textContent = "➖";
+        foldBtn.title = "Minimize";
+        lsSet(K_FOLDED, "0");
+        requestAnimationFrame(() => keepPanelOnScreen(panel));
+      }
+
+      loadQuota();
+    });
+
+    compactBtn.addEventListener("click", () => {
+      S.compact = !S.compact;
+      panel.classList.toggle("gqp-compact", S.compact);
+      compactBtn.textContent = S.compact ? "🔎" : "📏";
+      compactBtn.title = S.compact ? "Normal view" : "Compact view";
+      lsSet(K_COMPACT, S.compact ? "1" : "0");
+
+      // When minimized, switching mode should also open the quota info area,
+      // both Compact -> Normal and Normal -> Compact.
+      if (S.folded) {
+        S.folded = false;
+        panel.classList.remove("gqp-folded");
+        foldBtn.textContent = "➖";
+        foldBtn.title = "Minimize";
+        lsSet(K_FOLDED, "0");
+      }
+
+      requestAnimationFrame(() => keepPanelOnScreen(panel));
+    });
+
+    foldBtn.addEventListener("click", () => {
+      S.folded = !S.folded;
+      panel.classList.toggle("gqp-folded", S.folded);
+      foldBtn.textContent = S.folded ? "📂" : "➖";
+      foldBtn.title = S.folded ? "Open" : "Minimize";
+      lsSet(K_FOLDED, S.folded ? "1" : "0");
+      requestAnimationFrame(() => keepPanelOnScreen(panel));
+    });
+
+    autoCheck.addEventListener("change", () => {
+      lsSet(K_AUTO, autoCheck.checked ? "1" : "0");
+      applyAutoRefresh();
+      setStatus(autoCheck.checked ? "Auto refresh enabled." : "Auto refresh disabled.");
+    });
+
+    intervalInput.addEventListener("change", () => {
+      const sec = getIntervalSecondsFromInput(intervalInput);
+      intervalInput.value = String(sec);
+      lsSet(K_INTERVAL, String(sec));
+      applyAutoRefresh();
+      setStatus("Refresh interval set to " + sec + " seconds.");
+    });
+
+    function getIntervalSecondsFromInput(input) {
+      return clamp(parseInt(input.value, 10), MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS);
+    }
+
+    applyAutoRefresh();
+
+    // One initial fetch is convenient, but not too aggressive because there is no 30s loop by default.
+    loadQuota();
+  }
+
+  function startPendingSweep() {
+    if (S.pendingSweepTimer) return;
+    S.pendingSweepTimer = setInterval(() => {
+      try {
+        const u = loadUsage();
+        const changed = pruneRecentUsage(u);
+        if (changed) refreshUsageOnly();
+      } catch (e) {
+        console.warn("[GrokQuota] Pending sweep error:", e);
+      }
+    }, PENDING_SWEEP_INTERVAL_MS);
+  }
+
+  function boot() {
+    loadUsage();
+    installGenerationCounterInterceptor();
+    installImagineWebSocketInterceptor();
+    startPendingSweep();
+    setTimeout(checkBackupReminder, 2500);
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", createUI, { once: true });
+    } else {
+      createUI();
+    }
+  }
+
+  boot();
+})();
