@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      1.9.6
+// @version      1.9.8
 // @description  Draggable Grok Imagine usage tracker with readable counters, notifications, backup reminders, notes, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -34,6 +34,7 @@
   const K_HISTORY = LS_PREFIX + "history";
   const K_HISTORY_DAYS = LS_PREFIX + "historyDays";
   const K_DEFAULT_LIMITS = LS_PREFIX + "defaultQuotaLimits";
+  const K_EXACT_LIMIT_OVERRIDES = LS_PREFIX + "exactLimitOverrides";
   const K_NOTIFY_ENABLED = LS_PREFIX + "notifyEnabled";
   const K_NOTIFY_THRESHOLD = LS_PREFIX + "notifyThreshold";
   const K_NOTIFY_SERVICES = LS_PREFIX + "notifyServices";
@@ -738,13 +739,13 @@
 
       /* v1.7.6: final minimized toolbar override - keep folded view tight and compact-sized */
       #grok-quota-panel.gqp-folded {
-        width: 315px !important;
+        width: 350px !important;
         max-width: calc(100vw - 24px) !important;
         padding: 6px !important;
       }
       #grok-quota-panel.gqp-folded .gqp-header {
         display: grid !important;
-        grid-template-columns: minmax(76px, 1fr) repeat(5, 28px) !important;
+        grid-template-columns: minmax(58px, 1fr) repeat(6, 28px) !important;
         gap: 4px !important;
         align-items: center !important;
       }
@@ -771,13 +772,13 @@
         line-height: 1 !important;
       }
       #grok-quota-panel.gqp-compact.gqp-folded {
-        width: 315px !important;
+        width: 350px !important;
         max-width: calc(100vw - 24px) !important;
         padding: 6px !important;
       }
       #grok-quota-panel.gqp-compact.gqp-folded .gqp-header {
         display: grid !important;
-        grid-template-columns: minmax(76px, 1fr) repeat(5, 28px) !important;
+        grid-template-columns: minmax(58px, 1fr) repeat(6, 28px) !important;
         gap: 4px !important;
         align-items: center !important;
       }
@@ -938,6 +939,78 @@
       }
       .gqp-refresh-inline-buttons button {
         min-width: 42px;
+      }
+
+
+      .gqp-limit-modal {
+        width: min(480px, calc(100vw - 28px));
+      }
+      .gqp-note-modal {
+        width: min(640px, calc(100vw - 28px));
+      }
+      .gqp-note-textarea {
+        width: 100%;
+        min-height: 120px;
+        resize: vertical;
+        padding: 8px;
+        background: #202020;
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.18);
+        border-radius: 8px;
+        font: 13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Arial, sans-serif;
+      }
+      .gqp-auto-note-box {
+        margin-top: 8px;
+        padding: 8px;
+        white-space: pre-wrap;
+        background: rgba(255,255,255,0.045);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 8px;
+        color: rgba(255,255,255,0.72);
+        font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      .gqp-history-table th {
+        font-size: 9px !important;
+        letter-spacing: 0.1px !important;
+      }
+      .gqp-history-table th:nth-child(3),
+      .gqp-history-table th:nth-child(4),
+      .gqp-history-table th:nth-child(5),
+      .gqp-history-table th:nth-child(6),
+      .gqp-history-table th:nth-child(7) {
+        white-space: normal;
+        line-height: 1.1;
+      }
+      .gqp-limit-actions {
+        display: grid;
+        gap: 7px;
+      }
+      .gqp-limit-action-row {
+        display: grid;
+        grid-template-columns: minmax(130px, 1fr) auto;
+        gap: 6px;
+        align-items: center;
+        padding: 6px 7px;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 8px;
+        background: rgba(255,255,255,0.035);
+      }
+      .gqp-limit-action-row input {
+        width: 100px;
+        height: 28px;
+      }
+
+
+      /* v1.9.8: history note/details column combined with note emoji */
+      .gqp-history-table th:nth-child(1), .gqp-history-table td:nth-child(1) { width: 92px !important; }
+      .gqp-history-table th:nth-child(n+2):nth-child(-n+6),
+      .gqp-history-table td:nth-child(n+2):nth-child(-n+6) { width: 88px !important; }
+      .gqp-history-table th:nth-child(7), .gqp-history-table td:nth-child(7) {
+        text-align: left !important;
+        width: auto !important;
+      }
+      .gqp-note-details-cell {
+        cursor: pointer;
       }
 
       #grok-quota-panel .gqp-err { color: #ff8b8b; font-weight: 800; }
@@ -2109,6 +2182,43 @@
     saveJson(K_DEFAULT_LIMITS, out);
   }
 
+  function getExactLimitOverrides() {
+    const raw = loadJson(K_EXACT_LIMIT_OVERRIDES, null);
+    return Object.assign({ image: false, imagePro: false, imageEdit: false, video: false, video720p: false }, raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {});
+  }
+
+  function setExactLimitOverride(serviceKey, enabled) {
+    const flags = getExactLimitOverrides();
+    flags[serviceKey] = !!enabled;
+    saveJson(K_EXACT_LIMIT_OVERRIDES, flags);
+  }
+
+  function isExactLimitOverride(serviceKey) {
+    const flags = getExactLimitOverrides();
+    return !!flags[serviceKey];
+  }
+
+  function builtinDefaultLimitForService(serviceKey) {
+    return Math.max(1, Number(DEFAULT_QUOTA_LIMITS[serviceKey]) || 1);
+  }
+
+  function setDefaultLimitForService(serviceKey, value) {
+    const n = Math.max(1, Math.round(Number(value) || 0));
+    if (!n) return false;
+    const limits = getDefaultLimits();
+    limits[serviceKey] = n;
+    saveDefaultLimits(limits);
+    setExactLimitOverride(serviceKey, true);
+    refreshUsageOnly();
+    setStatus("Default limit for " + serviceTitle(serviceKey) + " set to " + n + ".");
+    return true;
+  }
+
+  function serviceTitle(serviceKey) {
+    const service = SERVICES.find((x) => x.key === serviceKey);
+    return service ? service.title : serviceKey;
+  }
+
   function getNotifyServices() {
     const raw = loadJson(K_NOTIFY_SERVICES, null);
     return Object.assign(defaultNotifyServices(), raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {});
@@ -2125,6 +2235,14 @@
   function getEffectiveLimitForService(serviceKey) {
     const defaults = getDefaultLimits();
     let limit = Number(defaults[serviceKey]) || 1;
+
+    // If the user explicitly edited this service limit from the main panel,
+    // use that value exactly. Do not let older learned quota estimates keep
+    // the UI stuck at a previous higher value.
+    if (isExactLimitOverride(serviceKey)) {
+      return Math.max(1, Math.round(limit));
+    }
+
     const h = loadHistory();
     for (const dayKey of Object.keys(h.days || {})) {
       const q = h.days[dayKey] && h.days[dayKey].quota && h.days[dayKey].quota[serviceKey];
@@ -2584,15 +2702,96 @@
     showFloatingNotice("Backup reminder: export quota history JSON");
   }
 
+  function composeAutomaticNote(day) {
+    if (!day) return "";
+    const parts = [];
+
+    for (const service of SERVICES) {
+      const q = day.quota && day.quota[service.key] ? day.quota[service.key] : null;
+      if (!q) continue;
+
+      const bits = [];
+      if (q.quotaReached) bits.push("hit");
+      if (q.quotaEstimate != null || q.effectiveLimit != null) bits.push("limit " + getRecentLimitForDay(day, service.key));
+      if (q.lastNextAvailableAt) bits.push("renew " + formatRenewAt(q.lastNextAvailableAt));
+      else if (q.maxWaitSeconds) bits.push("wait " + fmtDuration(q.maxWaitSeconds));
+      if (q.windowSizeSeconds) bits.push("win " + fmtDuration(q.windowSizeSeconds));
+
+      if (bits.length && (q.quotaReached || q.lastNextAvailableAt || q.maxWaitSeconds)) {
+        parts.push(service.title + ": " + bits.join(", "));
+      }
+    }
+
+    return parts.join("\\n");
+  }
+
+  function composeHistoryNoteCell(day) {
+    const userNote = String(day && day.note || "").trim();
+    const autoNote = composeAutomaticNote(day);
+    if (userNote && autoNote) return userNote + " | Automatic Note: " + autoNote.replace(/\\n/g, " | ");
+    if (userNote) return userNote;
+    if (autoNote) return "Automatic Note: " + autoNote.replace(/\\n/g, " | ");
+    return "-";
+  }
+
   function editDayNote(dayKey, onDone) {
     const h = loadHistory();
     const d = ensureHistoryDay(h, dayKey);
-    const current = String(d.note || "");
-    const next = window.prompt("Note for " + dayKey + ":", current);
-    if (next == null) return;
-    d.note = String(next || "").trim();
-    saveHistory(h);
-    if (typeof onDone === "function") onDone();
+    const autoNote = composeAutomaticNote(d);
+
+    const m = createModal("Day Note - " + dayKey);
+    m.modal.classList.add("gqp-note-modal");
+    const body = m.body;
+
+    const label = el("div", { textContent: "User note:" });
+    label.className = "gqp-row-title";
+    label.style.marginBottom = "5px";
+
+    const textarea = el("textarea");
+    textarea.className = "gqp-note-textarea";
+    textarea.value = String(d.note || "");
+    textarea.placeholder = "Write a note for this day...";
+
+    const autoBox = el("div");
+    autoBox.className = "gqp-auto-note-box";
+    autoBox.textContent = "Automatic Note:\\n" + (autoNote || "-");
+
+    const buttons = el("div");
+    buttons.className = "gqp-modal-actions";
+
+    const saveBtn = el("button", { textContent: "Save Note" });
+    saveBtn.className = "gqp-save-btn";
+    saveBtn.addEventListener("click", () => {
+      d.note = String(textarea.value || "").trim();
+      saveHistory(h);
+      closeGqpModal();
+      if (typeof onDone === "function") onDone();
+      setStatus("Day note saved.");
+    });
+
+    const clearBtn = el("button", { textContent: "Clear" });
+    clearBtn.className = "gqp-danger-btn";
+    clearBtn.addEventListener("click", () => {
+      textarea.value = "";
+    });
+
+    const closeBtn = el("button", { textContent: "Close" });
+    closeBtn.addEventListener("click", closeGqpModal);
+
+    buttons.appendChild(closeBtn);
+    buttons.appendChild(clearBtn);
+    buttons.appendChild(saveBtn);
+
+    body.appendChild(label);
+    body.appendChild(textarea);
+    body.appendChild(autoBox);
+    body.appendChild(buttons);
+
+    setTimeout(() => textarea.focus(), 0);
+  }
+
+  function editTodayNote() {
+    editDayNote(getLocalDayKey(), () => refreshUsageOnly());
   }
 
   function openSettingsWindow() {
@@ -2831,7 +3030,7 @@
     const info = el("div");
     info.className = "gqp-muted";
     info.style.marginBottom = "8px";
-    info.textContent = "Columns: S = Speed Image, Q = Quality Image, E = Edit Image, V = 480p Video, 720 = 720p Video. Note icon is hoverable and clickable. Usage cells show generated/limit; red text means the limit was reached. The last column summarizes refresh/limit details.";
+    info.textContent = "Usage cells show generated/limit; red text means the limit was reached. The final note/details cell is clickable and starts with the user note, then automatic refresh/limit details.";
 
     const tableWrap = el("div");
     tableWrap.style.maxHeight = "560px";
@@ -2847,7 +3046,7 @@
 
       const thead = el("thead");
       const hr = el("tr");
-      ["Date", "Note", "S", "Q", "E", "V", "720", "Refresh / limit notes"].forEach((name) => {
+      ["Date", "Speed Image", "Quality Image", "Edit Image", "480p Video", "720p Video", "Note / automatic details"].forEach((name) => {
         hr.appendChild(el("th", { textContent: name }));
       });
       thead.appendChild(hr);
@@ -2866,13 +3065,6 @@
         const dateCell = el("td", { textContent: day.date });
         tr.appendChild(dateCell);
 
-        const noteText = String(day.note || "");
-        const noteCell = el("td", { textContent: noteText ? "📝" : "✏️" });
-        noteCell.className = "gqp-note-cell";
-        noteCell.title = noteText || "Click to add note";
-        noteCell.addEventListener("click", () => editDayNote(day.date, render));
-        tr.appendChild(noteCell);
-
         const usedCells = ["image", "imagePro", "imageEdit", "video", "video720p"];
         for (const key of usedCells) {
           const value = Number(day.used && day.used[key]) || 0;
@@ -2883,13 +3075,13 @@
           tr.appendChild(td);
         }
 
-        const notes = ["image", "imagePro", "imageEdit", "video", "video720p"]
-          .filter((key) => day.quota && day.quota[key] && (day.quota[key].quotaReached || day.quota[key].lastNextAvailableAt))
-          .map((key) => serviceShort(key) + ": " + quotaCell(day, key))
-          .join(" | ") || "-";
-        const notesTd = el("td", { textContent: notes });
-        notesTd.title = notes;
-        if (notes.includes("hit")) notesTd.className = "gqp-limit-hit";
+        const notes = composeHistoryNoteCell(day);
+        const noteDisplay = "📝 " + notes;
+        const notesTd = el("td", { textContent: noteDisplay });
+        notesTd.title = notes === "-" ? "Click to add note" : notes;
+        notesTd.classList.add("gqp-note-details-cell");
+        notesTd.addEventListener("click", () => editDayNote(day.date, render));
+        if (notes.includes("hit")) notesTd.classList.add("gqp-limit-hit");
         tr.appendChild(notesTd);
         tbody.appendChild(tr);
         shownRows += 1;
@@ -2898,7 +3090,7 @@
 
       const tfoot = el("tfoot");
       const totalRow = el("tr");
-      ["Totals", "", String(totals.image), String(totals.imagePro), String(totals.imageEdit), String(totals.video), String(totals.video720p), ""].forEach((value) => {
+      ["Totals", String(totals.image), String(totals.imagePro), String(totals.imageEdit), String(totals.video), String(totals.video720p), ""].forEach((value) => {
         totalRow.appendChild(el("td", { textContent: value }));
       });
       tfoot.appendChild(totalRow);
@@ -3146,6 +3338,74 @@
     body.appendChild(actions);
   }
 
+  function showLimitControlMenu(serviceKey) {
+    const serviceName = serviceTitle(serviceKey);
+    const currentLimit = getDefaultLimits()[serviceKey] || builtinDefaultLimitForService(serviceKey);
+    const builtinLimit = builtinDefaultLimitForService(serviceKey);
+
+    const m = createModal("Limit Control - " + serviceName);
+    m.modal.classList.add("gqp-limit-modal");
+    const body = m.body;
+
+    const info = el("div");
+    info.className = "gqp-refresh-help";
+    info.textContent = "Change the displayed quota limit for " + serviceName + ". Current limit: " + currentLimit + ".";
+    body.appendChild(info);
+
+    const actions = el("div");
+    actions.className = "gqp-limit-actions";
+
+    function closeAndRun(fn) {
+      return () => {
+        const ok = fn();
+        if (ok !== false) closeGqpModal();
+      };
+    }
+
+    const rowDefault = el("div");
+    rowDefault.className = "gqp-limit-action-row";
+    rowDefault.appendChild(el("div", { textContent: "Use built-in limit" }));
+    const defaultBtn = el("button", { textContent: "Set " + builtinLimit });
+    defaultBtn.className = "primary";
+    defaultBtn.addEventListener("click", closeAndRun(() => setDefaultLimitForService(serviceKey, builtinLimit)));
+    rowDefault.appendChild(defaultBtn);
+    actions.appendChild(rowDefault);
+
+    const rowCustom = el("div");
+    rowCustom.className = "gqp-limit-action-row";
+    rowCustom.appendChild(el("div", { textContent: "Set custom limit" }));
+
+    const right = el("div");
+    right.style.display = "flex";
+    right.style.gap = "6px";
+    right.style.alignItems = "center";
+
+    const input = el("input");
+    input.type = "number";
+    input.min = "1";
+    input.step = "1";
+    input.value = String(currentLimit);
+
+    const setBtn = el("button", { textContent: "Set" });
+    setBtn.className = "primary";
+    setBtn.addEventListener("click", closeAndRun(() => {
+      const n = Math.round(Number(input.value));
+      if (!Number.isFinite(n) || n <= 0) {
+        window.alert("Invalid limit.");
+        return false;
+      }
+      return setDefaultLimitForService(serviceKey, n);
+    }));
+
+    right.appendChild(input);
+    right.appendChild(setBtn);
+    rowCustom.appendChild(right);
+    actions.appendChild(rowCustom);
+
+    body.appendChild(actions);
+    setTimeout(() => input.focus(), 0);
+  }
+
   function makeCard(service, data) {
     const cls = badgeClassForService(service.key, S.lastData || null);
     const used = localUsageLabel(service.key);
@@ -3162,7 +3422,23 @@
     const stats = el("div");
     stats.className = "gqp-stats";
 
-    addStat(stats, "Used/Limit", used, cls);
+    const limitStat = addStat(stats, "Used/Limit", used, cls);
+    if (limitStat && limitStat.box) {
+      const limitHelp = "Click to edit default limit.";
+      limitStat.box.title = limitHelp;
+      limitStat.value.title = limitHelp;
+      limitStat.label.title = limitHelp;
+      limitStat.box.style.cursor = "pointer";
+      limitStat.value.style.cursor = "pointer";
+      limitStat.box.addEventListener("click", (e) => {
+        e.preventDefault();
+        showLimitControlMenu(service.key);
+      });
+      limitStat.box.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        showLimitControlMenu(service.key);
+      });
+    }
     const refreshStat = addStat(stats, "Refresh", refreshLabel, lock ? "danger" : "");
     if (refreshStat && refreshStat.box) {
       const refreshHelp = "Click to edit refresh time.";
@@ -3416,6 +3692,10 @@
     historyBtn.className = "gqp-btn gqp-icon-btn";
     historyBtn.title = "Usage and quota history";
 
+    const noteBtn = el("button", { textContent: "📝" });
+    noteBtn.className = "gqp-btn gqp-icon-btn";
+    noteBtn.title = "Add/edit note for today";
+
     const refreshBtn = el("button", { textContent: "🔄" });
     refreshBtn.id = "gqp-refresh";
     refreshBtn.className = "gqp-btn gqp-icon-btn";
@@ -3434,6 +3714,7 @@
     header.appendChild(title);
     header.appendChild(settingsBtn);
     header.appendChild(historyBtn);
+    header.appendChild(noteBtn);
     header.appendChild(refreshBtn);
     header.appendChild(compactBtn);
     header.appendChild(foldBtn);
@@ -3509,6 +3790,7 @@
 
     settingsBtn.addEventListener("click", openSettingsWindow);
     historyBtn.addEventListener("click", openHistoryWindow);
+    noteBtn.addEventListener("click", editTodayNote);
 
     refreshBtn.addEventListener("click", () => {
       // If the panel is minimized, Refresh should also open it so the result is visible.
@@ -3606,3 +3888,4 @@
 
   boot();
 })();
+
