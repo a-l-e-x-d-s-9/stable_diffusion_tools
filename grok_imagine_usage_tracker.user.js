@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      1.8.0
+// @version      1.9.6
 // @description  Draggable Grok Imagine usage tracker with readable counters, notifications, backup reminders, notes, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -41,6 +41,7 @@
   const K_LAST_BACKUP_EXPORT = LS_PREFIX + "lastBackupExportAt";
   const K_LAST_BACKUP_REMINDER = LS_PREFIX + "lastBackupReminderAt";
   const K_LIMIT_LOCKS = LS_PREFIX + "limitLocks";
+  const K_MANUAL_REFRESH_HOURS = LS_PREFIX + "manualRefreshHours";
 
   const API_URL = "https://grok.com/rest/media/imagine/quota_info";
   const GENERATION_URL_PART = "/rest/app-chat/conversations/new";
@@ -832,6 +833,113 @@
         letter-spacing: -0.3px;
       }
 
+
+      #grok-quota-panel .gqp-controls {
+        display: none !important;
+      }
+      .gqp-history-table th:nth-child(1), .gqp-history-table td:nth-child(1) { width: 92px; }
+      .gqp-history-table th:nth-child(2), .gqp-history-table td:nth-child(2) { width: 46px; text-align: center; }
+      .gqp-history-table th:nth-child(n+3):nth-child(-n+7),
+      .gqp-history-table td:nth-child(n+3):nth-child(-n+7) { width: 72px; }
+      .gqp-history-table th:nth-child(8), .gqp-history-table td:nth-child(8) { text-align: left; }
+
+
+      .gqp-refresh-actions {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+      }
+      .gqp-refresh-action-row {
+        display: grid;
+        grid-template-columns: minmax(180px, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        padding: 7px;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 9px;
+        background: rgba(255,255,255,0.035);
+      }
+      .gqp-refresh-action-row.full {
+        grid-template-columns: 1fr;
+      }
+      .gqp-refresh-action-row .gqp-row-title {
+        font-weight: 800;
+        color: rgba(255,255,255,0.88);
+      }
+      .gqp-refresh-action-row .gqp-row-note {
+        margin-top: 2px;
+        font-size: 11px;
+        color: rgba(255,255,255,0.55);
+      }
+      .gqp-refresh-action-row input {
+        width: 150px;
+      }
+      .gqp-refresh-action-row button.primary {
+        background: rgba(74,222,128,0.14);
+        border-color: rgba(74,222,128,0.32);
+      }
+      .gqp-refresh-action-row button.warn {
+        background: rgba(255,204,102,0.14);
+        border-color: rgba(255,204,102,0.32);
+      }
+      .gqp-refresh-action-row button.danger {
+        background: rgba(255,90,90,0.14);
+        border-color: rgba(255,90,90,0.35);
+        color: #ffb4b4;
+      }
+
+
+      /* v1.9.5 compact refresh control window */
+      .gqp-modal.gqp-refresh-modal {
+        width: min(560px, calc(100vw - 28px));
+        max-height: min(640px, calc(100vh - 28px));
+      }
+      .gqp-modal.gqp-refresh-modal .gqp-modal-head {
+        padding: 8px 10px;
+      }
+      .gqp-modal.gqp-refresh-modal .gqp-modal-body {
+        padding: 8px 10px 10px;
+      }
+      .gqp-refresh-help {
+        margin: 0 0 8px 0;
+        color: rgba(255,255,255,0.65);
+        font-size: 12px;
+        line-height: 1.25;
+      }
+      .gqp-refresh-actions {
+        gap: 6px;
+      }
+      .gqp-refresh-action-row {
+        grid-template-columns: minmax(130px, 1fr) auto;
+        gap: 6px;
+        padding: 6px 7px;
+        border-radius: 8px;
+      }
+      .gqp-refresh-action-row .gqp-row-title {
+        font-size: 12px;
+      }
+      .gqp-refresh-action-row .gqp-row-note {
+        display: none;
+      }
+      .gqp-refresh-action-row input {
+        width: 150px;
+        height: 28px;
+      }
+      .gqp-refresh-action-row button {
+        padding: 5px 8px;
+        min-width: 52px;
+      }
+      .gqp-refresh-inline-buttons {
+        display: flex;
+        gap: 6px;
+        justify-content: flex-end;
+        align-items: center;
+        flex-wrap: nowrap;
+      }
+      .gqp-refresh-inline-buttons button {
+        min-width: 42px;
+      }
+
       #grok-quota-panel .gqp-err { color: #ff8b8b; font-weight: 800; }
 
       /* v1.7.2 layout cleanup */
@@ -1184,8 +1292,19 @@
     return total;
   }
 
+  function getDisplayWindowCount(serviceKey, usageObj) {
+    const used = getWindowCount(serviceKey, usageObj);
+    const lock = getActiveLimitLock(serviceKey);
+    if (!lock) return used;
+
+    // While a server-confirmed/manual lockout is active, the service is effectively at
+    // the reached limit even if older recent items expire from the rolling local list.
+    // This keeps the UI stable instead of showing misleading values like 1/34 while red.
+    return Math.max(used, getEffectiveLimitForService(serviceKey));
+  }
+
   function localUsageLabel(serviceKey) {
-    const used = getWindowCount(serviceKey);
+    const used = getDisplayWindowCount(serviceKey);
     const limit = getEffectiveLimitForService(serviceKey);
     return String(used) + "/" + String(limit);
   }
@@ -1203,8 +1322,8 @@
 
   function getUsageSummary() {
     const u = S.usage || loadUsage();
-    const wi = getWindowCount("image", u) + getWindowCount("imagePro", u) + getWindowCount("imageEdit", u);
-    const wv = getWindowCount("video", u) + getWindowCount("video720p", u);
+    const wi = getDisplayWindowCount("image", u) + getDisplayWindowCount("imagePro", u) + getDisplayWindowCount("imageEdit", u);
+    const wv = getDisplayWindowCount("video", u) + getDisplayWindowCount("video720p", u);
     const ti = Number(u.today.image || 0) + Number(u.today.imagePro || 0) + Number(u.today.imageEdit || 0);
     const tv = Number(u.today.video || 0) + Number(u.today.video720p || 0);
     const ai = Number(u.total.image || 0) + Number(u.total.imagePro || 0) + Number(u.total.imageEdit || 0);
@@ -1264,6 +1383,7 @@
     item.counted = true;
     item.countedAt = now;
     item.expiresAt = now + getWindowSeconds(item.serviceKey, u) * 1000;
+    clearLimitLock(item.serviceKey, "Successful generation detected before estimated refresh");
     incrementUsageCounters(u, item.serviceKey, 1, reason, detail || item.detail || "");
     return true;
   }
@@ -1294,6 +1414,7 @@
       u.recent.push(item);
     }
 
+    clearLimitLock(serviceKey, "Successful generation detected before estimated refresh");
     incrementUsageCounters(u, serviceKey, n, reason || "detected_request", detail || "");
     u.recent = u.recent.slice(-MAX_RECENT_ITEMS);
     saveUsage();
@@ -1592,6 +1713,67 @@
     saveJson(K_LIMIT_LOCKS, obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {});
   }
 
+  function getManualRefreshHours() {
+    const raw = parseFloat(lsGet(K_MANUAL_REFRESH_HOURS, ""));
+    if (Number.isFinite(raw) && raw > 0) return raw;
+    return null;
+  }
+
+  function getDefaultRefreshSeconds(serviceKey) {
+    const manualHours = getManualRefreshHours();
+    if (manualHours != null) return Math.max(60, Math.round(manualHours * 3600));
+    return Math.max(60, Number(getWindowSeconds(serviceKey)) || 3600);
+  }
+
+  function clearLimitLock(serviceKey, reason) {
+    const locks = loadLimitLocks();
+    if (!locks[serviceKey]) return false;
+    delete locks[serviceKey];
+    saveLimitLocks(locks);
+    refreshUsageOnly();
+    setStatus((reason || "Limit lock cleared") + ".");
+    return true;
+  }
+
+  function setLimitLock(serviceKey, renewAt, reason, options) {
+    const service = SERVICES.find((x) => x.key === serviceKey);
+    if (!service || !renewAt) return;
+
+    const renewAtMs = new Date(renewAt).getTime();
+    if (!Number.isFinite(renewAtMs) || renewAtMs <= Date.now()) {
+      clearLimitLock(serviceKey, "Invalid or expired refresh time cleared");
+      return;
+    }
+
+    const locks = loadLimitLocks();
+    const windowSec = Math.max(60, Math.round((renewAtMs - Date.now()) / 1000));
+    locks[serviceKey] = {
+      serviceKey,
+      reachedAt: (options && options.reachedAt) || new Date().toISOString(),
+      renewAt: new Date(renewAtMs).toISOString(),
+      windowSizeSeconds: windowSec,
+      reason: reason || "manual refresh lock",
+    };
+    saveLimitLocks(locks);
+
+    if (!(options && options.skipHistory)) {
+      const h = loadHistory();
+      const d = ensureHistoryDay(h, getLocalDayKey());
+      const rec = d.quota[serviceKey];
+      rec.samples = Math.max(1, Number(rec.samples) || 0);
+      rec.lastObservedAt = new Date().toISOString();
+      rec.lastAvailable = false;
+      rec.quotaReached = true;
+      rec.windowSizeSeconds = Math.max(Number(rec.windowSizeSeconds) || 0, windowSec);
+      rec.maxWaitSeconds = Math.max(Number(rec.maxWaitSeconds) || 0, windowSec);
+      rec.lastNextAvailableAt = new Date(renewAtMs).toISOString();
+      saveHistory(h);
+    }
+
+    refreshUsageOnly();
+    setStatus(service.title + " refresh set to " + formatRenewAt(renewAtMs) + ".", "warn");
+  }
+
   function getActiveLimitLock(serviceKey) {
     const locks = loadLimitLocks();
     const lock = locks[serviceKey];
@@ -1640,8 +1822,15 @@
     const service = SERVICES.find((x) => x.key === serviceKey);
     if (!service) return;
 
+    const existing = getActiveLimitLock(serviceKey);
+    if (existing) {
+      setStatus(service.title + " is still limited until " + formatRenewAt(existing.renewAt) + ". Failed retry ignored.", "warn");
+      showFloatingNotice(service.title + " still limited until " + formatRenewAt(existing.renewAt));
+      return;
+    }
+
     const now = Date.now();
-    const windowSec = Math.max(60, Number(getWindowSeconds(serviceKey)) || 3600);
+    const windowSec = getDefaultRefreshSeconds(serviceKey);
     const renewAt = new Date(now + windowSec * 1000).toISOString();
 
     const locks = loadLimitLocks();
@@ -2455,6 +2644,27 @@
     row.appendChild(thresholdLabel);
     row.appendChild(backupLabel);
 
+    const autoLabel = el("label");
+    const autoCheckSettings = el("input");
+    autoCheckSettings.type = "checkbox";
+    autoCheckSettings.checked = lsGet(K_AUTO, "0") === "1";
+    autoLabel.appendChild(autoCheckSettings);
+    autoLabel.appendChild(el("span", { textContent: "Auto refresh" }));
+
+    const autoEveryLabel = el("label");
+    autoEveryLabel.appendChild(el("span", { textContent: "every" }));
+    const autoEveryInput = el("input");
+    autoEveryInput.type = "number";
+    autoEveryInput.min = String(MIN_INTERVAL_SECONDS);
+    autoEveryInput.max = String(MAX_INTERVAL_SECONDS);
+    autoEveryInput.step = "30";
+    autoEveryInput.value = String(getIntervalSeconds());
+    autoEveryLabel.appendChild(autoEveryInput);
+    autoEveryLabel.appendChild(el("span", { textContent: "sec" }));
+
+    row.appendChild(autoLabel);
+    row.appendChild(autoEveryLabel);
+
     const servicesRow = el("div");
     servicesRow.className = "gqp-modal-row";
     servicesRow.appendChild(el("span", { textContent: "Notify types:" }));
@@ -2543,6 +2753,9 @@
       lsSet(K_NOTIFY_ENABLED, notifyCheck.checked ? "1" : "0");
       lsSet(K_NOTIFY_THRESHOLD, String(Math.max(0, parseInt(thresholdInput.value, 10) || 0)));
       lsSet(K_BACKUP_INTERVAL_DAYS, String(clamp(parseInt(backupInput.value, 10), 1, 3650)));
+      lsSet(K_AUTO, autoCheckSettings.checked ? "1" : "0");
+      lsSet(K_INTERVAL, String(clamp(parseInt(autoEveryInput.value, 10), MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)));
+      applyAutoRefresh();
 
       const ns = {};
       for (const service of SERVICES) ns[service.key] = !!serviceChecks[service.key].checked;
@@ -2618,7 +2831,7 @@
     const info = el("div");
     info.className = "gqp-muted";
     info.style.marginBottom = "8px";
-    info.textContent = "Columns: S = Speed Image, Q = Quality Image, E = Edit Image, V = 480p Video, 720 = 720p Video. Note icon is hoverable and clickable. Quota cells show hit/not hit, effective limit, longest wait, and refresh window.";
+    info.textContent = "Columns: S = Speed Image, Q = Quality Image, E = Edit Image, V = 480p Video, 720 = 720p Video. Note icon is hoverable and clickable. Usage cells show generated/limit; red text means the limit was reached. The last column summarizes refresh/limit details.";
 
     const tableWrap = el("div");
     tableWrap.style.maxHeight = "560px";
@@ -2634,7 +2847,7 @@
 
       const thead = el("thead");
       const hr = el("tr");
-      ["Date", "Note", "S Used", "Q Used", "E Used", "V Used", "720 Used", "S Quota", "Q Quota", "E Quota", "V Quota", "720 Quota"].forEach((name) => {
+      ["Date", "Note", "S", "Q", "E", "V", "720", "Refresh / limit notes"].forEach((name) => {
         hr.appendChild(el("th", { textContent: name }));
       });
       thead.appendChild(hr);
@@ -2664,17 +2877,20 @@
         for (const key of usedCells) {
           const value = Number(day.used && day.used[key]) || 0;
           totals[key] += value;
-          const td = el("td", { textContent: String(value) });
+          const td = el("td", { textContent: String(value) + "/" + getRecentLimitForDay(day, key) });
+          const q = day.quota && day.quota[key] ? day.quota[key] : null;
+          if (q && q.quotaReached) td.className = "gqp-limit-hit";
           tr.appendChild(td);
         }
 
-        ["image", "imagePro", "imageEdit", "video", "video720p"].forEach((key) => {
-          const value = quotaCell(day, key);
-          const td = el("td", { textContent: value });
-          td.title = value;
-          if (String(value).includes("hit")) td.className = "gqp-limit-hit";
-          tr.appendChild(td);
-        });
+        const notes = ["image", "imagePro", "imageEdit", "video", "video720p"]
+          .filter((key) => day.quota && day.quota[key] && (day.quota[key].quotaReached || day.quota[key].lastNextAvailableAt))
+          .map((key) => serviceShort(key) + ": " + quotaCell(day, key))
+          .join(" | ") || "-";
+        const notesTd = el("td", { textContent: notes });
+        notesTd.title = notes;
+        if (notes.includes("hit")) notesTd.className = "gqp-limit-hit";
+        tr.appendChild(notesTd);
         tbody.appendChild(tr);
         shownRows += 1;
       }
@@ -2682,7 +2898,7 @@
 
       const tfoot = el("tfoot");
       const totalRow = el("tr");
-      ["Totals", "", String(totals.image), String(totals.imagePro), String(totals.imageEdit), String(totals.video), String(totals.video720p), "", "", "", "", ""].forEach((value) => {
+      ["Totals", "", String(totals.image), String(totals.imagePro), String(totals.imageEdit), String(totals.video), String(totals.video720p), ""].forEach((value) => {
         totalRow.appendChild(el("td", { textContent: value }));
       });
       tfoot.appendChild(totalRow);
@@ -2722,7 +2938,7 @@
     const remaining = q && q.remainingQueries != null ? Number(q.remainingQueries) : null;
     if (Number.isFinite(remaining) && remaining <= 0) return "danger";
     if (Number.isFinite(remaining) && remaining <= threshold) return "warn";
-    const used = getWindowCount(serviceKey);
+    const used = getDisplayWindowCount(serviceKey);
     const limit = getEffectiveLimitForService(serviceKey);
     if (used >= limit) return "danger";
     if (used >= Math.max(1, Math.floor(limit * 0.8))) return "warn";
@@ -2736,7 +2952,7 @@
     const data = S.lastData || null;
     for (const service of SERVICES) {
       const q = data && data[service.key] ? data[service.key] : null;
-      const used = getWindowCount(service.key);
+      const used = getDisplayWindowCount(service.key);
       const limit = getEffectiveLimitForService(service.key);
       const lock = getActiveLimitLock(service.key);
       const remaining = q && q.remainingQueries != null ? String(q.remainingQueries) : (lock ? "0" : "-");
@@ -2751,6 +2967,183 @@
       badge.appendChild(main);
       box.appendChild(badge);
     }
+  }
+
+  function localDateTimeInputValue(dateValue) {
+    const d = dateValue ? new Date(dateValue) : new Date();
+    if (Number.isNaN(d.getTime())) return "";
+    return d.getFullYear() + "-" +
+      String(d.getMonth() + 1).padStart(2, "0") + "-" +
+      String(d.getDate()).padStart(2, "0") + "T" +
+      String(d.getHours()).padStart(2, "0") + ":" +
+      String(d.getMinutes()).padStart(2, "0");
+  }
+
+  function setRefreshAfterHours(serviceKey, hours, reason) {
+    const n = Number(hours);
+    if (!Number.isFinite(n) || n <= 0) {
+      window.alert("Invalid number of hours.");
+      return false;
+    }
+    setLimitLock(serviceKey, new Date(Date.now() + n * 3600 * 1000).toISOString(), reason || ("manual " + n + "h refresh lock"), { skipHistory: true });
+    return true;
+  }
+
+  function showRefreshContextMenu(serviceKey) {
+    const service = SERVICES.find((x) => x.key === serviceKey);
+    const serviceName = service ? service.title : serviceKey;
+    const defaultHours = (getDefaultRefreshSeconds(serviceKey) / 3600).toFixed(1).replace(/\.0$/, "");
+    const activeLock = getActiveLimitLock(serviceKey);
+
+    const m = createModal("Refresh Control - " + serviceName);
+    m.modal.classList.add("gqp-refresh-modal");
+    const body = m.body;
+
+    const help = el("div");
+    help.className = "gqp-refresh-help";
+    help.textContent = "Correct the estimated refresh time for this usage type. Current: " + (activeLock ? formatRenewAt(activeLock.renewAt) : "not limited");
+    body.appendChild(help);
+
+    const actions = el("div");
+    actions.className = "gqp-refresh-actions";
+
+    function closeAndRun(fn) {
+      return () => {
+        const ok = fn();
+        if (ok !== false) closeGqpModal();
+      };
+    }
+
+    function addButtonRow(titleText, buttonText, className, fn) {
+      const row = el("div");
+      row.className = "gqp-refresh-action-row";
+
+      const title = el("div", { textContent: titleText });
+      title.className = "gqp-row-title";
+
+      const btn = el("button", { textContent: buttonText });
+      if (className) btn.className = className;
+      btn.addEventListener("click", closeAndRun(fn));
+
+      row.appendChild(title);
+      row.appendChild(btn);
+      actions.appendChild(row);
+    }
+
+    function addMultiButtonRow(titleText, buttons) {
+      const row = el("div");
+      row.className = "gqp-refresh-action-row";
+
+      const title = el("div", { textContent: titleText });
+      title.className = "gqp-row-title";
+
+      const btnWrap = el("div");
+      btnWrap.className = "gqp-refresh-inline-buttons";
+
+      buttons.forEach((item) => {
+        const btn = el("button", { textContent: item.text });
+        if (item.className) btn.className = item.className;
+        btn.addEventListener("click", closeAndRun(item.fn));
+        btnWrap.appendChild(btn);
+      });
+
+      row.appendChild(title);
+      row.appendChild(btnWrap);
+      actions.appendChild(row);
+    }
+
+    function addInputRow(titleText, inputType, inputValue, buttonText, className, fn) {
+      const row = el("div");
+      row.className = "gqp-refresh-action-row";
+
+      const title = el("div", { textContent: titleText });
+      title.className = "gqp-row-title";
+
+      const right = el("div");
+      right.style.display = "flex";
+      right.style.gap = "6px";
+      right.style.alignItems = "center";
+
+      const input = el("input");
+      input.type = inputType;
+      input.value = inputValue || "";
+      if (inputType === "number") {
+        input.min = "0.1";
+        input.step = "0.5";
+      }
+
+      const btn = el("button", { textContent: buttonText });
+      if (className) btn.className = className;
+      btn.addEventListener("click", closeAndRun(() => fn(input.value)));
+
+      right.appendChild(input);
+      right.appendChild(btn);
+
+      row.appendChild(title);
+      row.appendChild(right);
+      actions.appendChild(row);
+    }
+
+    addButtonRow(
+      "Clear refresh lock",
+      "Clear",
+      "danger",
+      () => {
+        clearLimitLock(serviceKey, serviceName + " refresh lock cleared");
+        return true;
+      }
+    );
+
+    addButtonRow(
+      "Set default refresh",
+      "Set in " + defaultHours + "h",
+      "primary",
+      () => setRefreshAfterHours(serviceKey, getDefaultRefreshSeconds(serviceKey) / 3600, "manual default refresh lock")
+    );
+
+    addMultiButtonRow("Set refresh in", [
+      { text: "4h", fn: () => setRefreshAfterHours(serviceKey, 4, "manual 4h refresh lock") },
+      { text: "8h", fn: () => setRefreshAfterHours(serviceKey, 8, "manual 8h refresh lock") },
+      { text: "12h", fn: () => setRefreshAfterHours(serviceKey, 12, "manual 12h refresh lock") },
+    ]);
+
+    addInputRow(
+      "Specific time",
+      "datetime-local",
+      localDateTimeInputValue(activeLock ? activeLock.renewAt : new Date(Date.now() + getDefaultRefreshSeconds(serviceKey) * 1000)),
+      "Set",
+      "primary",
+      (value) => {
+        const t = new Date(value).getTime();
+        if (!Number.isFinite(t)) {
+          window.alert("Invalid date/time.");
+          return false;
+        }
+        setLimitLock(serviceKey, new Date(t).toISOString(), "manual specific refresh time", { skipHistory: true });
+        return true;
+      }
+    );
+
+    addInputRow(
+      "Default hours for all",
+      "number",
+      String(getManualRefreshHours() || defaultHours),
+      "Save",
+      "warn",
+      (value) => {
+        const hours = parseFloat(String(value).trim());
+        if (!Number.isFinite(hours) || hours <= 0) {
+          window.alert("Invalid hours.");
+          return false;
+        }
+        lsSet(K_MANUAL_REFRESH_HOURS, String(hours));
+        setStatus("Default refresh hours for all services set to " + hours + "h.");
+        refreshUsageOnly();
+        return true;
+      }
+    );
+
+    body.appendChild(actions);
   }
 
   function makeCard(service, data) {
@@ -2770,11 +3163,27 @@
     stats.className = "gqp-stats";
 
     addStat(stats, "Used/Limit", used, cls);
-    addStat(stats, "Refresh", refreshLabel, lock ? "danger" : "");
+    const refreshStat = addStat(stats, "Refresh", refreshLabel, lock ? "danger" : "");
+    if (refreshStat && refreshStat.box) {
+      const refreshHelp = "Click to edit refresh time.";
+      refreshStat.box.title = refreshHelp;
+      refreshStat.value.title = refreshHelp;
+      refreshStat.label.title = refreshHelp;
+      refreshStat.box.style.cursor = "pointer";
+      refreshStat.value.style.cursor = "pointer";
+      refreshStat.box.addEventListener("click", (e) => {
+        e.preventDefault();
+        showRefreshContextMenu(service.key);
+      });
+      refreshStat.box.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        showRefreshContextMenu(service.key);
+      });
+    }
 
     card.appendChild(title);
     card.appendChild(stats);
-    card.title = service.title + " | current window used/effective limit: " + used + " | refresh: " + refreshLabel + (lock ? " | estimated renewal: " + formatLocalTime(lock.renewAt) : "");
+    card.title = service.title + " | current window used/effective limit: " + used + " | refresh: " + refreshLabel + " | click refresh time to edit" + (lock ? " | estimated renewal: " + formatLocalTime(lock.renewAt) : "");
     return card;
   }
 
@@ -2792,6 +3201,7 @@
     box.appendChild(lab);
     box.appendChild(val);
     parent.appendChild(box);
+    return { box, label: lab, value: val };
   }
 
   function renderCards(grid, data) {
