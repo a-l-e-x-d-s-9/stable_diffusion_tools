@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      1.9.8
+// @version      1.9.10
 // @description  Draggable Grok Imagine usage tracker with readable counters, notifications, backup reminders, notes, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -1522,9 +1522,25 @@
   }
 
   function getImageServiceFromPayload(obj) {
-    if (obj && obj.is_alteration) return { serviceKey: "imageEdit", detail: "image alteration" };
+    const model = String(
+      (obj && (obj.imageModel || obj.model_name || obj.modelName || obj.model || "")) || ""
+    ).toLowerCase();
+
+    if (
+      obj &&
+      (
+        obj.is_alteration ||
+        obj.is_image_edit ||
+        obj.isImageEdit ||
+        model.includes("image-edit") ||
+        model.includes("image_edit") ||
+        model.includes("edit")
+      )
+    ) return { serviceKey: "imageEdit", detail: "image edit" };
+
     if (obj && obj.is_pro === true) return { serviceKey: "imagePro", detail: "quality image" };
     if (obj && obj.is_pro === false) return { serviceKey: "image", detail: "speed image" };
+    if (model.includes("quality") || model.includes("pro")) return { serviceKey: "imagePro", detail: "quality image" };
     return currentImageServiceFromLastRequest();
   }
 
@@ -1585,6 +1601,98 @@
     }
   }
 
+  function normalizeStreamingImagePayload(item) {
+    if (!item || typeof item !== "object") return null;
+
+    const image = item.streamingImageGenerationResponse || item.imageGenerationResponse || item.generatedImage || null;
+    if (!image || typeof image !== "object") return null;
+
+    const imageId = image.assetId || image.imageId || image.id || "";
+    const url = image.imageUrl || image.url || "";
+
+    return {
+      type: "image",
+      id: imageId || url,
+      job_id: imageId || url,
+      url,
+      prompt: item.prompt || "",
+      full_prompt: item.full_prompt || "",
+      percentage_complete: Number(image.progress != null ? image.progress : image.percentage_complete),
+      width: image.width || item.width,
+      height: image.height || item.height,
+      moderated: image.moderated,
+      r_rated: image.rRated,
+      is_alteration: String(image.imageModel || "").toLowerCase().includes("edit"),
+      is_image_edit: String(image.imageModel || "").toLowerCase().includes("edit"),
+      imageModel: image.imageModel,
+      model_name: image.imageModel,
+      order: image.imageIndex,
+      grid_index: image.imageIndex,
+      request_id: item.responseId || image.responseId || "",
+    };
+  }
+
+  function handleStreamingImagePayload(obj) {
+    if (!obj || typeof obj !== "object") return false;
+
+    let handled = false;
+
+    const direct = normalizeStreamingImagePayload(obj);
+    if (direct && direct.percentage_complete >= 0) {
+      rememberImagePayload(direct);
+      handled = true;
+    }
+
+    const response = obj.result && obj.result.response ? obj.result.response : null;
+    if (response && typeof response === "object") {
+      const nested = normalizeStreamingImagePayload(response);
+      if (nested && nested.percentage_complete >= 0) {
+        rememberImagePayload(nested);
+        handled = true;
+      }
+    }
+
+    return handled;
+  }
+
+  function handleGenerationResponsePayload(payload) {
+    if (!payload) return;
+
+    if (typeof payload === "string") {
+      const lines = payload
+        .split(/\r?\n+/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      for (const line of lines) {
+        const parsed = safeParseJson(line);
+        if (parsed) handleGenerationResponsePayload(parsed);
+      }
+      return;
+    }
+
+    if (Array.isArray(payload)) {
+      payload.forEach(handleGenerationResponsePayload);
+      return;
+    }
+
+    if (!payload || typeof payload !== "object") return;
+
+    handleStreamingImagePayload(payload);
+  }
+
+  async function inspectImageGenerationResponse(response, hit) {
+    if (!response || !hit || isVideoServiceKey(hit.serviceKey)) return;
+
+    try {
+      const text = await response.clone().text();
+      if (!text) return;
+      handleGenerationResponsePayload(text);
+    } catch (e) {
+      console.warn("[GrokUsage] Could not inspect image generation response:", e);
+    }
+  }
+
   function handleImagineWsPayload(payload) {
     if (!payload) return;
 
@@ -1601,13 +1709,16 @@
 
     if (!obj || typeof obj !== "object") return;
 
-    if (payloadLooksLikeFailure(obj)) {
-      markRecentPendingVideoFailures(payloadLooksLikeQuotaLimit(obj) ? "quota/limit message from imagine WebSocket" : "imagine WebSocket failure message");
+    if (payloadLooksLikeQuotaLimit(obj)) {
+      markRecentPendingVideoFailures("quota/limit message from imagine WebSocket");
     }
 
     if (obj.type === "image" && obj.blob) {
       rememberImagePayload(obj);
+      return;
     }
+
+    handleStreamingImagePayload(obj);
   }
 
   function safeParseJson(text) {
@@ -1626,11 +1737,13 @@
 
     return !!(
       modelMap.imageGenModelConfig ||
+      modelMap.imageEditModelConfig ||
       body?.toolOverrides?.imageGen ||
       body?.toolOverrides?.imageEdit ||
       modelName.includes("image") ||
       modelName.includes("imagine") ||
       lower.includes("imagegenmodelconfig") ||
+      lower.includes("imageeditmodelconfig") ||
       lower.includes("image_gen") ||
       lower.includes("imagen")
     );
@@ -1657,13 +1770,14 @@
     if (!bodyLooksLikeImageRequest(body, bodyText)) return null;
 
     const lower = String(bodyText || "").toLowerCase();
-    const imageConfig = modelMap.imageGenModelConfig || body?.toolOverrides?.imageGen || {};
+    const imageConfig = modelMap.imageGenModelConfig || modelMap.imageEditModelConfig || body?.toolOverrides?.imageGen || body?.toolOverrides?.imageEdit || {};
     const candidateCount = Number(
       imageConfig?.numImages ||
       imageConfig?.numberOfImages ||
       imageConfig?.imageCount ||
       imageConfig?.n ||
       body?.responseMetadata?.imageCount ||
+      body?.imageGenerationCount ||
       body?.imageCount ||
       0
     );
@@ -1868,6 +1982,19 @@
     return Math.max(0, Math.round((t - Date.now()) / 1000));
   }
 
+  function validFutureIso(value) {
+    if (!value) return null;
+    const t = new Date(value).getTime();
+    if (!Number.isFinite(t) || t <= Date.now()) return null;
+    return new Date(t).toISOString();
+  }
+
+  function quotaInfoSaysLimited(q) {
+    if (!q || typeof q !== "object") return false;
+    const remaining = q.remainingQueries == null ? null : Number(q.remainingQueries);
+    return Number.isFinite(remaining) && remaining <= 0;
+  }
+
   function formatRenewAt(value) {
     if (!value) return "-";
     try {
@@ -1891,28 +2018,30 @@
     return formatReset(fallbackWindowSeconds);
   }
 
-  function recordLimitReachedForService(serviceKey, reason) {
+  function recordLimitReachedForService(serviceKey, reason, options) {
     const service = SERVICES.find((x) => x.key === serviceKey);
     if (!service) return;
 
+    const exactRenewAt = validFutureIso(options && options.nextAvailableAt);
     const existing = getActiveLimitLock(serviceKey);
-    if (existing) {
+    if (existing && !exactRenewAt) {
       setStatus(service.title + " is still limited until " + formatRenewAt(existing.renewAt) + ". Failed retry ignored.", "warn");
       showFloatingNotice(service.title + " still limited until " + formatRenewAt(existing.renewAt));
       return;
     }
 
     const now = Date.now();
-    const windowSec = getDefaultRefreshSeconds(serviceKey);
-    const renewAt = new Date(now + windowSec * 1000).toISOString();
+    const renewAt = exactRenewAt || new Date(now + getDefaultRefreshSeconds(serviceKey) * 1000).toISOString();
+    const renewMs = new Date(renewAt).getTime();
+    const windowSec = Math.max(60, Math.round((renewMs - now) / 1000));
 
     const locks = loadLimitLocks();
     locks[serviceKey] = {
       serviceKey,
-      reachedAt: new Date(now).toISOString(),
+      reachedAt: existing && existing.reachedAt ? existing.reachedAt : new Date(now).toISOString(),
       renewAt,
       windowSizeSeconds: windowSec,
-      reason: reason || "quota limit reached",
+      reason: reason || (exactRenewAt ? "quota_info nextAvailableAt" : "quota limit reached"),
     };
     saveLimitLocks(locks);
 
@@ -1923,9 +2052,14 @@
     rec.samples = Math.max(1, Number(rec.samples) || 0);
     rec.lastObservedAt = new Date(now).toISOString();
     rec.lastAvailable = false;
-    rec.limitHits = (Number(rec.limitHits) || 0) + 1;
+
+    // Do not increase hit count repeatedly when the service is already in an active lockout.
+    if (!existing || exactRenewAt) {
+      rec.limitHits = Math.max(1, Number(rec.limitHits) || 0);
+    }
+
     rec.quotaReached = true;
-    rec.windowSizeSeconds = windowSec;
+    rec.windowSizeSeconds = Math.max(Number(rec.windowSizeSeconds) || 0, windowSec);
     rec.maxWaitSeconds = Math.max(Number(rec.maxWaitSeconds) || 0, windowSec);
     rec.lastNextAvailableAt = renewAt;
 
@@ -1937,18 +2071,21 @@
     }
 
     d.notes = Array.isArray(d.notes) ? d.notes : [];
-    d.notes.unshift({
-      at: new Date(now).toISOString(),
-      type: "limit_reached",
-      serviceKey,
-      detail: reason || "quota limit reached",
-      renewAt,
-    });
-    d.notes = d.notes.slice(0, 60);
+    const lastNote = d.notes[0];
+    if (!lastNote || lastNote.type !== "limit_reached" || lastNote.serviceKey !== serviceKey || lastNote.renewAt !== renewAt) {
+      d.notes.unshift({
+        at: new Date(now).toISOString(),
+        type: "limit_reached",
+        serviceKey,
+        detail: reason || (exactRenewAt ? "quota_info nextAvailableAt" : "quota limit reached"),
+        renewAt,
+      });
+      d.notes = d.notes.slice(0, 60);
+    }
     saveHistory(h);
 
     refreshUsageOnly();
-    setStatus(service.title + " limit reached. Estimated renewal: " + formatRenewAt(renewAt) + ".", "warn");
+    setStatus(service.title + " limit reached. Renewal: " + formatRenewAt(renewAt) + ".", "warn");
     showFloatingNotice(service.title + " limit reached - renews at " + formatRenewAt(renewAt));
   }
 
@@ -1969,8 +2106,6 @@
     try {
       bodyText = await response.clone().text();
     } catch (_) {
-      // If HTTP is OK but the userscript cannot read the body, wait for the
-      // delayed count. WebSocket failure watcher can still cancel before count.
       return { accepted: true, reason: "HTTP OK, response body unreadable", quotaLimited: false };
     }
 
@@ -1979,12 +2114,10 @@
       obj = bodyText ? JSON.parse(bodyText) : null;
     } catch (_) {}
 
+    // Only the specific quota/limit response should block counting. Other OK
+    // responses, including moderation/failure objects, can still consume quota.
     if (payloadLooksLikeQuotaLimit(obj) || textLooksLikeQuotaLimit(bodyText)) {
       return { accepted: false, reason: "quota/limit reached", quotaLimited: true };
-    }
-
-    if (payloadLooksLikeFailure(obj) || textLooksLikeLimitOrFailure(bodyText)) {
-      return { accepted: false, reason: "response indicates failure", quotaLimited: false };
     }
 
     return { accepted: true, reason: "request accepted", quotaLimited: false };
@@ -2021,6 +2154,7 @@
     const quotaLimited = !!(options && options.quotaLimited) || textLooksLikeQuotaLimit(reason);
     if (quotaLimited) {
       recordLimitReachedForService(attempt.serviceKey, reason || "quota limit reached");
+      fetchQuotaInfoAfterLimit(attempt.serviceKey);
     }
 
     setStatus("Rejected/limited. Not counted: " + (reason || "failure detected"), "warn");
@@ -2115,6 +2249,8 @@
           // Fail closed for videos: if we cannot inspect acceptance, do not count immediately.
           markVideoAttemptFailed(pendingVideoAttempt, "could not verify request acceptance", { quotaLimited: false });
         }
+      } else if (hit && !isVideoServiceKey(hit.serviceKey)) {
+        inspectImageGenerationResponse(response, hit);
       }
 
       return response;
@@ -2400,7 +2536,7 @@
       if (waitSec > Number(rec.maxWaitSeconds || 0)) rec.maxWaitSeconds = waitSec;
 
       if (!available || (Number.isFinite(remaining) && remaining <= 0)) {
-        rec.limitHits = (Number(rec.limitHits) || 0) + 1;
+        if (!rec.quotaReached) rec.limitHits = (Number(rec.limitHits) || 0) + 1;
         rec.quotaReached = true;
         if (windowUsed > 0) {
           rec.quotaEstimate = rec.quotaEstimate == null ? windowUsed : Math.max(Number(rec.quotaEstimate) || 0, windowUsed);
@@ -3518,6 +3654,54 @@
     status.prepend(div);
   }
 
+  function applyQuotaInfoLimitLocks(data, sourceLabel) {
+    if (!data || typeof data !== "object") return;
+
+    for (const service of SERVICES) {
+      const q = data[service.key];
+      if (!quotaInfoSaysLimited(q)) continue;
+
+      // If the site gives an exact nextAvailableAt, use it as source of truth.
+      // Fall back to existing/default estimate only when it is missing.
+      recordLimitReachedForService(service.key, sourceLabel || "quota_info remainingQueries 0", {
+        nextAvailableAt: validFutureIso(q.nextAvailableAt) || null,
+      });
+    }
+  }
+
+  async function fetchQuotaInfoAfterLimit(serviceKey) {
+    try {
+      const response = await fetch(API_URL, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "accept": "*/*",
+          "content-type": "application/json",
+        },
+        body: "{}",
+      });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      const data = await response.json();
+
+      S.lastData = data;
+      updateWindowSizesFromQuota(data);
+      recordQuotaHistory(data);
+      applyQuotaInfoLimitLocks(data, "quota_info after limit");
+      checkQuotaNotifications(data);
+
+      const grid = document.getElementById("gqp-grid");
+      if (grid) renderCards(grid, data);
+
+      const q = data && data[serviceKey] ? data[serviceKey] : null;
+      if (q && q.nextAvailableAt) {
+        setStatus(serviceTitle(serviceKey) + " renewal from quota_info: " + formatRenewAt(q.nextAvailableAt) + ".", "warn");
+      }
+    } catch (e) {
+      console.warn("[GrokUsage] quota_info after limit failed:", e);
+      setStatus("Could not fetch quota_info after limit; using estimated refresh.", "warn");
+    }
+  }
+
   async function loadQuota() {
     if (S.loading) return;
     S.loading = true;
@@ -3548,6 +3732,7 @@
       S.lastError = null;
       updateWindowSizesFromQuota(data);
       recordQuotaHistory(data);
+      applyQuotaInfoLimitLocks(data, "quota_info");
       checkQuotaNotifications(data);
 
       if (grid) renderCards(grid, data);
