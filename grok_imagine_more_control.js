@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Prompt Manager Panel
 // @namespace    alexds9.scripts
-// @version      1.5.0
+// @version      1.5.3
 // @description  Draggable prompt panel with persistent seconds, titled prompt history, wildcard replacement, and backup/restore.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -362,6 +362,22 @@
       URL.revokeObjectURL(url);
       a.remove();
     }, 0);
+  }
+
+  function exportTimestampForFilename(date) {
+    const d = date instanceof Date ? date : new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return [
+      d.getFullYear(),
+      ".",
+      pad(d.getMonth() + 1),
+      ".",
+      pad(d.getDate()),
+      "_",
+      pad(d.getHours()),
+      pad(d.getMinutes()),
+      pad(d.getSeconds())
+    ].join("");
   }
 
 
@@ -939,8 +955,9 @@
     };
 
     wcExportBtn.onclick = () => {
-      downloadTextFile("grok_prompt_wildcards.json", JSON.stringify(loadWildcards(), null, 2), "application/json");
-      log("Exported wildcard JSON.");
+      const stamp = exportTimestampForFilename(new Date());
+      downloadTextFile("grok_prompt_wildcards_" + stamp + ".json", JSON.stringify(loadWildcards(), null, 2), "application/json");
+      log("Exported wildcard JSON: " + stamp + ".");
     };
 
     wcImportBtn.onclick = () => wcFileInput.click();
@@ -1115,8 +1132,9 @@
     };
 
     exportAllBtn.onclick = () => {
-      downloadTextFile("grok_prompt_manager_full_backup.json", JSON.stringify(collectFullSettings(prompts), null, 2), "application/json");
-      log("Exported full settings JSON.");
+      const stamp = exportTimestampForFilename(new Date());
+      downloadTextFile("grok_prompt_manager_full_backup_" + stamp + ".json", JSON.stringify(collectFullSettings(prompts), null, 2), "application/json");
+      log("Exported full settings JSON: " + stamp + ".");
     };
 
     importAllBtn.onclick = () => importAllFileInput.click();
