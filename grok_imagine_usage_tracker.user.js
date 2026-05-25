@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      1.9.10
+// @version      1.9.13
 // @description  Draggable Grok Imagine usage tracker with readable counters, notifications, backup reminders, notes, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -53,7 +53,6 @@
   const MAX_INTERVAL_SECONDS = 3600;
   const IMAGE_PENDING_GRACE_MS = 2 * 60 * 1000;
   const PENDING_SWEEP_INTERVAL_MS = 15 * 1000;
-  const VIDEO_ACCEPTED_COUNT_DELAY_MS = 12 * 1000;
   const VIDEO_FAILURE_WATCH_MS = 45 * 1000;
   const MAX_RECENT_ITEMS = 600;
   const DEFAULT_HISTORY_DAYS = 90;
@@ -1419,6 +1418,80 @@
     recordHistoryUsage(serviceKey, n, detail || reason || "");
   }
 
+  function decrementUsageCounters(u, serviceKey, amount, reason, detail) {
+    const n = Math.max(1, Number(amount) || 1);
+    u.today[serviceKey] = Math.max(0, (Number(u.today[serviceKey]) || 0) - n);
+    u.total[serviceKey] = Math.max(0, (Number(u.total[serviceKey]) || 0) - n);
+
+    const idx = (u.events || []).findIndex((event) =>
+      event &&
+      event.serviceKey === serviceKey &&
+      (!reason || event.reason === reason) &&
+      (!detail || event.detail === detail)
+    );
+    if (idx >= 0) u.events.splice(idx, 1);
+
+    const h = loadHistory();
+    const d = ensureHistoryDay(h, getLocalDayKey());
+    d.used[serviceKey] = Math.max(0, (Number(d.used[serviceKey]) || 0) - n);
+    if (Array.isArray(d.notes)) {
+      const noteIdx = d.notes.findIndex((note) =>
+        note &&
+        note.type === "usage" &&
+        note.serviceKey === serviceKey &&
+        (!detail || note.detail === detail)
+      );
+      if (noteIdx >= 0) d.notes.splice(noteIdx, 1);
+    }
+    saveHistory(h);
+  }
+
+  function rollbackCountedUsage(serviceKey, amount, reason, detail, recentKey) {
+    const u = loadUsage();
+    const n = Math.max(1, Number(amount) || 1);
+
+    let removed = 0;
+    u.recent = (u.recent || []).filter((item) => {
+      if (
+        removed < n &&
+        item &&
+        item.serviceKey === serviceKey &&
+        item.counted &&
+        (
+          (recentKey && item.key === recentKey) ||
+          (!recentKey && (!detail || item.detail === detail))
+        )
+      ) {
+        removed += 1;
+        return false;
+      }
+      return true;
+    });
+
+    if (removed <= 0 && recentKey) {
+      u.recent = (u.recent || []).filter((item) => {
+        if (
+          removed < n &&
+          item &&
+          item.serviceKey === serviceKey &&
+          item.counted &&
+          (!detail || item.detail === detail)
+        ) {
+          removed += 1;
+          return false;
+        }
+        return true;
+      });
+    }
+
+    if (removed > 0) {
+      decrementUsageCounters(u, serviceKey, removed, reason, detail);
+      saveUsage();
+      refreshUsageOnly();
+      setStatus("Rolled back " + removed + " " + serviceTitle(serviceKey) + " after quota rejection.", "warn");
+    }
+  }
+
   function pruneRecentUsage(u, nowArg) {
     const now = Number(nowArg) || Date.now();
     let changed = false;
@@ -2126,7 +2199,7 @@
   function createPendingVideoAttempt(hit) {
     const now = Date.now();
     const attempt = {
-      id: "video:" + now + ":" + Math.random().toString(36).slice(2, 10),
+      id: "video_request:" + (hit.serviceKey || "video") + ":" + now + ":" + Math.random().toString(36).slice(2, 10),
       serviceKey: hit.serviceKey,
       amount: Math.max(1, Number(hit.amount) || 1),
       detail: hit.detail || "video",
@@ -2134,30 +2207,42 @@
       acceptedAt: null,
       failedAt: null,
       counted: false,
+      countReason: "video_request_sent",
       countTimer: null,
       cleanupTimer: null,
     };
 
+    // Count video attempts immediately when the request is sent. If the server
+    // replies with a true quota rejection, the count is rolled back below.
+    recordCountedUsage(attempt.serviceKey, attempt.amount, attempt.countReason, attempt.detail, attempt.id, "video");
+    attempt.counted = true;
+
     S.pendingVideoAttempts.push(attempt);
     S.pendingVideoAttempts = S.pendingVideoAttempts.slice(-20);
-    setStatus("Video request detected; waiting for acceptance before counting.");
+    setStatus("Counted video request immediately; waiting only to detect quota rejection.");
     return attempt;
   }
 
   function markVideoAttemptFailed(attempt, reason, options) {
-    if (!attempt || attempt.counted || attempt.failedAt) return;
+    if (!attempt || attempt.failedAt) return;
     attempt.failedAt = Date.now();
 
     if (attempt.countTimer) clearTimeout(attempt.countTimer);
     if (attempt.cleanupTimer) clearTimeout(attempt.cleanupTimer);
 
     const quotaLimited = !!(options && options.quotaLimited) || textLooksLikeQuotaLimit(reason);
+    const shouldRollback = !!attempt.counted && (quotaLimited || String(reason || "").includes("network error") || String(reason || "").includes("could not verify"));
+    if (shouldRollback) {
+      rollbackCountedUsage(attempt.serviceKey, attempt.amount, "video_request_sent", attempt.detail, attempt.id);
+      attempt.counted = false;
+    }
+
     if (quotaLimited) {
       recordLimitReachedForService(attempt.serviceKey, reason || "quota limit reached");
       fetchQuotaInfoAfterLimit(attempt.serviceKey);
     }
 
-    setStatus("Rejected/limited. Not counted: " + (reason || "failure detected"), "warn");
+    setStatus(quotaLimited ? "Quota rejection detected. Video request count rolled back." : "Video request failed before acceptance: " + (reason || "failure detected"), "warn");
 
     setTimeout(() => {
       S.pendingVideoAttempts = S.pendingVideoAttempts.filter((x) => x !== attempt);
@@ -2174,23 +2259,23 @@
   }
 
   function markVideoAttemptAccepted(attempt, reason) {
-    if (!attempt || attempt.counted || attempt.failedAt) return;
+    if (!attempt || attempt.failedAt) return;
     attempt.acceptedAt = Date.now();
-    setStatus("Video request accepted; will count after short failure-watch delay.");
 
-    attempt.countTimer = setTimeout(() => {
-      if (!attempt || attempt.counted || attempt.failedAt) return;
+    if (attempt.countTimer) clearTimeout(attempt.countTimer);
+    if (attempt.cleanupTimer) clearTimeout(attempt.cleanupTimer);
 
+    if (!attempt.counted) {
+      recordCountedUsage(attempt.serviceKey, attempt.amount, "video_request_accepted", attempt.detail, attempt.id, "video");
       attempt.counted = true;
-      recordCountedUsage(attempt.serviceKey, attempt.amount, "video_request_accepted", attempt.detail, null, "video");
       setStatus("Counted accepted video request locally.");
+    } else {
+      setStatus("Video request accepted; already counted on request.");
+    }
 
+    setTimeout(() => {
       S.pendingVideoAttempts = S.pendingVideoAttempts.filter((x) => x !== attempt);
-    }, VIDEO_ACCEPTED_COUNT_DELAY_MS);
-
-    attempt.cleanupTimer = setTimeout(() => {
-      S.pendingVideoAttempts = S.pendingVideoAttempts.filter((x) => x !== attempt);
-    }, VIDEO_FAILURE_WATCH_MS + 5000);
+    }, 2000);
   }
 
   function installGenerationCounterInterceptor() {
