@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      1.9.13
+// @version      1.9.15
 // @description  Draggable Grok Imagine usage tracker with readable counters, notifications, backup reminders, notes, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -1447,6 +1447,11 @@
   }
 
   function rollbackCountedUsage(serviceKey, amount, reason, detail, recentKey) {
+    if (!recentKey) {
+      setStatus("Skipped rollback: missing exact request key.", "warn");
+      return;
+    }
+
     const u = loadUsage();
     const n = Math.max(1, Number(amount) || 1);
 
@@ -1457,10 +1462,7 @@
         item &&
         item.serviceKey === serviceKey &&
         item.counted &&
-        (
-          (recentKey && item.key === recentKey) ||
-          (!recentKey && (!detail || item.detail === detail))
-        )
+        item.key === recentKey
       ) {
         removed += 1;
         return false;
@@ -1468,29 +1470,16 @@
       return true;
     });
 
-    if (removed <= 0 && recentKey) {
-      u.recent = (u.recent || []).filter((item) => {
-        if (
-          removed < n &&
-          item &&
-          item.serviceKey === serviceKey &&
-          item.counted &&
-          (!detail || item.detail === detail)
-        ) {
-          removed += 1;
-          return false;
-        }
-        return true;
-      });
-    }
-
     if (removed > 0) {
       decrementUsageCounters(u, serviceKey, removed, reason, detail);
       saveUsage();
       refreshUsageOnly();
-      setStatus("Rolled back " + removed + " " + serviceTitle(serviceKey) + " after quota rejection.", "warn");
+      setStatus("Rolled back " + removed + " " + serviceTitle(serviceKey) + " after confirmed quota rejection.", "warn");
+    } else {
+      setStatus("No exact matching count found to roll back.", "warn");
     }
   }
+
 
   function pruneRecentUsage(u, nowArg) {
     const now = Number(nowArg) || Date.now();
@@ -1912,26 +1901,30 @@
   function textLooksLikeQuotaLimit(text) {
     const lower = String(text || "").toLowerCase();
     if (!lower) return false;
-    return (
-      lower.includes("too many requests") ||
-      lower.includes("quota") ||
-      lower.includes("rate limit") ||
-      lower.includes("limit reached") ||
-      lower.includes("usage limit") ||
-      lower.includes("exceeded") ||
-      lower.includes("exhausted") ||
-      lower.includes("429")
-    );
+
+    // Keep this strict. Moderation/server failure messages may contain generic
+    // words like "limit", "blocked", "failed", or "error" while still consuming
+    // quota. The only text-only signal we trust here is the exact quota rejection
+    // wording Grok currently returns.
+    return lower.includes("too many requests");
   }
 
   function payloadLooksLikeQuotaLimit(obj) {
     if (!obj || typeof obj !== "object") return false;
     try {
-      const code = obj.error && obj.error.code != null ? Number(obj.error.code) : (obj.code != null ? Number(obj.code) : null);
-      const msg = String((obj.error && obj.error.message) || obj.message || obj.reason || obj.detail || "");
+      const err = obj.error && typeof obj.error === "object" ? obj.error : null;
+      const code = err && err.code != null ? Number(err.code) : (obj.code != null ? Number(obj.code) : null);
+      const msg = String((err && err.message) || obj.message || "");
+
+      // Primary confirmed limit response:
+      // {"error":{"code":8,"message":"Too many requests","details":[]}}
       if (code === 8 && textLooksLikeQuotaLimit(msg)) return true;
-      if (textLooksLikeQuotaLimit(msg)) return true;
-      return textLooksLikeQuotaLimit(JSON.stringify(obj));
+
+      // Some transports may expose status instead of HTTP status.
+      const status = Number(obj.status || obj.statusCode || obj.httpStatus || 0);
+      if (status === 429) return true;
+
+      return false;
     } catch (_) {
       return false;
     }
@@ -2138,9 +2131,13 @@
 
     const windowUsed = getWindowCount(serviceKey);
     rec.maxWindowUsed = Math.max(Number(rec.maxWindowUsed) || 0, Number(windowUsed) || 0);
+
+    // When the server confirms the limit is reached, today's observed limit is
+    // the amount successfully generated in the current rolling window. This can
+    // be lower than older learned/default limits when Grok reduces quota.
     if (windowUsed > 0) {
-      rec.quotaEstimate = rec.quotaEstimate == null ? windowUsed : Math.max(Number(rec.quotaEstimate) || 0, windowUsed);
-      rec.effectiveLimit = Math.max(Number(rec.effectiveLimit) || 0, Number(rec.quotaEstimate) || 0, Number(getDefaultLimits()[serviceKey]) || 0);
+      rec.quotaEstimate = Math.max(1, Math.round(Number(windowUsed) || 0));
+      rec.effectiveLimit = rec.quotaEstimate;
     }
 
     d.notes = Array.isArray(d.notes) ? d.notes : [];
@@ -2216,6 +2213,7 @@
     // replies with a true quota rejection, the count is rolled back below.
     recordCountedUsage(attempt.serviceKey, attempt.amount, attempt.countReason, attempt.detail, attempt.id, "video");
     attempt.counted = true;
+    attempt.countedRecentKey = attempt.id;
 
     S.pendingVideoAttempts.push(attempt);
     S.pendingVideoAttempts = S.pendingVideoAttempts.slice(-20);
@@ -2231,9 +2229,9 @@
     if (attempt.cleanupTimer) clearTimeout(attempt.cleanupTimer);
 
     const quotaLimited = !!(options && options.quotaLimited) || textLooksLikeQuotaLimit(reason);
-    const shouldRollback = !!attempt.counted && (quotaLimited || String(reason || "").includes("network error") || String(reason || "").includes("could not verify"));
+    const shouldRollback = !!attempt.counted && (quotaLimited || String(reason || "").includes("network error"));
     if (shouldRollback) {
-      rollbackCountedUsage(attempt.serviceKey, attempt.amount, "video_request_sent", attempt.detail, attempt.id);
+      rollbackCountedUsage(attempt.serviceKey, attempt.amount, "video_request_sent", attempt.detail, attempt.countedRecentKey || attempt.id);
       attempt.counted = false;
     }
 
@@ -2453,13 +2451,31 @@
     return clamp(parseInt(lsGet(K_BACKUP_INTERVAL_DAYS, String(DEFAULT_BACKUP_REMINDER_DAYS)), 10), 1, 3650);
   }
 
+  function getTodaysReachedLimitForService(serviceKey) {
+    const h = loadHistory();
+    const day = h.days && h.days[getLocalDayKey()] ? h.days[getLocalDayKey()] : null;
+    const q = day && day.quota && day.quota[serviceKey] ? day.quota[serviceKey] : null;
+    if (!q || !q.quotaReached) return null;
+
+    const observed = Number(q.quotaEstimate != null ? q.quotaEstimate : q.effectiveLimit);
+    if (Number.isFinite(observed) && observed > 0) return Math.max(1, Math.round(observed));
+
+    const maxUsed = Number(q.maxWindowUsed);
+    if (Number.isFinite(maxUsed) && maxUsed > 0) return Math.max(1, Math.round(maxUsed));
+
+    return null;
+  }
+
   function getEffectiveLimitForService(serviceKey) {
+    const todaysReached = getTodaysReachedLimitForService(serviceKey);
+    if (todaysReached != null) return todaysReached;
+
     const defaults = getDefaultLimits();
     let limit = Number(defaults[serviceKey]) || 1;
 
     // If the user explicitly edited this service limit from the main panel,
-    // use that value exactly. Do not let older learned quota estimates keep
-    // the UI stuck at a previous higher value.
+    // use that value exactly unless today's reached-limit observation says
+    // the site reduced the quota today.
     if (isExactLimitOverride(serviceKey)) {
       return Math.max(1, Math.round(limit));
     }
@@ -2480,6 +2496,14 @@
     const q = day && day.quota && day.quota[serviceKey] ? day.quota[serviceKey] : null;
     const defaultLimit = Number(defaults[serviceKey]) || 1;
     if (!q) return defaultLimit;
+
+    if (q.quotaReached) {
+      const observed = Number(q.quotaEstimate != null ? q.quotaEstimate : q.effectiveLimit);
+      if (Number.isFinite(observed) && observed > 0) return Math.max(1, Math.round(observed));
+      const maxUsed = Number(q.maxWindowUsed);
+      if (Number.isFinite(maxUsed) && maxUsed > 0) return Math.max(1, Math.round(maxUsed));
+    }
+
     return Math.max(
       defaultLimit,
       Number(q.effectiveLimit) || 0,
@@ -2624,8 +2648,8 @@
         if (!rec.quotaReached) rec.limitHits = (Number(rec.limitHits) || 0) + 1;
         rec.quotaReached = true;
         if (windowUsed > 0) {
-          rec.quotaEstimate = rec.quotaEstimate == null ? windowUsed : Math.max(Number(rec.quotaEstimate) || 0, windowUsed);
-          rec.effectiveLimit = Math.max(Number(rec.effectiveLimit) || 0, Number(rec.quotaEstimate) || 0);
+          rec.quotaEstimate = Math.max(1, Math.round(Number(windowUsed) || 0));
+          rec.effectiveLimit = rec.quotaEstimate;
         }
         if (!rec.maxWaitSeconds && Number.isFinite(windowSec) && windowSec > 0) rec.maxWaitSeconds = windowSec;
       }
