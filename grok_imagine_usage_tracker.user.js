@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.3
+// @version      2.0.4
 // @description  Draggable Grok Imagine usage tracker with readable counters, notifications, multi-account usage tracking with per-account history, limits, notes, imports/exports, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -2347,9 +2347,11 @@
     }
     saveHistory(h);
 
+    const detectedLimit = getTodaysReachedLimitForService(serviceKey);
+
     refreshUsageOnly();
-    setStatus(service.title + " limit reached. Renewal: " + formatRenewAt(renewAt) + ".", "warn");
-    showFloatingNotice(service.title + " limit reached - renews at " + formatRenewAt(renewAt));
+    setStatus(service.title + " limit reached" + (detectedLimit != null ? " at " + detectedLimit : "") + ". Renewal: " + formatRenewAt(renewAt) + ".", "warn");
+    showFloatingNotice(service.title + " limit reached" + (detectedLimit != null ? " at " + detectedLimit : "") + " - renews at " + formatRenewAt(renewAt));
   }
 
   async function responseLooksAcceptedForGeneration(response) {
@@ -2676,14 +2678,18 @@
     const defaults = getDefaultLimits();
     let limit = Number.isFinite(Number(defaults[serviceKey])) ? Number(defaults[serviceKey]) : 0;
 
-    // If the user explicitly edited this service limit, use that value exactly.
-    // This includes limits changed in Settings and the per-type Limit Control.
+    // If the site confirmed today's reached limit, prefer the observed count
+    // even if the user/default setting is higher. Example: setting is 30, but
+    // Grok stops after 26 accepted video requests, so the active display should
+    // become 26/26 instead of jumping to 30/30.
+    const todaysReached = getTodaysReachedLimitForService(serviceKey);
+    if (todaysReached != null) return todaysReached;
+
+    // If the user explicitly edited this service limit, use that value exactly
+    // until the site confirms a different reached limit for the current day.
     if (isExactLimitOverride(serviceKey)) {
       return Math.max(0, Math.round(limit));
     }
-
-    const todaysReached = getTodaysReachedLimitForService(serviceKey);
-    if (todaysReached != null) return todaysReached;
 
     const h = loadHistory();
     for (const dayKey of Object.keys(h.days || {})) {
