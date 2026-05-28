@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      1.9.15
-// @description  Draggable Grok Imagine usage tracker with readable counters, notifications, backup reminders, notes, and usage history.
+// @version      2.0.3
+// @description  Draggable Grok Imagine usage tracker with readable counters, notifications, multi-account usage tracking with per-account history, limits, notes, imports/exports, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
 // @run-at       document-idle
@@ -43,6 +43,12 @@
   const K_LAST_BACKUP_REMINDER = LS_PREFIX + "lastBackupReminderAt";
   const K_LIMIT_LOCKS = LS_PREFIX + "limitLocks";
   const K_MANUAL_REFRESH_HOURS = LS_PREFIX + "manualRefreshHours";
+  const K_ACTIVE_ACCOUNT_ID = LS_PREFIX + "activeAccountId";
+  const K_KNOWN_ACCOUNTS = LS_PREFIX + "knownAccounts";
+  const K_ACCOUNT_NAMES = LS_PREFIX + "accountNames";
+
+  const UNKNOWN_ACCOUNT_ID = "unknown";
+  const ACCOUNT_USER_URL_RE = /(?:https?:)?\/\/(?:assets\.)?grok\.com\/users\/([0-9a-fA-F-]{20,})\//i;
 
   const API_URL = "https://grok.com/rest/media/imagine/quota_info";
   const GENERATION_URL_PART = "/rest/app-chat/conversations/new";
@@ -82,6 +88,7 @@
     pendingSweepTimer: null,
     pendingVideoAttempts: [],
     lastNotifyAt: {},
+    currentAccountId: null,
   };
 
   function lsGet(key, fallback) {
@@ -113,6 +120,182 @@
       localStorage.setItem(key, JSON.stringify(value));
     } catch (_) {}
   }
+
+  function sanitizeAccountId(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return UNKNOWN_ACCOUNT_ID;
+    return raw.replace(/[^0-9a-zA-Z._:-]/g, "_");
+  }
+
+  function getCurrentAccountId() {
+    if (S.currentAccountId) return S.currentAccountId;
+    const stored = sanitizeAccountId(lsGet(K_ACTIVE_ACCOUNT_ID, UNKNOWN_ACCOUNT_ID));
+    S.currentAccountId = stored || UNKNOWN_ACCOUNT_ID;
+    return S.currentAccountId;
+  }
+
+  function setCurrentAccountId(accountId) {
+    const id = sanitizeAccountId(accountId);
+    S.currentAccountId = id;
+    lsSet(K_ACTIVE_ACCOUNT_ID, id);
+    return id;
+  }
+
+  function accountStorageKey(baseKey, accountId) {
+    return baseKey + ".account." + sanitizeAccountId(accountId || getCurrentAccountId());
+  }
+
+  function loadAccountJson(baseKey, fallback, accountId) {
+    return loadJson(accountStorageKey(baseKey, accountId), fallback);
+  }
+
+  function saveAccountJson(baseKey, value, accountId) {
+    saveJson(accountStorageKey(baseKey, accountId), value);
+  }
+
+  function accountLsGet(baseKey, fallback, accountId) {
+    return lsGet(accountStorageKey(baseKey, accountId), fallback);
+  }
+
+  function accountLsSet(baseKey, value, accountId) {
+    lsSet(accountStorageKey(baseKey, accountId), value);
+  }
+
+  function getKnownAccounts() {
+    const raw = loadJson(K_KNOWN_ACCOUNTS, []);
+    const list = Array.isArray(raw) ? raw.map(sanitizeAccountId).filter(Boolean) : [];
+    const unique = Array.from(new Set(list.filter((x) => x && x !== UNKNOWN_ACCOUNT_ID)));
+    const current = getCurrentAccountId();
+    if (current && current !== UNKNOWN_ACCOUNT_ID && !unique.includes(current)) unique.unshift(current);
+    return unique;
+  }
+
+  function saveKnownAccounts(list) {
+    const unique = Array.from(new Set((Array.isArray(list) ? list : []).map(sanitizeAccountId).filter((x) => x && x !== UNKNOWN_ACCOUNT_ID)));
+    saveJson(K_KNOWN_ACCOUNTS, unique);
+  }
+
+  function rememberKnownAccount(accountId) {
+    const id = sanitizeAccountId(accountId);
+    if (!id || id === UNKNOWN_ACCOUNT_ID) return;
+    const list = getKnownAccounts();
+    if (!list.includes(id)) {
+      list.unshift(id);
+      saveKnownAccounts(list);
+    }
+  }
+
+  function getAccountNames() {
+    const raw = loadJson(K_ACCOUNT_NAMES, {});
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  }
+
+  function saveAccountNames(obj) {
+    saveJson(K_ACCOUNT_NAMES, obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {});
+  }
+
+  function getAccountName(accountId) {
+    const id = sanitizeAccountId(accountId || getCurrentAccountId());
+    const names = getAccountNames();
+    const value = names[id];
+    return String(value || "").trim();
+  }
+
+  function setAccountName(accountId, value) {
+    const id = sanitizeAccountId(accountId || getCurrentAccountId());
+    const names = getAccountNames();
+    const clean = String(value || "").trim();
+    if (clean) names[id] = clean;
+    else delete names[id];
+    saveAccountNames(names);
+  }
+
+  function getAccountDisplayLabel(accountId) {
+    const id = sanitizeAccountId(accountId || getCurrentAccountId());
+    const name = getAccountName(id);
+    if (name) return name;
+    if (id === UNKNOWN_ACCOUNT_ID) return "unknown";
+    if (id.length <= 16) return id;
+    return id.slice(0, 4) + "..." + id.slice(-4);
+  }
+
+  function getAccountFullLabel(accountId) {
+    const id = sanitizeAccountId(accountId || getCurrentAccountId());
+    const name = getAccountName(id);
+    return name ? name + " (" + id + ")" : id;
+  }
+
+  function detectAccountIdFromCookie() {
+    try {
+      const match = document.cookie.match(/(?:^|;\s*)x-userid=([^;]+)/i);
+      return match ? sanitizeAccountId(decodeURIComponent(match[1])) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function detectAccountIdFromText(textValue) {
+    const s = String(textValue || "");
+    const match = s.match(ACCOUNT_USER_URL_RE);
+    return match ? sanitizeAccountId(match[1]) : null;
+  }
+
+  function updateAccountTitle() {
+    const title = document.getElementById("gqp-main-title");
+    if (title) {
+      title.textContent = "Grok Usage - " + getAccountDisplayLabel();
+      title.title = "Current account: " + getAccountFullLabel();
+    }
+  }
+
+  function refreshAllAccountScopedUi() {
+    S.usage = null;
+    S.lastData = null;
+    S.lastError = null;
+    S.lastNotifyAt = {};
+    updateAccountTitle();
+    refreshUsageOnly();
+    setTimeout(() => {
+      try { loadQuota(); } catch (_) {}
+    }, 50);
+  }
+
+  function noteDetectedAccountId(accountId, source, options) {
+    const id = sanitizeAccountId(accountId);
+    if (!id || id === UNKNOWN_ACCOUNT_ID) return false;
+    const prev = getCurrentAccountId();
+    rememberKnownAccount(id);
+    if (prev === id) {
+      updateAccountTitle();
+      return false;
+    }
+    setCurrentAccountId(id);
+    if (!(options && options.silent)) {
+      setStatus("Detected account: " + getAccountDisplayLabel(id) + (source ? " from " + source : "") + ".");
+    }
+    refreshAllAccountScopedUi();
+    return true;
+  }
+
+  function refreshDetectedAccountFromPage() {
+    noteDetectedAccountId(detectAccountIdFromCookie(), "cookie", { silent: true });
+    try {
+      noteDetectedAccountId(
+        detectAccountIdFromText(document.documentElement ? document.documentElement.outerHTML : ""),
+        "page html",
+        { silent: true }
+      );
+    } catch (_) {}
+  }
+
+  function collectKnownAndCurrentAccounts() {
+    const list = getKnownAccounts().slice();
+    const current = getCurrentAccountId();
+    if (current && current !== UNKNOWN_ACCOUNT_ID && !list.includes(current)) list.unshift(current);
+    return list;
+  }
+
+  setCurrentAccountId(detectAccountIdFromCookie() || lsGet(K_ACTIVE_ACCOUNT_ID, UNKNOWN_ACCOUNT_ID));
 
   function clamp(n, lo, hi) {
     n = Number(n);
@@ -1012,6 +1195,15 @@
         cursor: pointer;
       }
 
+
+      .gqp-limits-row label {
+        min-width: 178px;
+        justify-content: space-between;
+      }
+      .gqp-limits-row input[type="number"] {
+        width: 76px !important;
+      }
+
       #grok-quota-panel .gqp-err { color: #ff8b8b; font-weight: 800; }
 
       /* v1.7.2 layout cleanup */
@@ -1300,14 +1492,14 @@
   }
 
   function loadUsage() {
-    S.usage = normalizeUsage(loadJson(K_USAGE, null));
+    S.usage = normalizeUsage(loadAccountJson(K_USAGE, null));
     saveUsage();
     return S.usage;
   }
 
   function saveUsage() {
     if (!S.usage) S.usage = normalizeUsage(null);
-    saveJson(K_USAGE, S.usage);
+    saveAccountJson(K_USAGE, S.usage);
   }
 
   function resetTodayUsage() {
@@ -1382,6 +1574,7 @@
   }
 
   function refreshUsageOnly() {
+    updateAccountTitle();
     // Touch locks so expired lockouts are removed before rendering.
     for (const service of SERVICES) getActiveLimitLock(service.key);
     const u = loadUsage();
@@ -1957,17 +2150,17 @@
 
 
   function loadLimitLocks() {
-    const raw = loadJson(K_LIMIT_LOCKS, {});
+    const raw = loadAccountJson(K_LIMIT_LOCKS, {});
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
     return raw;
   }
 
   function saveLimitLocks(obj) {
-    saveJson(K_LIMIT_LOCKS, obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {});
+    saveAccountJson(K_LIMIT_LOCKS, obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {});
   }
 
   function getManualRefreshHours() {
-    const raw = parseFloat(lsGet(K_MANUAL_REFRESH_HOURS, ""));
+    const raw = parseFloat(accountLsGet(K_MANUAL_REFRESH_HOURS, ""));
     if (Number.isFinite(raw) && raw > 0) return raw;
     return null;
   }
@@ -2297,6 +2490,9 @@
           bodyText = await input.clone().text();
         }
 
+        noteDetectedAccountId(detectAccountIdFromText(String(url || "")), "fetch url", { silent: true });
+        noteDetectedAccountId(detectAccountIdFromText(bodyText), "fetch body", { silent: true });
+
         hit = classifyGenerationRequest(url, method, bodyText);
         if (hit) {
           if (isVideoServiceKey(hit.serviceKey)) {
@@ -2318,6 +2514,13 @@
         if (pendingVideoAttempt) markVideoAttemptFailed(pendingVideoAttempt, "network error", { quotaLimited: false });
         throw e;
       }
+
+      try {
+        if (response && response.clone) {
+          const txt = await response.clone().text().catch(() => "");
+          noteDetectedAccountId(detectAccountIdFromText(txt), "fetch response", { silent: true });
+        }
+      } catch (_) {}
 
       if (pendingVideoAttempt) {
         try {
@@ -2351,10 +2554,12 @@
       const ws = protocols !== undefined ? new OriginalWebSocket(url, protocols) : new OriginalWebSocket(url);
       try {
         const wsUrl = String(url && url.url ? url.url : url || "");
+        noteDetectedAccountId(detectAccountIdFromText(wsUrl), "websocket url", { silent: true });
         if (wsUrl.includes(IMAGINE_LISTEN_WS_PART)) {
           setStatus("Watching imagine WebSocket for image results.");
           ws.addEventListener("message", (event) => {
             try {
+              noteDetectedAccountId(detectAccountIdFromText(event && event.data), "websocket message", { silent: true });
               handleImagineWsPayload(event && event.data);
             } catch (e) {
               console.warn("[GrokUsage] WebSocket image counter error:", e);
@@ -2387,29 +2592,29 @@
   }
 
   function getDefaultLimits() {
-    const raw = loadJson(K_DEFAULT_LIMITS, null);
+    const raw = loadAccountJson(K_DEFAULT_LIMITS, null);
     const out = Object.assign({}, DEFAULT_QUOTA_LIMITS, raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {});
     for (const service of SERVICES) {
-      out[service.key] = Math.max(1, Number(out[service.key]) || Number(DEFAULT_QUOTA_LIMITS[service.key]) || 1);
+      out[service.key] = Math.max(0, Number.isFinite(Number(out[service.key])) ? Number(out[service.key]) : Number(DEFAULT_QUOTA_LIMITS[service.key]) || 0);
     }
     return out;
   }
 
   function saveDefaultLimits(obj) {
     const out = Object.assign({}, getDefaultLimits(), obj || {});
-    for (const service of SERVICES) out[service.key] = Math.max(1, Number(out[service.key]) || 1);
-    saveJson(K_DEFAULT_LIMITS, out);
+    for (const service of SERVICES) out[service.key] = Math.max(0, Number.isFinite(Number(out[service.key])) ? Number(out[service.key]) : 0);
+    saveAccountJson(K_DEFAULT_LIMITS, out);
   }
 
   function getExactLimitOverrides() {
-    const raw = loadJson(K_EXACT_LIMIT_OVERRIDES, null);
+    const raw = loadAccountJson(K_EXACT_LIMIT_OVERRIDES, null);
     return Object.assign({ image: false, imagePro: false, imageEdit: false, video: false, video720p: false }, raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {});
   }
 
   function setExactLimitOverride(serviceKey, enabled) {
     const flags = getExactLimitOverrides();
     flags[serviceKey] = !!enabled;
-    saveJson(K_EXACT_LIMIT_OVERRIDES, flags);
+    saveAccountJson(K_EXACT_LIMIT_OVERRIDES, flags);
   }
 
   function isExactLimitOverride(serviceKey) {
@@ -2418,12 +2623,13 @@
   }
 
   function builtinDefaultLimitForService(serviceKey) {
-    return Math.max(1, Number(DEFAULT_QUOTA_LIMITS[serviceKey]) || 1);
+    return Math.max(0, Number.isFinite(Number(DEFAULT_QUOTA_LIMITS[serviceKey])) ? Number(DEFAULT_QUOTA_LIMITS[serviceKey]) : 0);
   }
 
   function setDefaultLimitForService(serviceKey, value) {
-    const n = Math.max(1, Math.round(Number(value) || 0));
-    if (!n) return false;
+    const raw = Number(value);
+    if (!Number.isFinite(raw) || raw < 0) return false;
+    const n = Math.max(0, Math.round(raw));
     const limits = getDefaultLimits();
     limits[serviceKey] = n;
     saveDefaultLimits(limits);
@@ -2467,18 +2673,17 @@
   }
 
   function getEffectiveLimitForService(serviceKey) {
+    const defaults = getDefaultLimits();
+    let limit = Number.isFinite(Number(defaults[serviceKey])) ? Number(defaults[serviceKey]) : 0;
+
+    // If the user explicitly edited this service limit, use that value exactly.
+    // This includes limits changed in Settings and the per-type Limit Control.
+    if (isExactLimitOverride(serviceKey)) {
+      return Math.max(0, Math.round(limit));
+    }
+
     const todaysReached = getTodaysReachedLimitForService(serviceKey);
     if (todaysReached != null) return todaysReached;
-
-    const defaults = getDefaultLimits();
-    let limit = Number(defaults[serviceKey]) || 1;
-
-    // If the user explicitly edited this service limit from the main panel,
-    // use that value exactly unless today's reached-limit observation says
-    // the site reduced the quota today.
-    if (isExactLimitOverride(serviceKey)) {
-      return Math.max(1, Math.round(limit));
-    }
 
     const h = loadHistory();
     for (const dayKey of Object.keys(h.days || {})) {
@@ -2488,13 +2693,13 @@
       if (q.maxWindowUsed != null) limit = Math.max(limit, Number(q.maxWindowUsed) || 0);
       if (q.effectiveLimit != null) limit = Math.max(limit, Number(q.effectiveLimit) || 0);
     }
-    return Math.max(1, Math.round(limit));
+    return Math.max(0, Math.round(limit));
   }
 
   function getRecentLimitForDay(day, serviceKey) {
     const defaults = getDefaultLimits();
     const q = day && day.quota && day.quota[serviceKey] ? day.quota[serviceKey] : null;
-    const defaultLimit = Number(defaults[serviceKey]) || 1;
+    const defaultLimit = Number.isFinite(Number(defaults[serviceKey])) ? Number(defaults[serviceKey]) : 0;
     if (!q) return defaultLimit;
 
     if (q.quotaReached) {
@@ -2529,13 +2734,13 @@
   }
 
   function loadHistory() {
-    return normalizeHistory(loadJson(K_HISTORY, null));
+    return normalizeHistory(loadAccountJson(K_HISTORY, null));
   }
 
   function saveHistory(history) {
     const h = normalizeHistory(history);
     h.exportedAt = new Date().toISOString();
-    saveJson(K_HISTORY, h);
+    saveAccountJson(K_HISTORY, h);
   }
 
   function ensureHistoryDay(history, dayKey) {
@@ -2813,18 +3018,186 @@
     }, 0);
   }
 
-  function exportHistoryJson() {
-    const payload = {
-      schema: "grok_quota_panel.history_export",
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      historyDays: getHistoryDays(),
-      usage: loadUsage(),
-      history: loadHistory(),
+  function getAccountBundle(accountId) {
+    const id = sanitizeAccountId(accountId || getCurrentAccountId());
+    return {
+      usage: normalizeUsage(loadAccountJson(K_USAGE, null, id)),
+      history: normalizeHistory(loadAccountJson(K_HISTORY, null, id)),
+      defaultLimits: Object.assign({}, DEFAULT_QUOTA_LIMITS, loadAccountJson(K_DEFAULT_LIMITS, null, id) || {}),
+      exactLimitOverrides: Object.assign({ image: false, imagePro: false, imageEdit: false, video: false, video720p: false }, loadAccountJson(K_EXACT_LIMIT_OVERRIDES, null, id) || {}),
+      limitLocks: loadAccountJson(K_LIMIT_LOCKS, {}, id) || {},
+      manualRefreshHours: (() => { const x = parseFloat(accountLsGet(K_MANUAL_REFRESH_HOURS, "", id)); return Number.isFinite(x) && x > 0 ? x : null; })(),
+      lastBackupExportAt: accountLsGet(K_LAST_BACKUP_EXPORT, "", id) || null,
+      lastBackupReminderAt: accountLsGet(K_LAST_BACKUP_REMINDER, "", id) || null,
     };
-    downloadTextFile("grok_quota_history_" + getLocalDayKey() + ".json", JSON.stringify(payload, null, 2), "application/json");
-    lsSet(K_LAST_BACKUP_EXPORT, new Date().toISOString());
   }
+
+  function applyAccountBundle(accountId, bundle, options) {
+    const id = sanitizeAccountId(accountId || getCurrentAccountId());
+    const merge = !!(options && options.merge);
+    const data = bundle && typeof bundle === "object" ? bundle : {};
+
+    if (data.history) {
+      const nextHistory = merge ? mergeHistoryObjects(normalizeHistory(loadAccountJson(K_HISTORY, null, id)), data.history) : normalizeHistory(data.history);
+      saveAccountJson(K_HISTORY, nextHistory, id);
+    }
+    if (data.usage) {
+      const nextUsage = normalizeUsage(data.usage);
+      saveAccountJson(K_USAGE, nextUsage, id);
+      if (id === getCurrentAccountId()) S.usage = nextUsage;
+    }
+    if (data.defaultLimits && typeof data.defaultLimits === "object") {
+      const limits = Object.assign({}, DEFAULT_QUOTA_LIMITS, data.defaultLimits);
+      for (const service of SERVICES) limits[service.key] = Math.max(0, Number.isFinite(Number(limits[service.key])) ? Number(limits[service.key]) : Number(DEFAULT_QUOTA_LIMITS[service.key]) || 0);
+      saveAccountJson(K_DEFAULT_LIMITS, limits, id);
+    }
+    if (data.exactLimitOverrides && typeof data.exactLimitOverrides === "object") {
+      const flags = Object.assign({ image: false, imagePro: false, imageEdit: false, video: false, video720p: false }, data.exactLimitOverrides);
+      saveAccountJson(K_EXACT_LIMIT_OVERRIDES, flags, id);
+    }
+    if (data.limitLocks && typeof data.limitLocks === "object") {
+      saveAccountJson(K_LIMIT_LOCKS, data.limitLocks, id);
+    }
+    if (data.manualRefreshHours != null && Number.isFinite(Number(data.manualRefreshHours)) && Number(data.manualRefreshHours) > 0) {
+      accountLsSet(K_MANUAL_REFRESH_HOURS, String(Number(data.manualRefreshHours)), id);
+    } else if (!merge && data.manualRefreshHours == null) {
+      try { localStorage.removeItem(accountStorageKey(K_MANUAL_REFRESH_HOURS, id)); } catch (_) {}
+    }
+    if (data.lastBackupExportAt) accountLsSet(K_LAST_BACKUP_EXPORT, String(data.lastBackupExportAt), id);
+    if (data.lastBackupReminderAt) accountLsSet(K_LAST_BACKUP_REMINDER, String(data.lastBackupReminderAt), id);
+  }
+
+  function exportCurrentAccountJson() {
+    const accountId = getCurrentAccountId();
+    const payload = {
+      schema: "grok_usage_tracker.account_export",
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      accountId,
+      accountName: getAccountName(accountId) || "",
+      historyDays: getHistoryDays(),
+      data: getAccountBundle(accountId),
+    };
+    downloadTextFile("grok_usage_" + getAccountDisplayLabel(accountId).replace(/[^0-9a-zA-Z._-]/g, "_") + "_" + getLocalDayKey() + ".json", JSON.stringify(payload, null, 2), "application/json");
+    accountLsSet(K_LAST_BACKUP_EXPORT, new Date().toISOString(), accountId);
+  }
+
+  function exportAllAccountsJson() {
+    const accounts = {};
+    for (const id of collectKnownAndCurrentAccounts()) {
+      accounts[id] = {
+        accountName: getAccountName(id) || "",
+        data: getAccountBundle(id),
+      };
+    }
+    const payload = {
+      schema: "grok_usage_tracker.all_accounts_export",
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      activeAccountId: getCurrentAccountId(),
+      knownAccounts: collectKnownAndCurrentAccounts(),
+      accountNames: getAccountNames(),
+      sharedSettings: {
+        historyDays: getHistoryDays(),
+        autoRefresh: lsGet(K_AUTO, "0"),
+        intervalSeconds: getIntervalSeconds(),
+        notifyEnabled: lsGet(K_NOTIFY_ENABLED, "0"),
+        notifyThreshold: lsGet(K_NOTIFY_THRESHOLD, String(DEFAULT_NOTIFY_THRESHOLD)),
+        notifyServices: getNotifyServices(),
+        backupIntervalDays: getBackupIntervalDays(),
+      },
+      accounts,
+    };
+    downloadTextFile("grok_usage_all_accounts_" + getLocalDayKey() + ".json", JSON.stringify(payload, null, 2), "application/json");
+    accountLsSet(K_LAST_BACKUP_EXPORT, new Date().toISOString(), getCurrentAccountId());
+  }
+
+  function importCurrentAccountJson(file, onDone) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || "{}"));
+        const merge = window.confirm("Import mode\n\nOK = Merge with current account\nCancel = Override current account");
+        if (parsed.schema === "grok_usage_tracker.account_export") {
+          applyAccountBundle(getCurrentAccountId(), parsed.data || {}, { merge });
+          if (parsed.accountName && window.confirm("Apply exported account name to current account?")) {
+            setAccountName(getCurrentAccountId(), parsed.accountName);
+          }
+        } else if (parsed.history && parsed.history.days) {
+          const incomingHistory = parsed.history;
+          if (merge) saveHistory(mergeHistoryObjects(loadHistory(), incomingHistory));
+          else {
+            if (!window.confirm("Override existing current-account quota history?")) return;
+            saveHistory(normalizeHistory(incomingHistory));
+          }
+          if (parsed.usage && window.confirm("Also import local usage counters to current account?")) {
+            S.usage = normalizeUsage(parsed.usage);
+            saveUsage();
+          }
+        } else {
+          throw new Error("Unsupported current-account import file.");
+        }
+        refreshAllAccountScopedUi();
+        setStatus("Current account data imported.");
+        if (typeof onDone === "function") onDone();
+      } catch (e) {
+        window.alert("Import failed: " + (e && e.message ? e.message : String(e)));
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function importAllAccountsJson(file, onDone) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || "{}"));
+        if (parsed.schema !== "grok_usage_tracker.all_accounts_export" || !parsed.accounts || typeof parsed.accounts !== "object") {
+          throw new Error("Unsupported all-accounts import file.");
+        }
+        const merge = window.confirm("Import mode\n\nOK = Merge all accounts\nCancel = Override imported account storage");
+        const importedNames = parsed.accountNames && typeof parsed.accountNames === "object" ? parsed.accountNames : {};
+        if (!merge) {
+          saveKnownAccounts([]);
+          saveAccountNames({});
+        }
+        const known = new Set(collectKnownAndCurrentAccounts());
+        const names = getAccountNames();
+        for (const [accountIdRaw, rec] of Object.entries(parsed.accounts || {})) {
+          const accountId = sanitizeAccountId(accountIdRaw);
+          if (!accountId || accountId === UNKNOWN_ACCOUNT_ID) continue;
+          known.add(accountId);
+          applyAccountBundle(accountId, rec && rec.data ? rec.data : {}, { merge });
+          const incomingName = String((rec && rec.accountName) || importedNames[accountId] || "").trim();
+          if (incomingName) names[accountId] = incomingName;
+        }
+        saveKnownAccounts(Array.from(known));
+        saveAccountNames(Object.assign({}, names));
+        if (parsed.sharedSettings && typeof parsed.sharedSettings === "object") {
+          const shared = parsed.sharedSettings;
+          if (shared.historyDays != null) lsSet(K_HISTORY_DAYS, String(clamp(parseInt(shared.historyDays, 10), MIN_HISTORY_DAYS, MAX_HISTORY_DAYS)));
+          if (shared.autoRefresh != null) lsSet(K_AUTO, String(shared.autoRefresh) === "1" ? "1" : "0");
+          if (shared.intervalSeconds != null) lsSet(K_INTERVAL, String(clamp(parseInt(shared.intervalSeconds, 10), MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)));
+          if (shared.notifyEnabled != null) lsSet(K_NOTIFY_ENABLED, String(shared.notifyEnabled) === "1" ? "1" : "0");
+          if (shared.notifyThreshold != null) lsSet(K_NOTIFY_THRESHOLD, String(Math.max(0, parseInt(shared.notifyThreshold, 10) || 0)));
+          if (shared.notifyServices) saveNotifyServices(shared.notifyServices);
+          if (shared.backupIntervalDays != null) lsSet(K_BACKUP_INTERVAL_DAYS, String(clamp(parseInt(shared.backupIntervalDays, 10), 1, 3650)));
+          applyAutoRefresh();
+      setAccountName(getCurrentAccountId(), accountNameInput.value);
+      updateAccountTitle();
+        }
+        refreshAllAccountScopedUi();
+        setStatus("All accounts data imported.");
+        if (typeof onDone === "function") onDone();
+      } catch (e) {
+        window.alert("Import failed: " + (e && e.message ? e.message : String(e)));
+      }
+    };
+    reader.readAsText(file);
+  }
+
 
   function mergeHistoryObjects(base, incoming) {
     const out = normalizeHistory(base);
@@ -2936,13 +3309,13 @@
 
   function checkBackupReminder() {
     const intervalDays = getBackupIntervalDays();
-    const lastExport = new Date(lsGet(K_LAST_BACKUP_EXPORT, "") || 0).getTime();
-    const lastReminder = new Date(lsGet(K_LAST_BACKUP_REMINDER, "") || 0).getTime();
+    const lastExport = new Date(accountLsGet(K_LAST_BACKUP_EXPORT, "") || 0).getTime();
+    const lastReminder = new Date(accountLsGet(K_LAST_BACKUP_REMINDER, "") || 0).getTime();
     const now = Date.now();
     const dueMs = intervalDays * 86400 * 1000;
     if (Number.isFinite(lastExport) && lastExport > 0 && now - lastExport < dueMs) return;
     if (Number.isFinite(lastReminder) && lastReminder > 0 && now - lastReminder < 86400 * 1000) return;
-    lsSet(K_LAST_BACKUP_REMINDER, new Date().toISOString());
+    accountLsSet(K_LAST_BACKUP_REMINDER, new Date().toISOString());
     setStatus("Backup reminder: export quota history JSON.", "warn");
     showFloatingNotice("Backup reminder: export quota history JSON");
   }
@@ -3040,8 +3413,26 @@
   }
 
   function openSettingsWindow() {
-    const m = createModal("Usage Settings");
+    refreshDetectedAccountFromPage();
+    const m = createModal("Usage Settings - " + getAccountDisplayLabel());
     const body = m.body;
+
+    const accountInfo = el("div");
+    accountInfo.className = "gqp-muted";
+    accountInfo.style.marginBottom = "8px";
+    accountInfo.textContent = "Current account: " + getAccountFullLabel();
+
+    const accountNameRow = el("div");
+    accountNameRow.className = "gqp-modal-row";
+    const accountNameLabel = el("label");
+    accountNameLabel.appendChild(el("span", { textContent: "Account name" }));
+    const accountNameInput = el("input");
+    accountNameInput.type = "text";
+    accountNameInput.placeholder = "Optional display name";
+    accountNameInput.value = getAccountName(getCurrentAccountId());
+    accountNameInput.style.minWidth = "220px";
+    accountNameLabel.appendChild(accountNameInput);
+    accountNameRow.appendChild(accountNameLabel);
 
     const row = el("div");
     row.className = "gqp-modal-row";
@@ -3126,16 +3517,16 @@
     }
 
     const limitsRow = el("div");
-    limitsRow.className = "gqp-modal-row";
+    limitsRow.className = "gqp-modal-row gqp-limits-row";
     limitsRow.appendChild(el("span", { textContent: "Default limits:" }));
     const defaultLimits = getDefaultLimits();
     const limitInputs = {};
     for (const service of SERVICES) {
       const lab = el("label");
-      lab.appendChild(el("span", { textContent: serviceShort(service.key) }));
+      lab.appendChild(el("span", { textContent: service.title }));
       const inp = el("input");
       inp.type = "number";
-      inp.min = "1";
+      inp.min = "0";
       inp.max = "999999";
       inp.step = "1";
       inp.value = String(defaultLimits[service.key]);
@@ -3146,7 +3537,7 @@
 
     const info = el("div");
     info.className = "gqp-muted";
-    info.textContent = "Default limits are used until the script learns a larger reached limit or sees more generations in one rolling window. Low quota popup appears in the upper-left for 3 seconds.";
+    info.textContent = "Default limits are per account and apply immediately after saving. Use 0 for tiers/types with no quota. Low quota popup appears in the upper-left for 3 seconds.";
 
     const dangerToggleRow = el("div");
     dangerToggleRow.className = "gqp-modal-row";
@@ -3201,22 +3592,34 @@
       lsSet(K_INTERVAL, String(clamp(parseInt(autoEveryInput.value, 10), MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)));
       applyAutoRefresh();
 
+      setAccountName(getCurrentAccountId(), accountNameInput.value);
+      updateAccountTitle();
+
       const ns = {};
       for (const service of SERVICES) ns[service.key] = !!serviceChecks[service.key].checked;
       saveNotifyServices(ns);
 
       const limits = {};
-      for (const service of SERVICES) limits[service.key] = Math.max(1, parseInt(limitInputs[service.key].value, 10) || 1);
+      for (const service of SERVICES) {
+        const rawLimit = Number(limitInputs[service.key].value);
+        limits[service.key] = Math.max(0, Number.isFinite(rawLimit) ? Math.round(rawLimit) : 0);
+      }
       saveDefaultLimits(limits);
 
+      // Limits edited in Settings are intentional user overrides, so apply them
+      // exactly in the main view instead of letting older learned quota values win.
+      for (const service of SERVICES) setExactLimitOverride(service.key, true);
+
       refreshUsageOnly();
-      setStatus("Usage settings saved.");
+      setStatus("Usage settings saved for " + getAccountDisplayLabel() + ".");
       closeGqpModal();
     });
 
     actions.appendChild(closeBtn);
     actions.appendChild(saveBtn);
 
+    body.appendChild(accountInfo);
+    body.appendChild(accountNameRow);
     body.appendChild(row);
     body.appendChild(servicesRow);
     body.appendChild(limitsRow);
@@ -3227,7 +3630,7 @@
   }
 
   function openHistoryWindow() {
-    const m = createModal("Usage and Quota History");
+    const m = createModal("Usage and Quota History - " + getAccountDisplayLabel());
     const body = m.body;
 
     const top = el("div");
@@ -3244,17 +3647,22 @@
     daysLabel.appendChild(daysInput);
 
     const refreshBtn = el("button", { textContent: "Refresh Table" });
-    const exportBtn = el("button", { textContent: "Export JSON" });
-    const importBtn = el("button", { textContent: "Import JSON" });
+    const exportCurrentBtn = el("button", { textContent: "Export Current" });
+    const importCurrentBtn = el("button", { textContent: "Import Current" });
+    const exportAllBtn = el("button", { textContent: "Export All" });
+    const importAllBtn = el("button", { textContent: "Import All" });
     const fileInput = el("input");
     fileInput.type = "file";
     fileInput.accept = "application/json,.json";
     fileInput.style.display = "none";
+    let importMode = "current";
 
     top.appendChild(daysLabel);
     top.appendChild(refreshBtn);
-    top.appendChild(exportBtn);
-    top.appendChild(importBtn);
+    top.appendChild(exportCurrentBtn);
+    top.appendChild(importCurrentBtn);
+    top.appendChild(exportAllBtn);
+    top.appendChild(importAllBtn);
     top.appendChild(fileInput);
 
     const activeOnlyLabel = el("label");
@@ -3271,6 +3679,11 @@
 
     top.appendChild(activeOnlyLabel);
     top.appendChild(hitsOnlyLabel);
+
+    const accountInfo = el("div");
+    accountInfo.className = "gqp-muted";
+    accountInfo.style.marginBottom = "6px";
+    accountInfo.textContent = "Current account: " + getAccountFullLabel();
 
     const info = el("div");
     info.className = "gqp-muted";
@@ -3353,14 +3766,26 @@
     refreshBtn.addEventListener("click", render);
     activeOnly.addEventListener("change", render);
     hitsOnly.addEventListener("change", render);
-    exportBtn.addEventListener("click", exportHistoryJson);
-    importBtn.addEventListener("click", () => fileInput.click());
+    exportCurrentBtn.addEventListener("click", exportCurrentAccountJson);
+    exportAllBtn.addEventListener("click", exportAllAccountsJson);
+    importCurrentBtn.addEventListener("click", () => {
+      importMode = "current";
+      fileInput.click();
+    });
+    importAllBtn.addEventListener("click", () => {
+      importMode = "all";
+      fileInput.click();
+    });
     fileInput.addEventListener("change", () => {
-      importHistoryJson(fileInput.files && fileInput.files[0], render);
+      const file = fileInput.files && fileInput.files[0];
+      if (importMode === "all") importAllAccountsJson(file, render);
+      else importCurrentAccountJson(file, render);
       fileInput.value = "";
+      importMode = "current";
     });
 
     body.appendChild(top);
+    body.appendChild(accountInfo);
     body.appendChild(info);
     body.appendChild(tableWrap);
     render();
@@ -3377,6 +3802,7 @@
     if (Number.isFinite(remaining) && remaining <= threshold) return "warn";
     const used = getDisplayWindowCount(serviceKey);
     const limit = getEffectiveLimitForService(serviceKey);
+    if (limit <= 0) return "danger";
     if (used >= limit) return "danger";
     if (used >= Math.max(1, Math.floor(limit * 0.8))) return "warn";
     return "safe";
@@ -3573,7 +3999,7 @@
           window.alert("Invalid hours.");
           return false;
         }
-        lsSet(K_MANUAL_REFRESH_HOURS, String(hours));
+        accountLsSet(K_MANUAL_REFRESH_HOURS, String(hours));
         setStatus("Default refresh hours for all services set to " + hours + "h.");
         refreshUsageOnly();
         return true;
@@ -3627,7 +4053,7 @@
 
     const input = el("input");
     input.type = "number";
-    input.min = "1";
+    input.min = "0";
     input.step = "1";
     input.value = String(currentLimit);
 
@@ -3635,7 +4061,7 @@
     setBtn.className = "primary";
     setBtn.addEventListener("click", closeAndRun(() => {
       const n = Math.round(Number(input.value));
-      if (!Number.isFinite(n) || n <= 0) {
+      if (!Number.isFinite(n) || n < 0) {
         window.alert("Invalid limit.");
         return false;
       }
@@ -3975,8 +4401,10 @@
     const header = el("div");
     header.className = "gqp-header";
 
-    const title = el("div", { textContent: "Grok Usage" });
+    const title = el("div", { textContent: "Grok Usage - " + getAccountDisplayLabel() });
+    title.id = "gqp-main-title";
     title.className = "gqp-title";
+    title.title = "Current account: " + getAccountFullLabel();
 
     const settingsBtn = el("button", { textContent: "⚙️" });
     settingsBtn.className = "gqp-btn gqp-icon-btn";
@@ -4076,6 +4504,7 @@
     panel.appendChild(header);
     panel.appendChild(content);
     document.documentElement.appendChild(panel);
+    updateAccountTitle();
 
     applySavedPos(panel);
     enableDrag(panel, header);
