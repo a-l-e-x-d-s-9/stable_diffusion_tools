@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.13
-// @description  Draggable Grok Imagine usage tracker with dynamic hidden-quota floor, while respecting user-set and learned higher limits.
+// @version      2.0.14
+// @description  Draggable Grok Imagine usage tracker with safer limit overrides, improved quota notifications, and compact quota debug history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
 // @run-at       document-idle
@@ -80,6 +80,7 @@
     pendingSweepTimer: null,
     pendingVideoAttempts: [],
     lastNotifyAt: {},
+    lastNotifyState: {},
     currentAccountId: null,
   };
 
@@ -245,6 +246,7 @@
     S.lastData = null;
     S.lastError = null;
     S.lastNotifyAt = {};
+    S.lastNotifyState = {};
     updateAccountTitle();
     refreshUsageOnly();
     setTimeout(() => {
@@ -874,7 +876,7 @@
         position: fixed;
         left: 14px;
         top: 14px;
-        z-index: 1000001;
+        z-index: 2147483647;
         max-width: min(520px, calc(100vw - 28px));
         background: rgba(20,20,20,0.86);
         color: #ffdf7e;
@@ -2904,6 +2906,31 @@
     limits[serviceKey] = n;
     saveDefaultLimits(limits);
     setExactLimitOverride(serviceKey, true);
+
+    // A manual/user correction must not be blocked by a stale same-day
+    // quotaReached record after the lockout has expired or was cleared.
+    if (!getActiveLimitLock(serviceKey)) {
+      const h = loadHistory();
+      const d = ensureHistoryDay(h, getLocalDayKey());
+      const rec = d.quota && d.quota[serviceKey] ? d.quota[serviceKey] : null;
+      if (rec && rec.quotaReached) {
+        rec.quotaReached = false;
+        rec.lastNextAvailableAt = null;
+        rec.remainingReported = null;
+        rec.lastRemaining = null;
+        d.notes = Array.isArray(d.notes) ? d.notes : [];
+        d.notes.unshift({
+          at: new Date().toISOString(),
+          type: "manual_limit_override",
+          serviceKey,
+          detail: "manual limit set to " + n + "; stale reached-limit state cleared",
+        });
+        d.notes = d.notes.slice(0, 60);
+        saveHistory(h);
+      }
+    }
+
+    recordQuotaDebug(serviceKey, "manual_limit_override", { limit: n, activeLock: !!getActiveLimitLock(serviceKey) });
     refreshUsageOnly();
     setStatus("Default limit for " + serviceTitle(serviceKey) + " set to " + n + ".");
     return true;
@@ -2928,6 +2955,9 @@
   }
 
   function getTodaysReachedLimitForService(serviceKey) {
+    const activeLock = getActiveLimitLock(serviceKey);
+    if (!activeLock) return null;
+
     const h = loadHistory();
     const day = h.days && h.days[getLocalDayKey()] ? h.days[getLocalDayKey()] : null;
     const q = day && day.quota && day.quota[serviceKey] ? day.quota[serviceKey] : null;
@@ -3086,6 +3116,7 @@
         used: { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 },
         moderated: { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 },
         quota: {},
+        quotaDebug: [],
         notes: [],
         note: "",
       };
@@ -3094,6 +3125,7 @@
     d.used = Object.assign({ image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 }, d.used || {});
     d.moderated = Object.assign({ image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 }, d.moderated || {});
     d.note = String(d.note || "");
+    d.quotaDebug = Array.isArray(d.quotaDebug) ? d.quotaDebug.slice(-80) : [];
     d.quota = d.quota && typeof d.quota === "object" && !Array.isArray(d.quota) ? d.quota : {};
     for (const service of SERVICES) {
       if (!d.quota[service.key]) {
@@ -3116,6 +3148,8 @@
           unreportedRemainingFloor: null,
         };
       }
+      if (!Object.prototype.hasOwnProperty.call(d.quota[service.key], "remainingReported")) d.quota[service.key].remainingReported = null;
+      if (!Object.prototype.hasOwnProperty.call(d.quota[service.key], "unreportedRemainingFloor")) d.quota[service.key].unreportedRemainingFloor = null;
     }
     return d;
   }
@@ -3176,6 +3210,20 @@
     saveHistory(h);
   }
 
+  function recordQuotaDebug(serviceKey, type, data) {
+    const h = loadHistory();
+    const d = ensureHistoryDay(h, getLocalDayKey());
+    d.quotaDebug = Array.isArray(d.quotaDebug) ? d.quotaDebug : [];
+    const rec = Object.assign({
+      at: new Date().toISOString(),
+      serviceKey,
+      type: type || "quota_info",
+    }, data || {});
+    d.quotaDebug.unshift(rec);
+    d.quotaDebug = d.quotaDebug.slice(0, 80);
+    saveHistory(h);
+  }
+
   function secondsUntil(value) {
     if (!value) return 0;
     const t = new Date(value).getTime();
@@ -3194,6 +3242,10 @@
       if (!q || typeof q !== "object") continue;
 
       const rec = d.quota[service.key];
+      const prevAvailable = rec.lastAvailable;
+      const prevRemaining = rec.lastRemaining;
+      const prevReached = rec.quotaReached;
+      const prevEstimateForDebug = rec.quotaEstimate;
       const remainingRaw = q.remainingQueries;
       const remaining = remainingRaw == null ? null : Number(remainingRaw);
       const available = !!q.available;
@@ -3207,6 +3259,15 @@
       rec.lastAvailable = available;
       rec.maxWindowUsed = Math.max(Number(rec.maxWindowUsed) || 0, Number(windowUsed) || 0);
       rec.effectiveLimit = Math.max(Number(rec.effectiveLimit) || 0, Number(defaultLimit) || 0, Number(rec.maxWindowUsed) || 0);
+
+      if (prevAvailable !== available) {
+        recordQuotaDebug(service.key, "availability_changed", {
+          from: prevAvailable,
+          to: available,
+          remaining: Number.isFinite(remaining) ? remaining : null,
+          used: windowUsed,
+        });
+      }
 
       if (Number.isFinite(remaining)) {
         rec.remainingReported = true;
@@ -3233,6 +3294,16 @@
             detail: "quota_info estimate changed from " + previousEstimate + " to " + estimated + " (used " + windowUsed + ", remaining " + remaining + ")",
           });
           d.notes = d.notes.slice(0, 60);
+        }
+
+        if (prevRemaining !== remaining || prevEstimateForDebug !== estimated) {
+          recordQuotaDebug(service.key, "remaining_reported", {
+            remaining,
+            used: windowUsed,
+            estimate: estimated,
+            previousEstimate: Number.isFinite(previousEstimate) ? previousEstimate : null,
+            available,
+          });
         }
       } else {
         // Missing remainingQueries is normal until Grok reaches the last few
@@ -3262,6 +3333,19 @@
               detail: "quota_info did not report remaining; raised minimum estimate to at least " + inferredMinimum + " (used " + windowUsed + " + hidden floor " + DEFAULT_UNREPORTED_REMAINING_FLOOR + ")",
             });
             d.notes = d.notes.slice(0, 60);
+            recordQuotaDebug(service.key, "hidden_remaining_floor_raised", {
+              used: windowUsed,
+              inferredMinimum,
+              previousEstimate: Number.isFinite(previousEstimate) ? previousEstimate : null,
+              available,
+            });
+          } else if (available) {
+            recordQuotaDebug(service.key, "hidden_remaining_kept", {
+              used: windowUsed,
+              inferredMinimum,
+              previousEstimate: Number.isFinite(previousEstimate) ? previousEstimate : null,
+              available,
+            });
           }
         }
       }
@@ -3272,6 +3356,14 @@
 
       if (!available || (Number.isFinite(remaining) && remaining <= 0)) {
         if (!rec.quotaReached) rec.limitHits = (Number(rec.limitHits) || 0) + 1;
+        if (!prevReached) {
+          recordQuotaDebug(service.key, "limit_reached_from_quota", {
+            remaining: Number.isFinite(remaining) ? remaining : null,
+            available,
+            used: windowUsed,
+            nextAvailableAt: q.nextAvailableAt || null,
+          });
+        }
         rec.quotaReached = true;
         if (windowUsed > 0) {
           rec.quotaEstimate = Math.max(1, Math.round(Number(windowUsed) || 0));
@@ -3746,7 +3838,7 @@
 
     box.appendChild(linesBox);
     box.appendChild(closeBtn);
-    document.documentElement.appendChild(box);
+    (document.body || document.documentElement).appendChild(box);
     startTimer();
   }
 
@@ -3766,14 +3858,29 @@
       const shouldWarn = q.available === false || (Number.isFinite(remaining) && remaining <= threshold);
       if (!shouldWarn) continue;
 
-      const last = Number(S.lastNotifyAt[service.key] || 0);
-      if (now - last < 60 * 1000) continue;
-      S.lastNotifyAt[service.key] = now;
-
       const wait = q.nextAvailableAt ? secondsUntil(q.nextAvailableAt) : 0;
       const leftText = Number.isFinite(remaining) ? remaining + " left" : "limited";
       const waitText = wait ? " | next in " + fmtDuration(wait) : "";
-      messages.push(service.title + ": " + leftText + waitText);
+      const message = service.title + ": " + leftText + waitText;
+      const state = [leftText, q.nextAvailableAt || "", q.available === false ? "limited" : "low"].join("|");
+      const last = Number(S.lastNotifyAt[service.key] || 0);
+      const lastState = String(S.lastNotifyState[service.key] || "");
+
+      // Do not hide an updated warning just because a previous warning for the
+      // same type appeared within the last minute. Suppress only exact repeats.
+      if (now - last < 60 * 1000 && lastState === state) continue;
+
+      S.lastNotifyAt[service.key] = now;
+      S.lastNotifyState[service.key] = state;
+      messages.push(message);
+      recordQuotaDebug(service.key, "low_quota_notification", {
+        remaining: Number.isFinite(remaining) ? remaining : null,
+        threshold,
+        available: q.available,
+        nextAvailableAt: q.nextAvailableAt || null,
+        message,
+      });
+      recordQuotaInfoNote(service.key, "low_quota_notification", message);
     }
 
     if (messages.length) {
@@ -4689,6 +4796,11 @@
       if (!q || typeof q !== "object") continue;
 
       if (quotaInfoSaysLimited(q)) {
+        recordQuotaDebug(service.key, "quota_info_limited", {
+          remaining: q.remainingQueries == null ? null : Number(q.remainingQueries),
+          available: q.available,
+          nextAvailableAt: q.nextAvailableAt || null,
+        });
         // If the site gives an exact nextAvailableAt, use it as source of truth.
         // Fall back to existing/default estimate only when it is missing.
         recordLimitReachedForService(service.key, sourceLabel || "quota_info remainingQueries 0", {
@@ -4706,6 +4818,10 @@
           const remaining = q.remainingQueries == null ? null : Number(q.remainingQueries);
           const detail = "quota_info says available" + (Number.isFinite(remaining) ? " with " + remaining + " remaining" : "");
           recordQuotaInfoNote(service.key, "quota_available_again", detail);
+          recordQuotaDebug(service.key, "quota_available_again", {
+            remaining: Number.isFinite(remaining) ? remaining : null,
+            available: q.available,
+          });
           unlocked.push(service.title + (Number.isFinite(remaining) ? " (" + remaining + " left)" : ""));
         }
       }
