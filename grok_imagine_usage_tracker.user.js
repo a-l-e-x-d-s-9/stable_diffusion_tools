@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.14
+// @version      2.0.15
 // @description  Draggable Grok Imagine usage tracker with safer limit overrides, improved quota notifications, and compact quota debug history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -2998,6 +2998,21 @@
     return null;
   }
 
+  function getLiveRemainingEstimateForService(serviceKey) {
+    const q = S.lastData && S.lastData[serviceKey] ? S.lastData[serviceKey] : null;
+    if (!q || typeof q !== "object") return null;
+    if (q.available !== true) return null;
+
+    const remaining = q.remainingQueries == null ? null : Number(q.remainingQueries);
+    if (!Number.isFinite(remaining) || remaining < 0) return null;
+
+    // When Grok reports remainingQueries explicitly, use it immediately as:
+    // current counted usage + remainingQueries.
+    // This avoids stale lower estimates such as used+10 when the site already
+    // told us the exact remaining count.
+    return Math.max(0, getWindowCount(serviceKey) + Math.round(remaining));
+  }
+
   function getTodaysQuotaInfoStateForService(serviceKey) {
     const h = loadHistory();
     const day = h.days && h.days[getLocalDayKey()] ? h.days[getLocalDayKey()] : null;
@@ -3017,6 +3032,12 @@
   function getEffectiveLimitForService(serviceKey) {
     const defaults = getDefaultLimits();
     let limit = Number.isFinite(Number(defaults[serviceKey])) ? Number(defaults[serviceKey]) : 0;
+
+    // Live quota_info with explicit remainingQueries should win immediately.
+    // Example: if used is 56 and quota_info says remainingQueries is 16,
+    // show 72 right away instead of a stale used+10 estimate such as 66.
+    const liveRemainingEstimate = getLiveRemainingEstimateForService(serviceKey);
+    if (liveRemainingEstimate != null) return liveRemainingEstimate;
 
     // If the site confirmed today's reached limit, prefer the observed count
     // even if the user/default setting is higher. Example: setting is 30, but
