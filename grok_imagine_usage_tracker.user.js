@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.15
+// @version      2.0.17
 // @description  Draggable Grok Imagine usage tracker with safer limit overrides, improved quota notifications, and compact quota debug history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -82,6 +82,7 @@
     lastNotifyAt: {},
     lastNotifyState: {},
     currentAccountId: null,
+    ownQuotaFetchDepth: 0,
   };
 
   function lsGet(key, fallback) {
@@ -311,7 +312,8 @@
   function formatLocalTime(value) {
     if (!value) return "-";
     try {
-      const d = new Date(value);
+      const t = parseGrokDateMs(value);
+      const d = new Date(Number.isFinite(t) ? t : value);
       if (Number.isNaN(d.getTime())) return String(value);
       return d.toLocaleString([], {
         month: "2-digit",
@@ -2439,9 +2441,18 @@
     return Math.max(0, Math.round((t - Date.now()) / 1000));
   }
 
+  function parseGrokDateMs(value) {
+    if (!value) return NaN;
+    let s = String(value);
+    // Grok can return nanosecond precision, while Date.parse is only
+    // consistently safe with millisecond precision.
+    s = s.replace(/\.(\d{3})\d+(Z|[+-]\d\d:?\d\d)$/i, ".$1$2");
+    return new Date(s).getTime();
+  }
+
   function validFutureIso(value) {
     if (!value) return null;
-    const t = new Date(value).getTime();
+    const t = parseGrokDateMs(value);
     if (!Number.isFinite(t) || t <= Date.now()) return null;
     return new Date(t).toISOString();
   }
@@ -2750,6 +2761,8 @@
       let bodyText = null;
       let hit = null;
       let pendingVideoAttempt = null;
+      const urlText = String(url || "");
+      const isQuotaInfoRequest = urlText.includes("/rest/media/imagine/quota_info");
 
       try {
         if (init && typeof init.body === "string") {
@@ -2787,8 +2800,33 @@
         if (response && response.clone) {
           const txt = await response.clone().text().catch(() => "");
           noteDetectedAccountId(detectAccountIdFromText(txt), "fetch response", { silent: true });
+
+          // Grok itself sometimes refreshes quota_info. Capture those responses too,
+          // so the panel updates when remainingQueries becomes 0 or changes,
+          // even if the user did not click our refresh button.
+          if (isQuotaInfoRequest && !(Number(S.ownQuotaFetchDepth) > 0)) {
+            const quotaData = safeParseJson(txt);
+            if (quotaData && typeof quotaData === "object") {
+              processQuotaInfoData(quotaData, "intercepted quota_info");
+              recordQuotaDebug(null, "intercepted_quota_info_processed", {
+                services: SERVICES
+                  .filter((service) => quotaData[service.key])
+                  .map((service) => {
+                    const q = quotaData[service.key] || {};
+                    return {
+                      key: service.key,
+                      available: q.available,
+                      remaining: q.remainingQueries == null ? null : Number(q.remainingQueries),
+                      nextAvailableAt: q.nextAvailableAt || null,
+                    };
+                  }),
+              });
+            }
+          }
         }
-      } catch (_) {}
+      } catch (e) {
+        console.warn("[GrokUsage] quota_info intercept processing failed:", e);
+      }
 
       if (pendingVideoAttempt) {
         try {
@@ -3247,7 +3285,7 @@
 
   function secondsUntil(value) {
     if (!value) return 0;
-    const t = new Date(value).getTime();
+    const t = parseGrokDateMs(value);
     if (!Number.isFinite(t)) return 0;
     return Math.max(0, Math.round((t - Date.now()) / 1000));
   }
@@ -4854,29 +4892,47 @@
     }
   }
 
+  function processQuotaInfoData(data, sourceLabel, options) {
+    if (!data || typeof data !== "object") return false;
+
+    S.lastData = data;
+    S.lastError = null;
+
+    updateWindowSizesFromQuota(data);
+    recordQuotaHistory(data);
+    applyQuotaInfoLimitLocks(data, sourceLabel || "quota_info");
+    checkQuotaNotifications(data);
+    refreshUsageOnly();
+
+    if (!options || options.renderGrid !== false) {
+      const grid = document.getElementById("gqp-grid");
+      if (grid) renderCards(grid, data);
+    }
+
+    return true;
+  }
+
   async function fetchQuotaInfoAfterLimit(serviceKey) {
     try {
-      const response = await fetch(API_URL, {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "accept": "*/*",
-          "content-type": "application/json",
-        },
-        body: "{}",
-      });
+      S.ownQuotaFetchDepth = (Number(S.ownQuotaFetchDepth) || 0) + 1;
+      let response;
+      try {
+        response = await fetch(API_URL, {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "accept": "*/*",
+            "content-type": "application/json",
+          },
+          body: "{}",
+        });
+      } finally {
+        S.ownQuotaFetchDepth = Math.max(0, (Number(S.ownQuotaFetchDepth) || 0) - 1);
+      }
       if (!response.ok) throw new Error("HTTP " + response.status);
       const data = await response.json();
 
-      S.lastData = data;
-      updateWindowSizesFromQuota(data);
-      recordQuotaHistory(data);
-      applyQuotaInfoLimitLocks(data, "quota_info after limit");
-      checkQuotaNotifications(data);
-      refreshUsageOnly();
-
-      const grid = document.getElementById("gqp-grid");
-      if (grid) renderCards(grid, data);
+      processQuotaInfoData(data, "quota_info after limit");
 
       const q = data && data[serviceKey] ? data[serviceKey] : null;
       if (q && q.nextAvailableAt) {
@@ -4899,31 +4955,29 @@
     setStatus("Loading quota...");
 
     try {
-      const response = await fetch(API_URL, {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "accept": "*/*",
-          "content-type": "application/json",
-        },
-        body: "{}",
-      });
+      S.ownQuotaFetchDepth = (Number(S.ownQuotaFetchDepth) || 0) + 1;
+      let response;
+      try {
+        response = await fetch(API_URL, {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "accept": "*/*",
+            "content-type": "application/json",
+          },
+          body: "{}",
+        });
+      } finally {
+        S.ownQuotaFetchDepth = Math.max(0, (Number(S.ownQuotaFetchDepth) || 0) - 1);
+      }
 
       if (!response.ok) {
         throw new Error("HTTP " + response.status);
       }
 
       const data = await response.json();
-      S.lastData = data;
-      S.lastError = null;
-      updateWindowSizesFromQuota(data);
-      recordQuotaHistory(data);
-      applyQuotaInfoLimitLocks(data, "quota_info");
-      checkQuotaNotifications(data);
-      refreshUsageOnly();
-
-      if (grid) renderCards(grid, data);
-        setStatus("Quota updated.");
+      processQuotaInfoData(data, "quota_info");
+      setStatus("Quota updated.");
     } catch (err) {
       S.lastError = err;
       if (grid) {
