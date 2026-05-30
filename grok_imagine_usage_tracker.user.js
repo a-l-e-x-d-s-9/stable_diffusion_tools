@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.12
-// @description  Draggable Grok Imagine usage tracker with dynamic quota estimation, readable counters, notifications, multi-account history, limits, notes, imports/exports.
+// @version      2.0.13
+// @description  Draggable Grok Imagine usage tracker with dynamic hidden-quota floor, while respecting user-set and learned higher limits.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
 // @run-at       document-idle
@@ -2950,9 +2950,8 @@
 
     // Important: missing remainingQueries in quota_info means "not reported yet",
     // not 0. If Grok says the type is available but does not report remaining,
-    // assume at least DEFAULT_UNREPORTED_REMAINING_FLOOR attempts remain. This
-    // lets the visible limit grow as usage grows, avoiding a false "near limit"
-    // display when the old estimate was too low.
+    // this is only a minimum floor, not an exact limit. Higher user-set or
+    // learned limits must still be respected.
     if (q.remainingReported === false && q.lastAvailable === true && !q.quotaReached) {
       const dynamicEstimate = Math.max(
         Number(q.quotaEstimate) || 0,
@@ -2969,6 +2968,22 @@
     return null;
   }
 
+  function getTodaysQuotaInfoStateForService(serviceKey) {
+    const h = loadHistory();
+    const day = h.days && h.days[getLocalDayKey()] ? h.days[getLocalDayKey()] : null;
+    const q = day && day.quota && day.quota[serviceKey] ? day.quota[serviceKey] : null;
+    if (!q) return null;
+
+    const estimate = getTodaysQuotaInfoEstimateForService(serviceKey);
+    if (estimate == null) return null;
+
+    return {
+      estimate,
+      remainingReported: q.remainingReported === true,
+      hiddenFloor: q.remainingReported === false,
+    };
+  }
+
   function getEffectiveLimitForService(serviceKey) {
     const defaults = getDefaultLimits();
     let limit = Number.isFinite(Number(defaults[serviceKey])) ? Number(defaults[serviceKey]) : 0;
@@ -2980,14 +2995,23 @@
     const todaysReached = getTodaysReachedLimitForService(serviceKey);
     if (todaysReached != null) return todaysReached;
 
-    // quota_info is the best live estimate when remainingQueries is provided:
-    // limit estimate = local rolling-window used + site remaining quota.
-    // This should override stale/default/user estimates for the current day.
-    const todaysQuotaEstimate = getTodaysQuotaInfoEstimateForService(serviceKey);
-    if (todaysQuotaEstimate != null) return todaysQuotaEstimate;
+    const quotaState = getTodaysQuotaInfoStateForService(serviceKey);
 
-    // If the user explicitly edited this service limit, use that value exactly
-    // until quota_info or a reached-limit observation gives a live value.
+    // If remainingQueries is reported, it is precise live quota info:
+    // limit estimate = local rolling-window used + site remaining quota.
+    if (quotaState && quotaState.remainingReported) {
+      return Math.max(0, Math.round(quotaState.estimate));
+    }
+
+    // If remainingQueries is missing, the estimate is only a minimum floor
+    // such as used + 10. Respect higher user-set/default/learned limits, but
+    // raise too-low limits to at least this floor.
+    if (quotaState && quotaState.hiddenFloor) {
+      limit = Math.max(limit, Number(quotaState.estimate) || 0);
+    }
+
+    // If the user explicitly edited this service limit, use that value exactly,
+    // except when the hidden-remaining floor proves it must be higher.
     if (isExactLimitOverride(serviceKey)) {
       return Math.max(0, Math.round(limit));
     }
@@ -3213,8 +3237,8 @@
       } else {
         // Missing remainingQueries is normal until Grok reaches the last few
         // attempts. It does not mean 0. If Grok says available and does not
-        // report remaining, then we know the user is not in the last reported
-        // bucket yet, so the limit must be at least used + 10.
+        // report remaining, the limit must be at least used + 10, but that is
+        // only a minimum floor. Do not overwrite higher user-set/learned limits.
         rec.lastRemaining = rec.lastRemaining == null ? null : rec.lastRemaining;
         rec.remainingReported = false;
         rec.unreportedRemainingFloor = DEFAULT_UNREPORTED_REMAINING_FLOOR;
@@ -3235,7 +3259,7 @@
               at: new Date().toISOString(),
               type: "quota_estimate_raised",
               serviceKey: service.key,
-              detail: "quota_info did not report remaining; raised estimate to at least " + inferredMinimum + " (used " + windowUsed + " + hidden floor " + DEFAULT_UNREPORTED_REMAINING_FLOOR + ")",
+              detail: "quota_info did not report remaining; raised minimum estimate to at least " + inferredMinimum + " (used " + windowUsed + " + hidden floor " + DEFAULT_UNREPORTED_REMAINING_FLOOR + ")",
             });
             d.notes = d.notes.slice(0, 60);
           }
