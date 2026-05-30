@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.11
-// @description  Draggable Grok Imagine usage tracker with readable counters, notifications, multi-account usage tracking with per-account history, limits, notes, imports/exports, and usage history.
+// @version      2.0.12
+// @description  Draggable Grok Imagine usage tracker with dynamic quota estimation, readable counters, notifications, multi-account history, limits, notes, imports/exports.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
 // @run-at       document-idle
@@ -57,6 +57,7 @@
   const DEFAULT_BACKUP_REMINDER_DAYS = 14;
   const DEFAULT_NOTIFY_THRESHOLD = 5;
   const DEFAULT_NOTIFY_DURATION_SECONDS = 5;
+  const DEFAULT_UNREPORTED_REMAINING_FLOOR = 10;
   const DEFAULT_QUOTA_LIMITS = { image: 600, imagePro: 72, imageEdit: 36, video: 30, video720p: 20 };
 
   const SERVICES = [
@@ -2948,7 +2949,18 @@
     if (!q) return null;
 
     // Important: missing remainingQueries in quota_info means "not reported yet",
-    // not 0. Do not let Number(null) become 0 and collapse full quotas to 0/0.
+    // not 0. If Grok says the type is available but does not report remaining,
+    // assume at least DEFAULT_UNREPORTED_REMAINING_FLOOR attempts remain. This
+    // lets the visible limit grow as usage grows, avoiding a false "near limit"
+    // display when the old estimate was too low.
+    if (q.remainingReported === false && q.lastAvailable === true && !q.quotaReached) {
+      const dynamicEstimate = Math.max(
+        Number(q.quotaEstimate) || 0,
+        getWindowCount(serviceKey) + (Number(q.unreportedRemainingFloor) || DEFAULT_UNREPORTED_REMAINING_FLOOR)
+      );
+      return Math.max(0, Math.round(dynamicEstimate));
+    }
+
     if (q.quotaEstimate == null) return null;
 
     const estimate = Number(q.quotaEstimate);
@@ -3076,6 +3088,8 @@
           lastObservedAt: null,
           maxWindowUsed: 0,
           effectiveLimit: null,
+          remainingReported: null,
+          unreportedRemainingFloor: null,
         };
       }
     }
@@ -3171,6 +3185,8 @@
       rec.effectiveLimit = Math.max(Number(rec.effectiveLimit) || 0, Number(defaultLimit) || 0, Number(rec.maxWindowUsed) || 0);
 
       if (Number.isFinite(remaining)) {
+        rec.remainingReported = true;
+        rec.unreportedRemainingFloor = null;
         rec.lastRemaining = remaining;
         rec.minRemaining = rec.minRemaining == null ? remaining : Math.min(Number(rec.minRemaining), remaining);
         rec.maxRemaining = rec.maxRemaining == null ? remaining : Math.max(Number(rec.maxRemaining), remaining);
@@ -3196,8 +3212,34 @@
         }
       } else {
         // Missing remainingQueries is normal until Grok reaches the last few
-        // attempts. It does not mean 0, so keep the previous/default estimate.
+        // attempts. It does not mean 0. If Grok says available and does not
+        // report remaining, then we know the user is not in the last reported
+        // bucket yet, so the limit must be at least used + 10.
         rec.lastRemaining = rec.lastRemaining == null ? null : rec.lastRemaining;
+        rec.remainingReported = false;
+        rec.unreportedRemainingFloor = DEFAULT_UNREPORTED_REMAINING_FLOOR;
+
+        if (available && !rec.quotaReached) {
+          const inferredMinimum = Math.max(
+            0,
+            Math.round((Number(windowUsed) || 0) + DEFAULT_UNREPORTED_REMAINING_FLOOR)
+          );
+          const previousEstimate = rec.quotaEstimate == null ? null : Number(rec.quotaEstimate);
+
+          if (!Number.isFinite(previousEstimate) || previousEstimate < inferredMinimum) {
+            rec.quotaEstimate = inferredMinimum;
+            rec.effectiveLimit = Math.max(Number(rec.effectiveLimit) || 0, inferredMinimum);
+
+            d.notes = Array.isArray(d.notes) ? d.notes : [];
+            d.notes.unshift({
+              at: new Date().toISOString(),
+              type: "quota_estimate_raised",
+              serviceKey: service.key,
+              detail: "quota_info did not report remaining; raised estimate to at least " + inferredMinimum + " (used " + windowUsed + " + hidden floor " + DEFAULT_UNREPORTED_REMAINING_FLOOR + ")",
+            });
+            d.notes = d.notes.slice(0, 60);
+          }
+        }
       }
 
       if (Number.isFinite(windowSec) && windowSec > 0) rec.windowSizeSeconds = windowSec;
