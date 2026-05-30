@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.7
+// @version      2.0.9
 // @description  Draggable Grok Imagine usage tracker with readable counters, notifications, multi-account usage tracking with per-account history, limits, notes, imports/exports, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -1463,6 +1463,8 @@
       day: getLocalDayKey(),
       total: { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 },
       today: { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 },
+      totalModerated: { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 },
+      todayModerated: { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 },
       windowSeconds: { image: 86400, imagePro: 7200, imageEdit: 86400, video: 7200, video720p: 7200 },
       recent: [],
       events: [],
@@ -1484,6 +1486,8 @@
     const out = Object.assign({}, base, raw);
     out.total = Object.assign({}, base.total, raw.total || {});
     out.today = Object.assign({}, base.today, raw.today || {});
+    out.totalModerated = Object.assign({}, base.totalModerated, raw.totalModerated || {});
+    out.todayModerated = Object.assign({}, base.todayModerated, raw.todayModerated || {});
     out.windowSeconds = Object.assign({}, base.windowSeconds, raw.windowSeconds || {});
     out.recent = Array.isArray(raw.recent) ? raw.recent.slice(-MAX_RECENT_ITEMS) : [];
     out.events = Array.isArray(raw.events) ? raw.events.slice(-200) : [];
@@ -1492,11 +1496,14 @@
     if (out.day !== todayKey) {
       out.day = todayKey;
       out.today = Object.assign({}, base.today);
+      out.todayModerated = Object.assign({}, base.todayModerated);
     }
 
     for (const service of SERVICES) {
       out.total[service.key] = Math.max(0, Number(out.total[service.key]) || 0);
       out.today[service.key] = Math.max(0, Number(out.today[service.key]) || 0);
+      out.totalModerated[service.key] = Math.max(0, Number(out.totalModerated[service.key]) || 0);
+      out.todayModerated[service.key] = Math.max(0, Number(out.todayModerated[service.key]) || 0);
       out.windowSeconds[service.key] = Math.max(60, Number(out.windowSeconds[service.key]) || Number(base.windowSeconds[service.key]) || 3600);
     }
 
@@ -1511,6 +1518,8 @@
         lastSeenAt: Number(item.lastSeenAt) || Number(item.firstSeenAt) || Date.now(),
         maxPercentage: Math.max(0, Math.min(100, Number(item.maxPercentage) || 0)),
         counted: !!item.counted,
+        moderated: !!item.moderated,
+        moderatedAt: item.moderatedAt != null ? Number(item.moderatedAt) || null : null,
         countedAt: item.countedAt != null ? Number(item.countedAt) || null : null,
         expiresAt: item.expiresAt != null ? Number(item.expiresAt) || null : null,
       }))
@@ -1534,6 +1543,7 @@
     const u = loadUsage();
     u.day = getLocalDayKey();
     u.today = defaultUsage().today;
+    u.todayModerated = defaultUsage().todayModerated;
     u.events.unshift({ at: new Date().toISOString(), type: "reset_today" });
     u.events = u.events.slice(0, 200);
     saveUsage();
@@ -1595,10 +1605,29 @@
     return Math.max(used, getEffectiveLimitForService(serviceKey));
   }
 
+  function getWindowModeratedCount(serviceKey, usageObj) {
+    const u = usageObj || S.usage || loadUsage();
+    const now = Date.now();
+    let total = 0;
+    for (const item of (u.recent || [])) {
+      if (item.serviceKey !== serviceKey) continue;
+      if (!item.counted || !item.moderated) continue;
+      if (!Number.isFinite(item.expiresAt) || item.expiresAt <= now) continue;
+      total += 1;
+    }
+    return total;
+  }
+
+  function usageLabelWithModerated(used, moderated, limit) {
+    const m = Math.max(0, Number(moderated) || 0);
+    return String(used) + (m > 0 ? "(-" + String(m) + ")" : "") + "/" + String(limit);
+  }
+
   function localUsageLabel(serviceKey) {
     const used = getDisplayWindowCount(serviceKey);
+    const moderated = getWindowModeratedCount(serviceKey);
     const limit = getEffectiveLimitForService(serviceKey);
-    return String(used) + "/" + String(limit);
+    return usageLabelWithModerated(used, moderated, limit);
   }
 
   function refreshUsageOnly() {
@@ -1621,7 +1650,9 @@
     const tv = Number(u.today.video || 0) + Number(u.today.video720p || 0);
     const ai = Number(u.total.image || 0) + Number(u.total.imagePro || 0) + Number(u.total.imageEdit || 0);
     const av = Number(u.total.video || 0) + Number(u.total.video720p || 0);
-    return "Window: " + wi + " images, " + wv + " videos | Today: " + ti + ", " + tv + " | All: " + ai + ", " + av;
+    const mi = getWindowModeratedCount("image", u) + getWindowModeratedCount("imagePro", u) + getWindowModeratedCount("imageEdit", u);
+    const mv = getWindowModeratedCount("video", u) + getWindowModeratedCount("video720p", u);
+    return "Window: " + wi + (mi ? "(-" + mi + ")" : "") + " images, " + wv + (mv ? "(-" + mv + ")" : "") + " videos | Today: " + ti + ", " + tv + " | All: " + ai + ", " + av;
   }
 
   function incrementUsageCounters(u, serviceKey, amount, reason, detail) {
@@ -1637,6 +1668,96 @@
     });
     u.events = u.events.slice(0, 200);
     recordHistoryUsage(serviceKey, n, detail || reason || "");
+  }
+
+  function incrementModeratedCounters(u, serviceKey, amount, reason, detail) {
+    const n = Math.max(1, Number(amount) || 1);
+    u.todayModerated = Object.assign({}, defaultUsage().todayModerated, u.todayModerated || {});
+    u.totalModerated = Object.assign({}, defaultUsage().totalModerated, u.totalModerated || {});
+    u.todayModerated[serviceKey] = (Number(u.todayModerated[serviceKey]) || 0) + n;
+    u.totalModerated[serviceKey] = (Number(u.totalModerated[serviceKey]) || 0) + n;
+    u.events.unshift({
+      at: new Date().toISOString(),
+      serviceKey,
+      amount: n,
+      reason: reason || "moderated",
+      detail: detail || "",
+    });
+    u.events = u.events.slice(0, 200);
+    recordHistoryModerated(serviceKey, n, detail || reason || "");
+  }
+
+  function decrementModeratedCounters(u, serviceKey, amount, reason, detail) {
+    const n = Math.max(1, Number(amount) || 1);
+    u.todayModerated = Object.assign({}, defaultUsage().todayModerated, u.todayModerated || {});
+    u.totalModerated = Object.assign({}, defaultUsage().totalModerated, u.totalModerated || {});
+    u.todayModerated[serviceKey] = Math.max(0, (Number(u.todayModerated[serviceKey]) || 0) - n);
+    u.totalModerated[serviceKey] = Math.max(0, (Number(u.totalModerated[serviceKey]) || 0) - n);
+
+    const idx = (u.events || []).findIndex((event) =>
+      event &&
+      event.serviceKey === serviceKey &&
+      (event.reason === "moderated" || event.reason === "image_moderated" || event.reason === "video_moderated") &&
+      (!detail || event.detail === detail)
+    );
+    if (idx >= 0) u.events.splice(idx, 1);
+
+    const h = loadHistory();
+    const d = ensureHistoryDay(h, getLocalDayKey());
+    d.moderated = Object.assign({ image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 }, d.moderated || {});
+    d.moderated[serviceKey] = Math.max(0, (Number(d.moderated[serviceKey]) || 0) - n);
+    saveHistory(h);
+  }
+
+  function markRecentItemModerated(serviceKey, recentKey, detail) {
+    if (!recentKey) return false;
+    const u = loadUsage();
+    pruneRecentUsage(u);
+
+    const item = (u.recent || []).find((x) => x && x.key === recentKey && x.serviceKey === serviceKey && x.counted);
+    if (!item || item.moderated) return false;
+
+    item.moderated = true;
+    item.moderatedAt = Date.now();
+    incrementModeratedCounters(u, serviceKey, 1, "moderated", detail || item.detail || "");
+    saveUsage();
+    refreshUsageOnly();
+
+    const service = SERVICES.find((x) => x.key === serviceKey);
+    setStatus("Marked 1 " + (service ? service.title : serviceKey) + " as moderated.", "warn");
+    return true;
+  }
+
+  function recordModeratedUsage(serviceKey, amount, detail, recentKey) {
+    const n = Math.max(1, Number(amount) || 1);
+    let marked = 0;
+
+    if (recentKey) {
+      if (markRecentItemModerated(serviceKey, recentKey, detail)) marked += 1;
+    }
+
+    if (marked < n) {
+      const u = loadUsage();
+      pruneRecentUsage(u);
+      const candidates = (u.recent || [])
+        .filter((x) => x && x.serviceKey === serviceKey && x.counted && !x.moderated)
+        .sort((a, b) => Number(b.countedAt || b.firstSeenAt || 0) - Number(a.countedAt || a.firstSeenAt || 0));
+
+      for (const item of candidates) {
+        if (marked >= n) break;
+        item.moderated = true;
+        item.moderatedAt = Date.now();
+        marked += 1;
+      }
+
+      if (marked > 0) {
+        incrementModeratedCounters(u, serviceKey, marked, "moderated", detail || "");
+        saveUsage();
+        refreshUsageOnly();
+      }
+    }
+
+    return marked;
   }
 
   function decrementUsageCounters(u, serviceKey, amount, reason, detail) {
@@ -1677,6 +1798,7 @@
     const n = Math.max(1, Number(amount) || 1);
 
     let removed = 0;
+    let removedModerated = 0;
     u.recent = (u.recent || []).filter((item) => {
       if (
         removed < n &&
@@ -1685,6 +1807,7 @@
         item.counted &&
         item.key === recentKey
       ) {
+        if (item.moderated) removedModerated += 1;
         removed += 1;
         return false;
       }
@@ -1693,6 +1816,7 @@
 
     if (removed > 0) {
       decrementUsageCounters(u, serviceKey, removed, reason, detail);
+      if (removedModerated > 0) decrementModeratedCounters(u, serviceKey, removedModerated, "moderated", detail);
       saveUsage();
       refreshUsageOnly();
       setStatus("Rolled back " + removed + " " + serviceTitle(serviceKey) + " after confirmed quota rejection.", "warn");
@@ -1764,6 +1888,8 @@
         lastSeenAt: now,
         maxPercentage: 100,
         counted: true,
+        moderated: false,
+        moderatedAt: null,
         countedAt: now,
         expiresAt: now + getWindowSeconds(serviceKey, u) * 1000,
       };
@@ -1798,6 +1924,7 @@
     if (!obj || typeof obj !== "object") return "";
     return String(
       obj.id ||
+      obj.image_id ||
       obj.job_id ||
       obj.url ||
       ((obj.request_id || "") + ":" + (obj.order != null ? obj.order : "") + ":" + (obj.grid_index != null ? obj.grid_index : ""))
@@ -1821,8 +1948,12 @@
       )
     ) return { serviceKey: "imageEdit", detail: "image edit" };
 
+    const mode = String(obj && obj.mode || "").toLowerCase();
+
     if (obj && obj.is_pro === true) return { serviceKey: "imagePro", detail: "quality image" };
     if (obj && obj.is_pro === false) return { serviceKey: "image", detail: "speed image" };
+    if (mode.includes("quality") || mode.includes("pro")) return { serviceKey: "imagePro", detail: "quality image" };
+    if (mode.includes("fast") || mode.includes("speed")) return { serviceKey: "image", detail: "speed image" };
     if (model.includes("quality") || model.includes("pro")) return { serviceKey: "imagePro", detail: "quality image" };
     return currentImageServiceFromLastRequest();
   }
@@ -1835,10 +1966,12 @@
     const pct = Math.max(0, Math.min(100, Number(obj.percentage_complete) || 0));
     const inferred = getImageServiceFromPayload(obj);
     const serviceKey = inferred.serviceKey || "image";
+    const isModerated = obj && obj.moderated === true;
     const detail = [
       inferred.detail || "image",
+      isModerated ? "moderated" : "",
       obj.prompt ? String(obj.prompt).slice(0, 80) : "",
-      obj.id || obj.job_id || "",
+      obj.id || obj.image_id || obj.job_id || "",
     ].filter(Boolean).join(" | ");
 
     const u = loadUsage();
@@ -1856,6 +1989,8 @@
         lastSeenAt: now,
         maxPercentage: pct,
         counted: false,
+        moderated: false,
+        moderatedAt: null,
         countedAt: null,
         expiresAt: null,
       };
@@ -1872,13 +2007,24 @@
       countedNow = finalizeRecentItem(u, item, "image_completed", detail, now);
     }
 
+    let moderatedNow = false;
+    if (isModerated && item.counted && !item.moderated) {
+      item.moderated = true;
+      item.moderatedAt = now;
+      incrementModeratedCounters(u, item.serviceKey, 1, "image_moderated", detail);
+      moderatedNow = true;
+    }
+
     u.recent = u.recent.slice(-MAX_RECENT_ITEMS);
     saveUsage();
     refreshUsageOnly();
 
     if (countedNow) {
       const service = SERVICES.find((x) => x.key === item.serviceKey);
-      setStatus("Counted 1 " + (service ? service.title : "image") + " from imagine WebSocket.");
+      setStatus("Counted 1 " + (service ? service.title : "image") + (moderatedNow ? " moderated" : "") + " from imagine WebSocket.");
+    } else if (moderatedNow) {
+      const service = SERVICES.find((x) => x.key === item.serviceKey);
+      setStatus("Marked 1 " + (service ? service.title : "image") + " as moderated.", "warn");
     } else if (!item.counted) {
       setStatus("Pending image detected at " + pct + "% - waiting for final image or timeout.");
     }
@@ -1976,6 +2122,33 @@
     }
   }
 
+  function imageJsonPayloadLooksCountable(obj) {
+    if (!obj || typeof obj !== "object") return false;
+    if (obj.type !== "json") return false;
+
+    const hasImageId = !!(obj.image_id || obj.id || obj.job_id);
+    if (!hasImageId) return false;
+
+    const pct = Number(obj.percentage_complete);
+    const completed = String(obj.current_status || "").toLowerCase() === "completed";
+    const moderated = obj.moderated === true;
+
+    // Moderated image results often arrive as JSON at 100% without a final image/blob.
+    // Count them as usage and mark them moderated.
+    return moderated || completed || pct >= 100;
+  }
+
+  function normalizeImageJsonPayload(obj) {
+    return Object.assign({}, obj, {
+      type: "image",
+      id: obj.id || obj.image_id || obj.job_id || "",
+      job_id: obj.job_id || obj.image_id || obj.id || "",
+      percentage_complete: Number(obj.percentage_complete != null ? obj.percentage_complete : 100),
+      is_alteration: obj.is_alteration || obj.is_image_edit || false,
+      is_image_edit: obj.is_image_edit || false,
+    });
+  }
+
   function handleImagineWsPayload(payload) {
     if (!payload) return;
 
@@ -1998,6 +2171,11 @@
 
     if (obj.type === "image" && obj.blob) {
       rememberImagePayload(obj);
+      return;
+    }
+
+    if (imageJsonPayloadLooksCountable(obj)) {
+      rememberImagePayload(normalizeImageJsonPayload(obj));
       return;
     }
 
@@ -2382,9 +2560,52 @@
     showFloatingNotice(service.title + " limit reached" + (detectedLimit != null ? " at " + detectedLimit : "") + " - renews at " + formatRenewAt(renewAt));
   }
 
+  function payloadLooksModerated(obj) {
+    if (!obj || typeof obj !== "object") return false;
+    if (obj.moderated === true) return true;
+
+    if (Array.isArray(obj)) {
+      return obj.some(payloadLooksModerated);
+    }
+
+    const candidates = [
+      obj.streamingVideoGenerationResponse,
+      obj.videoGenerationResponse,
+      obj.generatedVideo,
+      obj.streamingImageGenerationResponse,
+      obj.imageGenerationResponse,
+      obj.generatedImage,
+      obj.result,
+      obj.response,
+      obj.result && obj.result.response,
+    ];
+
+    for (const candidate of candidates) {
+      if (payloadLooksModerated(candidate)) return true;
+    }
+
+    return false;
+  }
+
+  function payloadTextLooksModerated(text) {
+    const s = String(text || "");
+    if (!s) return false;
+
+    const direct = safeParseJson(s);
+    if (direct && payloadLooksModerated(direct)) return true;
+
+    const lines = s.split(/\r?\n+/).map((line) => line.trim()).filter(Boolean);
+    for (const line of lines) {
+      const parsed = safeParseJson(line);
+      if (parsed && payloadLooksModerated(parsed)) return true;
+    }
+
+    return false;
+  }
+
   async function responseLooksAcceptedForGeneration(response) {
     if (!response) {
-      return { accepted: false, reason: "missing response", quotaLimited: false };
+      return { accepted: false, reason: "missing response", quotaLimited: false, moderated: false };
     }
 
     if (!response.ok) {
@@ -2392,6 +2613,7 @@
         accepted: false,
         reason: "HTTP " + response.status,
         quotaLimited: response.status === 429,
+        moderated: false,
       };
     }
 
@@ -2399,7 +2621,7 @@
     try {
       bodyText = await response.clone().text();
     } catch (_) {
-      return { accepted: true, reason: "HTTP OK, response body unreadable", quotaLimited: false };
+      return { accepted: true, reason: "HTTP OK, response body unreadable", quotaLimited: false, moderated: false };
     }
 
     let obj = null;
@@ -2410,10 +2632,10 @@
     // Only the specific quota/limit response should block counting. Other OK
     // responses, including moderation/failure objects, can still consume quota.
     if (payloadLooksLikeQuotaLimit(obj) || textLooksLikeQuotaLimit(bodyText)) {
-      return { accepted: false, reason: "quota/limit reached", quotaLimited: true };
+      return { accepted: false, reason: "quota/limit reached", quotaLimited: true, moderated: false };
     }
 
-    return { accepted: true, reason: "request accepted", quotaLimited: false };
+    return { accepted: true, reason: "request accepted", quotaLimited: false, moderated: payloadLooksModerated(obj) || payloadTextLooksModerated(bodyText) };
   }
 
   function createPendingVideoAttempt(hit) {
@@ -2479,8 +2701,10 @@
     }
   }
 
-  function markVideoAttemptAccepted(attempt, reason) {
+  function markVideoAttemptAccepted(attempt, result) {
     if (!attempt || attempt.failedAt) return;
+    const reason = result && typeof result === "object" ? result.reason : result;
+    const moderated = !!(result && typeof result === "object" && result.moderated);
     attempt.acceptedAt = Date.now();
 
     if (attempt.countTimer) clearTimeout(attempt.countTimer);
@@ -2489,9 +2713,16 @@
     if (!attempt.counted) {
       recordCountedUsage(attempt.serviceKey, attempt.amount, "video_request_accepted", attempt.detail, attempt.id, "video");
       attempt.counted = true;
+      attempt.countedRecentKey = attempt.id;
       setStatus("Counted accepted video request locally.");
     } else {
       setStatus("Video request accepted; already counted on request.");
+    }
+
+    if (moderated && !attempt.moderated) {
+      const marked = recordModeratedUsage(attempt.serviceKey, attempt.amount, attempt.detail + " | moderated", attempt.countedRecentKey || attempt.id);
+      attempt.moderated = marked > 0;
+      if (marked > 0) setStatus("Marked " + marked + " " + serviceTitle(attempt.serviceKey) + " as moderated.", "warn");
     }
 
     setTimeout(() => {
@@ -2556,7 +2787,7 @@
         try {
           const result = await responseLooksAcceptedForGeneration(response.clone ? response.clone() : response);
           if (result.accepted) {
-            markVideoAttemptAccepted(pendingVideoAttempt, result.reason);
+            markVideoAttemptAccepted(pendingVideoAttempt, result);
           } else {
             markVideoAttemptFailed(pendingVideoAttempt, result.reason, { quotaLimited: !!result.quotaLimited });
           }
@@ -2813,6 +3044,7 @@
       h.days[key] = {
         date: key,
         used: { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 },
+        moderated: { image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 },
         quota: {},
         notes: [],
         note: "",
@@ -2820,6 +3052,7 @@
     }
     const d = h.days[key];
     d.used = Object.assign({ image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 }, d.used || {});
+    d.moderated = Object.assign({ image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 }, d.moderated || {});
     d.note = String(d.note || "");
     d.quota = d.quota && typeof d.quota === "object" && !Array.isArray(d.quota) ? d.quota : {};
     for (const service of SERVICES) {
@@ -2856,6 +3089,26 @@
     d.notes.unshift({
       at: new Date().toISOString(),
       type: "usage",
+      serviceKey,
+      amount: n,
+      detail: detail || "",
+    });
+    d.notes = d.notes.slice(0, 60);
+    saveHistory(h);
+  }
+
+  function recordHistoryModerated(serviceKey, amount, detail) {
+    const service = SERVICES.find((x) => x.key === serviceKey);
+    if (!service) return;
+    const n = Math.max(1, Number(amount) || 1);
+    const h = loadHistory();
+    const d = ensureHistoryDay(h, getLocalDayKey());
+    d.moderated = Object.assign({ image: 0, imagePro: 0, imageEdit: 0, video: 0, video720p: 0 }, d.moderated || {});
+    d.moderated[serviceKey] = (Number(d.moderated[serviceKey]) || 0) + n;
+    d.notes = Array.isArray(d.notes) ? d.notes : [];
+    d.notes.unshift({
+      at: new Date().toISOString(),
+      type: "moderated",
       serviceKey,
       amount: n,
       detail: detail || "",
@@ -3859,8 +4112,10 @@
         const usedCells = ["image", "imagePro", "imageEdit", "video", "video720p"];
         for (const key of usedCells) {
           const value = Number(day.used && day.used[key]) || 0;
+          const moderated = Number(day.moderated && day.moderated[key]) || 0;
           totals[key] += value;
-          const td = el("td", { textContent: String(value) + "/" + getRecentLimitForDay(day, key) });
+          const td = el("td", { textContent: usageLabelWithModerated(value, moderated, getRecentLimitForDay(day, key)) });
+          if (moderated > 0) td.title = value + " counted, " + moderated + " moderated, limit " + getRecentLimitForDay(day, key);
           const q = day.quota && day.quota[key] ? day.quota[key] : null;
           if (q && q.quotaReached) td.className = "gqp-limit-hit";
           tr.appendChild(td);
@@ -3956,9 +4211,10 @@
       badge.className = "gqp-qbadge " + badgeClassForService(service.key, data);
       const title = el("div", { textContent: serviceShort(service.key) });
       title.className = "gqp-qb-title";
-      const main = el("div", { textContent: used + "/" + limit + (lock ? " | " + getRefreshLabel(service.key, getWindowSeconds(service.key)) : " | L" + remaining) });
+      const moderated = getWindowModeratedCount(service.key);
+      const main = el("div", { textContent: usageLabelWithModerated(used, moderated, limit) + (lock ? " | " + getRefreshLabel(service.key, getWindowSeconds(service.key)) : " | L" + remaining) });
       main.className = "gqp-qb-main";
-      badge.title = service.title + " | window used/effective limit: " + used + "/" + limit + (lock ? " | estimated renewal: " + formatLocalTime(lock.renewAt) : " | site left: " + remaining);
+      badge.title = service.title + " | window used/moderated/effective limit: " + used + "/" + moderated + "/" + limit + (lock ? " | estimated renewal: " + formatLocalTime(lock.renewAt) : " | site left: " + remaining);
       badge.appendChild(title);
       badge.appendChild(main);
       box.appendChild(badge);
@@ -4213,6 +4469,7 @@
   function makeCard(service, data) {
     const cls = badgeClassForService(service.key, S.lastData || null);
     const used = localUsageLabel(service.key);
+    const moderatedCount = getWindowModeratedCount(service.key);
     const windowSeconds = data && data.windowSizeSeconds ? Number(data.windowSizeSeconds) : getWindowSeconds(service.key);
     const refreshLabel = getRefreshLabel(service.key, windowSeconds);
     const lock = getActiveLimitLock(service.key);
@@ -4263,7 +4520,7 @@
 
     card.appendChild(title);
     card.appendChild(stats);
-    card.title = service.title + " | current window used/effective limit: " + used + " | refresh: " + refreshLabel + " | click refresh time to edit" + (lock ? " | estimated renewal: " + formatLocalTime(lock.renewAt) : "");
+    card.title = service.title + " | current window used/effective limit: " + used + (moderatedCount ? " | moderated: " + moderatedCount : "") + " | refresh: " + refreshLabel + " | click refresh time to edit" + (lock ? " | estimated renewal: " + formatLocalTime(lock.renewAt) : "");
     return card;
   }
 
