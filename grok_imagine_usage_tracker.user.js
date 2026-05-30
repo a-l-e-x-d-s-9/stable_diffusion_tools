@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.9
+// @version      2.0.10
 // @description  Draggable Grok Imagine usage tracker with readable counters, notifications, multi-account usage tracking with per-account history, limits, notes, imports/exports, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -11,18 +11,6 @@
 
 (function () {
   "use strict";
-
-  /*
-    Converted from:
-    https://github.com/mashiourcse/grok_quota_check_extension
-
-    Safety notes:
-    - No third-party requests.
-    - No cookies permission.
-    - Uses fetch(..., { credentials: "include" }) only to grok.com.
-    - No GM_xmlhttpRequest.
-    - No page scraping.
-  */
 
   const LS_PREFIX = "grok_quota_panel.";
   const K_POS = LS_PREFIX + "pos";
