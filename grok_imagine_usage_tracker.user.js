@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.10
+// @version      2.0.11
 // @description  Draggable Grok Imagine usage tracker with readable counters, notifications, multi-account usage tracking with per-account history, limits, notes, imports/exports, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -11,6 +11,7 @@
 
 (function () {
   "use strict";
+
 
   const LS_PREFIX = "grok_quota_panel.";
   const K_POS = LS_PREFIX + "pos";
@@ -2448,6 +2449,21 @@
     return Number.isFinite(remaining) && remaining <= 0;
   }
 
+  function quotaInfoSaysAvailableNow(q) {
+    if (!q || typeof q !== "object") return false;
+    if (q.available !== true) return false;
+
+    const remaining = q.remainingQueries == null ? null : Number(q.remainingQueries);
+
+    // Missing remainingQueries means Grok is not reporting the exact count yet,
+    // not that remaining is 0. If available is true and remaining is missing,
+    // the service should be treated as usable and any manual/estimated lockout
+    // should be cleared.
+    if (remaining == null) return true;
+
+    return Number.isFinite(remaining) && remaining > 0;
+  }
+
   function formatRenewAt(value) {
     if (!value) return "-";
     try {
@@ -3105,6 +3121,23 @@
     saveHistory(h);
   }
 
+  function recordQuotaInfoNote(serviceKey, type, detail) {
+    const service = SERVICES.find((x) => x.key === serviceKey);
+    if (!service) return;
+
+    const h = loadHistory();
+    const d = ensureHistoryDay(h, getLocalDayKey());
+    d.notes = Array.isArray(d.notes) ? d.notes : [];
+    d.notes.unshift({
+      at: new Date().toISOString(),
+      type: type || "quota_info",
+      serviceKey,
+      detail: detail || "",
+    });
+    d.notes = d.notes.slice(0, 60);
+    saveHistory(h);
+  }
+
   function secondsUntil(value) {
     if (!value) return 0;
     const t = new Date(value).getTime();
@@ -3143,11 +3176,24 @@
         rec.maxRemaining = rec.maxRemaining == null ? remaining : Math.max(Number(rec.maxRemaining), remaining);
 
         const estimated = Math.max(0, Math.round((Number(windowUsed) || 0) + remaining));
+        const previousEstimate = rec.quotaEstimate == null ? null : Number(rec.quotaEstimate);
+
         // quota_info remainingQueries is live data from the site, so use
         // used-so-far + remaining as the current estimate, even when it is
         // lower than a previous/default estimate.
         rec.quotaEstimate = estimated;
         rec.effectiveLimit = estimated;
+
+        if (Number.isFinite(previousEstimate) && previousEstimate !== estimated) {
+          d.notes = Array.isArray(d.notes) ? d.notes : [];
+          d.notes.unshift({
+            at: new Date().toISOString(),
+            type: "quota_estimate_changed",
+            serviceKey: service.key,
+            detail: "quota_info estimate changed from " + previousEstimate + " to " + estimated + " (used " + windowUsed + ", remaining " + remaining + ")",
+          });
+          d.notes = d.notes.slice(0, 60);
+        }
       } else {
         // Missing remainingQueries is normal until Grok reaches the last few
         // attempts. It does not mean 0, so keep the previous/default estimate.
@@ -4570,15 +4616,38 @@
   function applyQuotaInfoLimitLocks(data, sourceLabel) {
     if (!data || typeof data !== "object") return;
 
+    const unlocked = [];
+
     for (const service of SERVICES) {
       const q = data[service.key];
-      if (!quotaInfoSaysLimited(q)) continue;
+      if (!q || typeof q !== "object") continue;
 
-      // If the site gives an exact nextAvailableAt, use it as source of truth.
-      // Fall back to existing/default estimate only when it is missing.
-      recordLimitReachedForService(service.key, sourceLabel || "quota_info remainingQueries 0", {
-        nextAvailableAt: validFutureIso(q.nextAvailableAt) || null,
-      });
+      if (quotaInfoSaysLimited(q)) {
+        // If the site gives an exact nextAvailableAt, use it as source of truth.
+        // Fall back to existing/default estimate only when it is missing.
+        recordLimitReachedForService(service.key, sourceLabel || "quota_info remainingQueries 0", {
+          nextAvailableAt: validFutureIso(q.nextAvailableAt) || null,
+        });
+        continue;
+      }
+
+      if (quotaInfoSaysAvailableNow(q)) {
+        const locks = loadLimitLocks();
+        if (locks[service.key]) {
+          delete locks[service.key];
+          saveLimitLocks(locks);
+
+          const remaining = q.remainingQueries == null ? null : Number(q.remainingQueries);
+          const detail = "quota_info says available" + (Number.isFinite(remaining) ? " with " + remaining + " remaining" : "");
+          recordQuotaInfoNote(service.key, "quota_available_again", detail);
+          unlocked.push(service.title + (Number.isFinite(remaining) ? " (" + remaining + " left)" : ""));
+        }
+      }
+    }
+
+    if (unlocked.length) {
+      setStatus("Quota available again: " + unlocked.join(", ") + ".");
+      showFloatingNotice(["Quota available again:"].concat(unlocked));
     }
   }
 
@@ -4601,6 +4670,7 @@
       recordQuotaHistory(data);
       applyQuotaInfoLimitLocks(data, "quota_info after limit");
       checkQuotaNotifications(data);
+      refreshUsageOnly();
 
       const grid = document.getElementById("gqp-grid");
       if (grid) renderCards(grid, data);
