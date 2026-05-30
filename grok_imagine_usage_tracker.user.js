@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.4
+// @version      2.0.7
 // @description  Draggable Grok Imagine usage tracker with readable counters, notifications, multi-account usage tracking with per-account history, limits, notes, imports/exports, and usage history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -37,6 +37,7 @@
   const K_EXACT_LIMIT_OVERRIDES = LS_PREFIX + "exactLimitOverrides";
   const K_NOTIFY_ENABLED = LS_PREFIX + "notifyEnabled";
   const K_NOTIFY_THRESHOLD = LS_PREFIX + "notifyThreshold";
+  const K_NOTIFY_DURATION_SECONDS = LS_PREFIX + "notifyDurationSeconds";
   const K_NOTIFY_SERVICES = LS_PREFIX + "notifyServices";
   const K_BACKUP_INTERVAL_DAYS = LS_PREFIX + "backupIntervalDays";
   const K_LAST_BACKUP_EXPORT = LS_PREFIX + "lastBackupExportAt";
@@ -66,6 +67,7 @@
   const MAX_HISTORY_DAYS = 3650;
   const DEFAULT_BACKUP_REMINDER_DAYS = 14;
   const DEFAULT_NOTIFY_THRESHOLD = 5;
+  const DEFAULT_NOTIFY_DURATION_SECONDS = 5;
   const DEFAULT_QUOTA_LIMITS = { image: 600, imagePro: 72, imageEdit: 36, video: 30, video720p: 20 };
 
   const SERVICES = [
@@ -884,15 +886,41 @@
         top: 14px;
         z-index: 1000001;
         max-width: min(520px, calc(100vw - 28px));
-        background: rgba(20,20,20,0.78);
+        background: rgba(20,20,20,0.86);
         color: #ffdf7e;
         border: 1px solid rgba(255,220,80,0.35);
         border-radius: 12px;
-        padding: 10px 12px;
+        padding: 10px 38px 10px 12px;
         box-shadow: 0 10px 30px rgba(0,0,0,0.45);
         font: 16px/1.25 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Arial, sans-serif;
         font-weight: 900;
-        pointer-events: none;
+        pointer-events: auto;
+        white-space: normal;
+      }
+      .gqp-floating-notice .gqp-notice-lines {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 5px;
+      }
+      .gqp-floating-notice .gqp-notice-line {
+        display: block;
+      }
+      .gqp-floating-notice .gqp-notice-close {
+        position: absolute;
+        top: 5px;
+        right: 7px;
+        width: 24px;
+        height: 24px;
+        border: 1px solid rgba(255,255,255,0.18);
+        border-radius: 8px;
+        background: rgba(255,255,255,0.08);
+        color: #fff3c4;
+        cursor: pointer;
+        font: 15px/1 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Arial, sans-serif;
+        font-weight: 900;
+      }
+      .gqp-floating-notice .gqp-notice-close:hover {
+        background: rgba(255,255,255,0.16);
       }
       .gqp-history-table tbody tr:nth-child(odd) { background: rgba(255,255,255,0.025); }
       .gqp-history-table tbody tr:hover { background: rgba(74,222,128,0.08); }
@@ -2593,6 +2621,10 @@
     return { image: true, imagePro: true, imageEdit: true, video: true, video720p: true };
   }
 
+  function getNotifyDurationSeconds() {
+    return clamp(parseInt(lsGet(K_NOTIFY_DURATION_SECONDS, String(DEFAULT_NOTIFY_DURATION_SECONDS)), 10), 1, 120);
+  }
+
   function getDefaultLimits() {
     const raw = loadAccountJson(K_DEFAULT_LIMITS, null);
     const out = Object.assign({}, DEFAULT_QUOTA_LIMITS, raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {});
@@ -2674,6 +2706,22 @@
     return null;
   }
 
+  function getTodaysQuotaInfoEstimateForService(serviceKey) {
+    const h = loadHistory();
+    const day = h.days && h.days[getLocalDayKey()] ? h.days[getLocalDayKey()] : null;
+    const q = day && day.quota && day.quota[serviceKey] ? day.quota[serviceKey] : null;
+    if (!q) return null;
+
+    // Important: missing remainingQueries in quota_info means "not reported yet",
+    // not 0. Do not let Number(null) become 0 and collapse full quotas to 0/0.
+    if (q.quotaEstimate == null) return null;
+
+    const estimate = Number(q.quotaEstimate);
+    if (Number.isFinite(estimate) && estimate >= 0) return Math.max(0, Math.round(estimate));
+
+    return null;
+  }
+
   function getEffectiveLimitForService(serviceKey) {
     const defaults = getDefaultLimits();
     let limit = Number.isFinite(Number(defaults[serviceKey])) ? Number(defaults[serviceKey]) : 0;
@@ -2685,8 +2733,14 @@
     const todaysReached = getTodaysReachedLimitForService(serviceKey);
     if (todaysReached != null) return todaysReached;
 
+    // quota_info is the best live estimate when remainingQueries is provided:
+    // limit estimate = local rolling-window used + site remaining quota.
+    // This should override stale/default/user estimates for the current day.
+    const todaysQuotaEstimate = getTodaysQuotaInfoEstimateForService(serviceKey);
+    if (todaysQuotaEstimate != null) return todaysQuotaEstimate;
+
     // If the user explicitly edited this service limit, use that value exactly
-    // until the site confirms a different reached limit for the current day.
+    // until quota_info or a reached-limit observation gives a live value.
     if (isExactLimitOverride(serviceKey)) {
       return Math.max(0, Math.round(limit));
     }
@@ -2714,6 +2768,9 @@
       const maxUsed = Number(q.maxWindowUsed);
       if (Number.isFinite(maxUsed) && maxUsed > 0) return Math.max(1, Math.round(maxUsed));
     }
+
+    const quotaInfoEstimate = Number(q.quotaEstimate);
+    if (Number.isFinite(quotaInfoEstimate) && quotaInfoEstimate >= 0) return Math.max(0, Math.round(quotaInfoEstimate));
 
     return Math.max(
       defaultLimit,
@@ -2844,11 +2901,16 @@
         rec.minRemaining = rec.minRemaining == null ? remaining : Math.min(Number(rec.minRemaining), remaining);
         rec.maxRemaining = rec.maxRemaining == null ? remaining : Math.max(Number(rec.maxRemaining), remaining);
 
-        const estimated = windowUsed + remaining;
-        if (estimated > 0) {
-          rec.quotaEstimate = rec.quotaEstimate == null ? estimated : Math.max(Number(rec.quotaEstimate) || 0, estimated);
-          rec.effectiveLimit = Math.max(Number(rec.effectiveLimit) || 0, Number(rec.quotaEstimate) || 0);
-        }
+        const estimated = Math.max(0, Math.round((Number(windowUsed) || 0) + remaining));
+        // quota_info remainingQueries is live data from the site, so use
+        // used-so-far + remaining as the current estimate, even when it is
+        // lower than a previous/default estimate.
+        rec.quotaEstimate = estimated;
+        rec.effectiveLimit = estimated;
+      } else {
+        // Missing remainingQueries is normal until Grok reaches the last few
+        // attempts. It does not mean 0, so keep the previous/default estimate.
+        rec.lastRemaining = rec.lastRemaining == null ? null : rec.lastRemaining;
       }
 
       if (Number.isFinite(windowSec) && windowSec > 0) rec.windowSizeSeconds = windowSec;
@@ -3109,6 +3171,7 @@
         intervalSeconds: getIntervalSeconds(),
         notifyEnabled: lsGet(K_NOTIFY_ENABLED, "0"),
         notifyThreshold: lsGet(K_NOTIFY_THRESHOLD, String(DEFAULT_NOTIFY_THRESHOLD)),
+        notifyDurationSeconds: getNotifyDurationSeconds(),
         notifyServices: getNotifyServices(),
         backupIntervalDays: getBackupIntervalDays(),
       },
@@ -3188,6 +3251,7 @@
           if (shared.intervalSeconds != null) lsSet(K_INTERVAL, String(clamp(parseInt(shared.intervalSeconds, 10), MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)));
           if (shared.notifyEnabled != null) lsSet(K_NOTIFY_ENABLED, String(shared.notifyEnabled) === "1" ? "1" : "0");
           if (shared.notifyThreshold != null) lsSet(K_NOTIFY_THRESHOLD, String(Math.max(0, parseInt(shared.notifyThreshold, 10) || 0)));
+          if (shared.notifyDurationSeconds != null) lsSet(K_NOTIFY_DURATION_SECONDS, String(clamp(parseInt(shared.notifyDurationSeconds, 10), 1, 120)));
           if (shared.notifyServices) saveNotifyServices(shared.notifyServices);
           if (shared.backupIntervalDays != null) lsSet(K_BACKUP_INTERVAL_DAYS, String(clamp(parseInt(shared.backupIntervalDays, 10), 1, 3650)));
           applyAutoRefresh();
@@ -3279,13 +3343,58 @@
   function showFloatingNotice(text) {
     const old = document.getElementById("gqp-floating-notice");
     if (old) old.remove();
-    const box = el("div", { textContent: text });
+
+    const box = el("div");
     box.id = "gqp-floating-notice";
     box.className = "gqp-floating-notice";
-    document.documentElement.appendChild(box);
-    setTimeout(() => {
+
+    const lines = Array.isArray(text)
+      ? text
+      : String(text || "").split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+
+    const linesBox = el("div");
+    linesBox.className = "gqp-notice-lines";
+    for (const lineText of (lines.length ? lines : [""])) {
+      const line = el("div", { textContent: lineText });
+      line.className = "gqp-notice-line";
+      linesBox.appendChild(line);
+    }
+
+    const closeBtn = el("button", { textContent: "×" });
+    closeBtn.className = "gqp-notice-close";
+    closeBtn.title = "Close notification";
+
+    let timer = null;
+    const durationMs = Math.max(1000, getNotifyDurationSeconds() * 1000);
+
+    function clearTimer() {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    }
+
+    function startTimer() {
+      clearTimer();
+      timer = setTimeout(() => {
+        if (box && box.isConnected) box.remove();
+      }, durationMs);
+    }
+
+    closeBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      clearTimer();
       if (box && box.isConnected) box.remove();
-    }, 3000);
+    });
+
+    box.addEventListener("mouseenter", clearTimer);
+    box.addEventListener("mouseleave", startTimer);
+
+    box.appendChild(linesBox);
+    box.appendChild(closeBtn);
+    document.documentElement.appendChild(box);
+    startTimer();
   }
 
   function checkQuotaNotifications(data) {
@@ -3294,6 +3403,7 @@
     const threshold = Math.max(0, Number(lsGet(K_NOTIFY_THRESHOLD, String(DEFAULT_NOTIFY_THRESHOLD))) || 0);
     const enabled = getNotifyServices();
     const now = Date.now();
+    const messages = [];
 
     for (const service of SERVICES) {
       if (!enabled[service.key]) continue;
@@ -3302,14 +3412,19 @@
       const remaining = q.remainingQueries == null ? null : Number(q.remainingQueries);
       const shouldWarn = q.available === false || (Number.isFinite(remaining) && remaining <= threshold);
       if (!shouldWarn) continue;
+
       const last = Number(S.lastNotifyAt[service.key] || 0);
       if (now - last < 60 * 1000) continue;
       S.lastNotifyAt[service.key] = now;
+
       const wait = q.nextAvailableAt ? secondsUntil(q.nextAvailableAt) : 0;
       const leftText = Number.isFinite(remaining) ? remaining + " left" : "limited";
       const waitText = wait ? " | next in " + fmtDuration(wait) : "";
-      showFloatingNotice(service.title + ": " + leftText + waitText);
-      break;
+      messages.push(service.title + ": " + leftText + waitText);
+    }
+
+    if (messages.length) {
+      showFloatingNotice(messages);
     }
   }
 
@@ -3470,6 +3585,16 @@
     thresholdInput.value = lsGet(K_NOTIFY_THRESHOLD, String(DEFAULT_NOTIFY_THRESHOLD));
     thresholdLabel.appendChild(thresholdInput);
 
+    const notifyDurationLabel = el("label");
+    notifyDurationLabel.appendChild(el("span", { textContent: "popup seconds" }));
+    const notifyDurationInput = el("input");
+    notifyDurationInput.type = "number";
+    notifyDurationInput.min = "1";
+    notifyDurationInput.max = "120";
+    notifyDurationInput.step = "1";
+    notifyDurationInput.value = String(getNotifyDurationSeconds());
+    notifyDurationLabel.appendChild(notifyDurationInput);
+
     const backupLabel = el("label");
     backupLabel.appendChild(el("span", { textContent: "Backup reminder days" }));
     const backupInput = el("input");
@@ -3483,6 +3608,7 @@
     row.appendChild(daysLabel);
     row.appendChild(notifyLabel);
     row.appendChild(thresholdLabel);
+    row.appendChild(notifyDurationLabel);
     row.appendChild(backupLabel);
 
     const autoLabel = el("label");
@@ -3543,7 +3669,7 @@
 
     const info = el("div");
     info.className = "gqp-muted";
-    info.textContent = "Default limits are per account and apply immediately after saving. Use 0 for tiers/types with no quota. Low quota popup appears in the upper-left for 3 seconds.";
+    info.textContent = "Default limits are per account and apply immediately after saving. Use 0 for tiers/types with no quota. Low quota popup duration can be changed here; hovering pauses it, moving out restarts the timer.";
 
     const dangerToggleRow = el("div");
     dangerToggleRow.className = "gqp-modal-row";
@@ -3593,6 +3719,7 @@
       lsSet(K_HISTORY_DAYS, String(n));
       lsSet(K_NOTIFY_ENABLED, notifyCheck.checked ? "1" : "0");
       lsSet(K_NOTIFY_THRESHOLD, String(Math.max(0, parseInt(thresholdInput.value, 10) || 0)));
+      lsSet(K_NOTIFY_DURATION_SECONDS, String(clamp(parseInt(notifyDurationInput.value, 10), 1, 120)));
       lsSet(K_BACKUP_INTERVAL_DAYS, String(clamp(parseInt(backupInput.value, 10), 1, 3650)));
       lsSet(K_AUTO, autoCheckSettings.checked ? "1" : "0");
       lsSet(K_INTERVAL, String(clamp(parseInt(autoEveryInput.value, 10), MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)));
@@ -4275,6 +4402,7 @@
       recordQuotaHistory(data);
       applyQuotaInfoLimitLocks(data, "quota_info");
       checkQuotaNotifications(data);
+      refreshUsageOnly();
 
       if (grid) renderCards(grid, data);
         setStatus("Quota updated.");
