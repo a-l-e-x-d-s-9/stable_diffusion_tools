@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.17
+// @version      2.0.18
 // @description  Draggable Grok Imagine usage tracker with safer limit overrides, improved quota notifications, and compact quota debug history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -5314,6 +5314,92 @@
       createUI();
     }
   }
+
+
+  function adjustTrackedRemainingQuota(serviceKey, delta, reason) {
+    const service = SERVICES.find((x) => x.key === serviceKey);
+    if (!service) return;
+
+    const step = Math.round(Number(delta) || 0);
+    if (!step) return;
+
+    let changed = false;
+    let debugInfo = null;
+
+    if (S.lastData && S.lastData[serviceKey] && typeof S.lastData[serviceKey] === "object") {
+      const q = S.lastData[serviceKey];
+      const remaining = q.remainingQueries == null ? null : Number(q.remainingQueries);
+      if (q.available === true && Number.isFinite(remaining) && remaining >= 0) {
+        const nextRemaining = Math.max(0, remaining + step);
+        if (nextRemaining !== remaining) {
+          q.remainingQueries = nextRemaining;
+          changed = true;
+          debugInfo = {
+            source: "lastData",
+            oldRemaining: remaining,
+            newRemaining: nextRemaining,
+          };
+        }
+      }
+    }
+
+    const h = loadHistory();
+    const d = ensureHistoryDay(h, getLocalDayKey());
+    const rec = d && d.quota ? d.quota[serviceKey] : null;
+    if (rec && rec.remainingReported === true) {
+      const histRemaining = rec.lastRemaining == null ? null : Number(rec.lastRemaining);
+      if (Number.isFinite(histRemaining) && histRemaining >= 0) {
+        const nextHistRemaining = Math.max(0, histRemaining + step);
+        if (nextHistRemaining !== histRemaining) {
+          rec.lastRemaining = nextHistRemaining;
+          rec.minRemaining = rec.minRemaining == null ? nextHistRemaining : Math.min(Number(rec.minRemaining), nextHistRemaining);
+          rec.maxRemaining = rec.maxRemaining == null ? nextHistRemaining : Math.max(Number(rec.maxRemaining), nextHistRemaining);
+
+          const windowUsed = getWindowCount(serviceKey);
+          const est = Math.max(0, Math.round(windowUsed + nextHistRemaining));
+          rec.quotaEstimate = est;
+          rec.effectiveLimit = est;
+          changed = true;
+
+          debugInfo = Object.assign({}, debugInfo || {}, {
+            source: (debugInfo && debugInfo.source ? debugInfo.source + "+history" : "history"),
+            histOldRemaining: histRemaining,
+            histNewRemaining: nextHistRemaining,
+            estimate: est,
+          });
+        }
+      }
+    }
+
+    if (changed) {
+      recordQuotaDebug(serviceKey, step < 0 ? "local_remaining_decrement" : "local_remaining_restore", Object.assign({
+        amount: Math.abs(step),
+        reason: reason || "",
+      }, debugInfo || {}));
+
+      saveHistory(h);
+      if (step < 0) {
+        try { checkQuotaNotifications(S.lastData || null); } catch (_) {}
+      }
+      refreshUsageOnly();
+    }
+  }
+
+  const __grokUsageOrigRecordCountedUsage = recordCountedUsage;
+  recordCountedUsage = function(serviceKey, amount, reason, detail, recentKey, kind) {
+    const result = __grokUsageOrigRecordCountedUsage.apply(this, arguments);
+    const n = Math.max(1, Number(amount) || 1);
+    adjustTrackedRemainingQuota(serviceKey, -n, reason || "counted");
+    return result;
+  };
+
+  const __grokUsageOrigRollbackCountedUsage = rollbackCountedUsage;
+  rollbackCountedUsage = function(serviceKey, amount, reason, detail, recentKey) {
+    const result = __grokUsageOrigRollbackCountedUsage.apply(this, arguments);
+    const n = Math.max(1, Number(amount) || 1);
+    adjustTrackedRemainingQuota(serviceKey, n, reason || "rollback");
+    return result;
+  };
 
   boot();
 })();
