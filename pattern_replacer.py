@@ -11,18 +11,35 @@
 # - Tags: <loop_N>, <rand_int_min_max>, <rand_float_min_max>, <sum_inc interval=... upper=... lower=... order=... count=... dist=... sigma=... min_mult=... max_mult=...>
 
 from __future__ import annotations
-import sys, re, json, random
+import sys, re, json, random, argparse, io, contextlib
 from pathlib import Path
 from decimal import Decimal, getcontext, ROUND_HALF_UP, ROUND_FLOOR
 
-from PyQt6.QtCore import Qt, QTimer, QSignalBlocker
-from PyQt6.QtGui import QAction, QTextOption
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QFileDialog,
-    QScrollArea, QFrame, QToolButton, QSplitter, QSizePolicy, QSpacerItem,
-    QComboBox, QMessageBox, QInputDialog
-)
+try:
+    from PyQt6.QtCore import Qt, QTimer, QSignalBlocker
+    from PyQt6.QtGui import QAction, QTextOption
+    from PyQt6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+        QLabel, QLineEdit, QPlainTextEdit, QPushButton, QFileDialog,
+        QScrollArea, QFrame, QToolButton, QSplitter, QSizePolicy, QSpacerItem,
+        QComboBox, QMessageBox, QInputDialog
+    )
+except Exception:
+    # Headless mode does not need PyQt6. These dummies let the module define UI
+    # classes without importing PyQt6; the UI path still errors clearly below.
+    class _Dummy:
+        def __init__(self, *args, **kwargs): pass
+        def __call__(self, *args, **kwargs): return self
+        def __getattr__(self, _name): return self
+        def __or__(self, _other): return self
+
+    QApplication = None
+    Qt = _Dummy()
+    QTimer = QSignalBlocker = QAction = QTextOption = _Dummy
+    QMainWindow = QWidget = QVBoxLayout = QHBoxLayout = QLabel = QLineEdit = _Dummy
+    QPlainTextEdit = QPushButton = QFileDialog = QScrollArea = QFrame = _Dummy
+    QToolButton = QSplitter = QSizePolicy = QSpacerItem = QComboBox = _Dummy
+    QMessageBox = QInputDialog = _Dummy
 import time, hashlib
 import math
 
@@ -743,6 +760,41 @@ def process_text(src: str) -> str:
     out = _merge_re.sub(lambda m: expand_merge(m), out)
     out = _process_text_no_merge(out)
     return out
+
+def run_headless_cli(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Pattern Replacer headless mode")
+    ap.add_argument("--headless", action="store_true", help="Run without the PyQt UI")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--pattern", help="Pattern text to process")
+    src.add_argument("--pattern-file", help="Read pattern text from a file")
+    ap.add_argument("--output-file", help="Write processed output to this file instead of stdout")
+    ap.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress expansion logs from tags such as sum_inc",
+    )
+    args = ap.parse_args(argv)
+
+    if args.pattern_file:
+        pattern_text = Path(args.pattern_file).read_text(encoding="utf-8")
+    else:
+        pattern_text = str(args.pattern or "")
+
+    log_buffer = io.StringIO()
+    with contextlib.redirect_stdout(log_buffer):
+        out = process_text(pattern_text)
+
+    logs = log_buffer.getvalue()
+    if logs and not args.quiet:
+        print(logs, file=sys.stderr, end="")
+
+    if args.output_file:
+        Path(args.output_file).write_text(out, encoding="utf-8")
+    else:
+        print(out)
+
+    return 0
+
 
 # ------------------------------- UI widgets --------------------------------
 class Collapsible(QWidget):
@@ -1497,6 +1549,11 @@ class MainWindow(QMainWindow):
 
 # --------------------------------- Entrypoint -------------------------------
 if __name__ == "__main__":
+    if "--headless" in sys.argv or "--pattern" in sys.argv or "--pattern-file" in sys.argv:
+        sys.exit(run_headless_cli())
+    if QApplication is None:
+        print("Error: PyQt6 is required for GUI mode. Use --headless for CLI mode.", file=sys.stderr)
+        sys.exit(1)
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()
