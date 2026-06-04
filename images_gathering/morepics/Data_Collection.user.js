@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         pornpics
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.1.1
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.pornpics.com/*
@@ -11,6 +11,7 @@
 // @grant        GM_deleteValue
 // @grant        GM_listValues
 // @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -137,13 +138,22 @@
     }
 
 
-    async function copyToClipboard() {
+    function copyToClipboard() {
         try {
             const storedData = getAllStoredData();
             const dataStrings = JSON.stringify(storedData, null, 2);
-            await navigator.clipboard.writeText(dataStrings);
+
+            GM_setClipboard(dataStrings, {
+                type: "text",
+                mimetype: "text/plain",
+            });
+
+            console.log("Data copied to clipboard");
+            return true;
+
         } catch (err) {
-            console.error("Failed to copy data: ", err);
+            console.error("Failed to copy data:", err);
+            return false;
         }
     }
 
