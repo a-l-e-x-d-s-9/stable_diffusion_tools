@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine Usage Tracker
 // @namespace    alexds9.scripts
-// @version      2.0.18
+// @version      2.0.21
 // @description  Draggable Grok Imagine usage tracker with safer limit overrides, improved quota notifications, and compact quota debug history.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -2106,6 +2106,7 @@
 
   async function inspectImageGenerationResponse(response, hit) {
     if (!response || !hit || isVideoServiceKey(hit.serviceKey)) return;
+    if (!isSafeToReadGenerationResponse(response)) return;
 
     try {
       const text = await response.clone().text();
@@ -2238,7 +2239,20 @@
     );
 
     const hasAttachment = Array.isArray(body.fileAttachments) && body.fileAttachments.length > 0;
-    const isEdit = !!body?.toolOverrides?.imageEdit || lower.includes("imageedit") || lower.includes("image_edit") || (hasAttachment && lower.includes("edit"));
+    const isEdit =
+      modelName.includes("image-edit") ||
+      modelName.includes("image_edit") ||
+      modelName === "imagine-image-edit" ||
+      !!modelMap.imageEditModelConfig ||
+      !!modelMap.imageEditModel ||
+      !!body?.toolOverrides?.imageEdit ||
+      lower.includes("imageedit") ||
+      lower.includes("image-edit") ||
+      lower.includes("image_edit") ||
+      lower.includes("imageeditmodelconfig") ||
+      lower.includes("imageeditmodel") ||
+      lower.includes("imagereferences") ||
+      (hasAttachment && lower.includes("edit"));
     const isQuality =
       modelName.includes("pro") ||
       modelName.includes("quality") ||
@@ -2621,24 +2635,213 @@
     return false;
   }
 
+  function responseContentType(response) {
+    try {
+      return String(response && response.headers && response.headers.get("content-type") || "").toLowerCase();
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function responseContentLength(response) {
+    try {
+      const raw = response && response.headers ? response.headers.get("content-length") : null;
+      const n = raw == null ? NaN : Number(raw);
+      return Number.isFinite(n) ? n : NaN;
+    } catch (_) {
+      return NaN;
+    }
+  }
+
+  function isSmallJsonResponse(response) {
+    const type = responseContentType(response);
+    const len = responseContentLength(response);
+    return type.includes("json") && Number.isFinite(len) && len >= 0 && len <= 8192;
+  }
+
+  function isSafeToReadGenerationResponse(response) {
+    if (!response) return false;
+    if (!response.ok) return true;
+
+    // Successful generation responses can be streaming. Reading/cloning them can
+    // interfere with Grok's own progress UI, so only inspect small JSON bodies.
+    return isSmallJsonResponse(response);
+  }
+
+  function makeVideoModerationTappingResponse(response, attempt) {
+    if (!response || !response.body || !attempt) return response;
+    if (typeof TransformStream === "undefined" || typeof TextDecoder === "undefined") return response;
+
+    let decoder = null;
+    let buffer = "";
+    let detected = false;
+
+    function scanText(text) {
+      if (detected || !text) return;
+      buffer = (buffer + text).slice(-24000);
+
+      // Successful generation responses can be streamed as JSON/SSE-like chunks,
+      // so exact JSON parsing is unreliable across chunk boundaries. This marker
+      // is the moderation signal we need, and this tap is only used on video
+      // generation streams that were already counted by this script.
+      if (/"moderated"\s*:\s*true/i.test(buffer)) {
+        detected = true;
+        try {
+          const marked = recordModeratedUsage(
+            attempt.serviceKey,
+            attempt.amount,
+            (attempt.detail || "video") + " | moderated stream",
+            attempt.countedRecentKey || attempt.id
+          );
+          attempt.moderated = marked > 0;
+          if (marked > 0) {
+            recordQuotaDebug(attempt.serviceKey, "video_moderated_stream_tap", {
+              amount: marked,
+              detail: attempt.detail || "",
+            });
+            setStatus("Marked " + marked + " " + serviceTitle(attempt.serviceKey) + " as moderated from stream.", "warn");
+          }
+        } catch (e) {
+          console.warn("[GrokUsage] video moderation stream tap failed:", e);
+        }
+      }
+    }
+
+    try {
+      decoder = new TextDecoder();
+      const tapped = response.body.pipeThrough(new TransformStream({
+        transform(chunk, controller) {
+          controller.enqueue(chunk);
+          try {
+            if (chunk) scanText(decoder.decode(chunk, { stream: true }));
+          } catch (_) {}
+        },
+        flush(controller) {
+          try {
+            scanText(decoder.decode());
+          } catch (_) {}
+        },
+      }));
+
+      const headers = new Headers(response.headers);
+      return new Response(tapped, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    } catch (e) {
+      console.warn("[GrokUsage] Could not create video moderation stream tap:", e);
+      return response;
+    }
+  }
+
+  function makeImageGenerationTappingResponse(response, hit) {
+    if (!response || !response.body || !hit) return response;
+    if (typeof TransformStream === "undefined" || typeof TextDecoder === "undefined") return response;
+
+    let decoder = null;
+    let buffer = "";
+    let pendingText = "";
+    let processedAny = false;
+
+    function processText(text, flush) {
+      if (!text && !flush) return;
+      pendingText += text || "";
+
+      // Process newline-delimited streaming chunks as they arrive. Keep the
+      // unfinished tail for the next chunk. If the stream is a single JSON blob,
+      // it will be processed on flush.
+      const parts = pendingText.split(/\r?\n/);
+      pendingText = flush ? "" : (parts.pop() || "");
+
+      for (const part of parts) {
+        const line = String(part || "").trim();
+        if (!line) continue;
+        try {
+          handleGenerationResponsePayload(line);
+          processedAny = true;
+        } catch (e) {
+          console.warn("[GrokUsage] image/edit stream line processing failed:", e);
+        }
+      }
+
+      if (flush) {
+        const tail = String(parts.length ? "" : pendingText).trim();
+        const finalText = tail || String(text || "").trim();
+        if (finalText) {
+          try {
+            handleGenerationResponsePayload(finalText);
+            processedAny = true;
+          } catch (e) {
+            console.warn("[GrokUsage] image/edit stream final processing failed:", e);
+          }
+        }
+      }
+
+      // Prevent unbounded memory if the stream has no newlines.
+      if (!flush && pendingText.length > 64000) {
+        buffer = pendingText.slice(-64000);
+        pendingText = buffer;
+      }
+    }
+
+    try {
+      decoder = new TextDecoder();
+      const tapped = response.body.pipeThrough(new TransformStream({
+        transform(chunk, controller) {
+          controller.enqueue(chunk);
+          try {
+            if (chunk) processText(decoder.decode(chunk, { stream: true }), false);
+          } catch (_) {}
+        },
+        flush(controller) {
+          try {
+            processText(decoder.decode(), true);
+            if (processedAny) {
+              recordQuotaDebug(hit.serviceKey, "image_edit_stream_tap_processed", {
+                detail: hit.detail || "",
+              });
+            }
+          } catch (_) {}
+        },
+      }));
+
+      const headers = new Headers(response.headers);
+      return new Response(tapped, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    } catch (e) {
+      console.warn("[GrokUsage] Could not create image/edit stream tap:", e);
+      return response;
+    }
+  }
+
+
   async function responseLooksAcceptedForGeneration(response) {
     if (!response) {
       return { accepted: false, reason: "missing response", quotaLimited: false, moderated: false };
     }
 
-    if (!response.ok) {
-      return {
-        accepted: false,
-        reason: "HTTP " + response.status,
-        quotaLimited: response.status === 429,
-        moderated: false,
-      };
+    if (!isSafeToReadGenerationResponse(response)) {
+      // Do not read/clone successful streaming generation responses. The video
+      // progress UI depends on that stream being consumed only by Grok.
+      return { accepted: true, reason: "request accepted without stream inspection", quotaLimited: false, moderated: false };
     }
 
     let bodyText = "";
     try {
       bodyText = await response.clone().text();
     } catch (_) {
+      if (!response.ok) {
+        return {
+          accepted: false,
+          reason: "HTTP " + response.status,
+          quotaLimited: response.status === 429,
+          moderated: false,
+        };
+      }
       return { accepted: true, reason: "HTTP OK, response body unreadable", quotaLimited: false, moderated: false };
     }
 
@@ -2646,6 +2849,16 @@
     try {
       obj = bodyText ? JSON.parse(bodyText) : null;
     } catch (_) {}
+
+    if (!response.ok) {
+      const quotaLimited = response.status === 429 || payloadLooksLikeQuotaLimit(obj) || textLooksLikeQuotaLimit(bodyText);
+      return {
+        accepted: false,
+        reason: quotaLimited ? "quota/limit reached" : "HTTP " + response.status,
+        quotaLimited,
+        moderated: false,
+      };
+    }
 
     // Only the specific quota/limit response should block counting. Other OK
     // responses, including moderation/failure objects, can still consume quota.
@@ -2798,51 +3011,79 @@
 
       try {
         if (response && response.clone) {
-          const txt = await response.clone().text().catch(() => "");
-          noteDetectedAccountId(detectAccountIdFromText(txt), "fetch response", { silent: true });
+          const shouldReadForQuotaInfo = isQuotaInfoRequest;
+          const shouldReadForAccount =
+            !hit &&
+            !isQuotaInfoRequest &&
+            (!response.ok || isSmallJsonResponse(response));
 
-          // Grok itself sometimes refreshes quota_info. Capture those responses too,
-          // so the panel updates when remainingQueries becomes 0 or changes,
-          // even if the user did not click our refresh button.
-          if (isQuotaInfoRequest && !(Number(S.ownQuotaFetchDepth) > 0)) {
-            const quotaData = safeParseJson(txt);
-            if (quotaData && typeof quotaData === "object") {
-              processQuotaInfoData(quotaData, "intercepted quota_info");
-              recordQuotaDebug(null, "intercepted_quota_info_processed", {
-                services: SERVICES
-                  .filter((service) => quotaData[service.key])
-                  .map((service) => {
-                    const q = quotaData[service.key] || {};
-                    return {
-                      key: service.key,
-                      available: q.available,
-                      remaining: q.remainingQueries == null ? null : Number(q.remainingQueries),
-                      nextAvailableAt: q.nextAvailableAt || null,
-                    };
-                  }),
-              });
+          if (shouldReadForQuotaInfo || shouldReadForAccount) {
+            const txt = await response.clone().text().catch(() => "");
+
+            if (shouldReadForAccount) {
+              noteDetectedAccountId(detectAccountIdFromText(txt), "fetch response", { silent: true });
+            }
+
+            // Grok itself sometimes refreshes quota_info. Capture those responses too,
+            // so the panel updates when remainingQueries becomes 0 or changes,
+            // even if the user did not click our refresh button.
+            if (isQuotaInfoRequest && !(Number(S.ownQuotaFetchDepth) > 0)) {
+              const quotaData = safeParseJson(txt);
+              if (quotaData && typeof quotaData === "object") {
+                processQuotaInfoData(quotaData, "intercepted quota_info");
+                recordQuotaDebug(null, "intercepted_quota_info_processed", {
+                  services: SERVICES
+                    .filter((service) => quotaData[service.key])
+                    .map((service) => {
+                      const q = quotaData[service.key] || {};
+                      return {
+                        key: service.key,
+                        available: q.available,
+                        remaining: q.remainingQueries == null ? null : Number(q.remainingQueries),
+                        nextAvailableAt: q.nextAvailableAt || null,
+                      };
+                    }),
+                });
+              }
             }
           }
         }
       } catch (e) {
-        console.warn("[GrokUsage] quota_info intercept processing failed:", e);
+        console.warn("[GrokUsage] quota_info/account response processing failed:", e);
       }
 
       if (pendingVideoAttempt) {
         try {
-          const result = await responseLooksAcceptedForGeneration(response.clone ? response.clone() : response);
-          if (result.accepted) {
-            markVideoAttemptAccepted(pendingVideoAttempt, result);
+          if (isSafeToReadGenerationResponse(response)) {
+            const result = await responseLooksAcceptedForGeneration(response);
+            if (result.accepted) {
+              markVideoAttemptAccepted(pendingVideoAttempt, result);
+            } else {
+              markVideoAttemptFailed(pendingVideoAttempt, result.reason, { quotaLimited: !!result.quotaLimited });
+            }
           } else {
-            markVideoAttemptFailed(pendingVideoAttempt, result.reason, { quotaLimited: !!result.quotaLimited });
+            // Successful video generation responses are streaming. Do not clone/read
+            // them. Instead, return a pass-through stream that forwards chunks
+            // immediately while scanning for the moderation marker.
+            response = makeVideoModerationTappingResponse(response, pendingVideoAttempt);
+            markVideoAttemptAccepted(pendingVideoAttempt, { reason: "accepted with stream tap", moderated: false });
           }
         } catch (e) {
           console.warn("[GrokUsage] Local counter post-fetch interceptor error:", e);
-          // Fail closed for videos: if we cannot inspect acceptance, do not count immediately.
-          markVideoAttemptFailed(pendingVideoAttempt, "could not verify request acceptance", { quotaLimited: false });
+          // Video was already counted on request. Avoid reading/altering the stream;
+          // only rollback on confirmed quota rejection.
+          markVideoAttemptAccepted(pendingVideoAttempt, { reason: "accepted without response inspection", moderated: false });
         }
       } else if (hit && !isVideoServiceKey(hit.serviceKey)) {
-        inspectImageGenerationResponse(response, hit);
+        if (isSafeToReadGenerationResponse(response)) {
+          inspectImageGenerationResponse(response, hit);
+        } else {
+          // Image edits may now return successful streaming responses instead
+          // of only WebSocket/listen events. Tap the stream pass-through so the
+          // site still receives progress/results while we can count edit outputs
+          // and moderated edit results from the same stream.
+          response = makeImageGenerationTappingResponse(response, hit);
+        }
       }
 
       return response;
