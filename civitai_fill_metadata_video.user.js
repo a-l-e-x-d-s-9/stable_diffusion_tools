@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name         Civitai Meta-Fill Video
 // @namespace    https://civitai.com/
-// @version      0.6.0
+// @version      0.6.4
 // @icon         https://civitai.com/favicon.ico
 // @description  Drag a PNG / JPEG / WEBP into the “Image details” modal → auto-fill Prompt etc.
 // @match        https://civitai.com/*
+// @match        https://www.civitai.com/*
 // @match        https://civitai.green/*
+// @match        https://www.civitai.green/*
 // @match        https://civitai.red/*
+// @match        https://www.civitai.red/*
 // @run-at       document-idle
 // @grant        GM_addStyle
 // @grant        unsafeWindow
@@ -17,9 +20,19 @@
 
 // --- Utility: check if on edit page
 function isOnCivitaiEditPage() {
-    const hostMatch = /^civitai(\.green)?\.com$/.test(location.hostname);
-    const pathMatch = /^\/posts\/[^/]+\/edit(?:\/.*)?$/.test(location.pathname);
-    return hostMatch && pathMatch;
+    const hostMatch = /^(?:www\.)?civitai\.(?:com|green|red)$/.test(location.hostname);
+    if (!hostMatch) return false;
+
+    const isPostEdit = /^\/posts\/[^/]+\/edit(?:\/.*)?$/.test(location.pathname);
+    if (isPostEdit) return true;
+
+    const isModelVersionWizard = /^\/models\/[^/]+\/model-versions\/[^/]+\/wizard$/.test(location.pathname);
+    if (isModelVersionWizard) {
+        const step = new URLSearchParams(location.search).get('step');
+        return step === '3';
+    }
+
+    return false;
 }
 
 // --- Main runner
@@ -38,7 +51,8 @@ function runScriptIfMatch() {
             exports.ExifReader) {
             window.ExifReader = exports.ExifReader;      // create the global
         }
-        const XR = unsafeWindow.ExifReader || ExifReader;
+        const XR = unsafeWindow.ExifReader || window.ExifReader ||
+            (typeof ExifReader !== 'undefined' ? ExifReader : null);
 
         /* ------------------------------------------------------------------ */
         /* 2. block stray navigation when dropping files                      */
@@ -56,29 +70,61 @@ function runScriptIfMatch() {
 
 
         /* ------------------------------------------------------------------ */
-        /* 4. inject drop-zone when the Mantine modal <form> appears          */
+        /* 4. inject drop-zone when the image/video details form appears       */
         /* ------------------------------------------------------------------ */
-        const obs = new MutationObserver(muts => {
-            for (const n of muts.flatMap(m => [...m.addedNodes])) {
-                // New Mantine modal structure
-                const modal = n.nodeType === 1 && n.matches('section[data-modal-content="true"]')
-                ? n : n.querySelector?.('section[data-modal-content="true"]');
+        const DETAIL_FIELD_SELECTORS = [
+            '#input_prompt',
+            '#input_negativePrompt',
+            '#input_steps',
+            '#input_cfgScale',
+            '#input_sampler',
+            '#input_seed',
+            'textarea[name="prompt"]',
+            'textarea[name="negativePrompt"]',
+            'input[name="steps"]',
+            'input[name="cfgScale"]',
+            'input[name="seed"]'
+        ];
 
-                if (modal) {
-                    const form = modal.querySelector('form');
-                    if (form && !form.querySelector('#metaDropZone')) {
-                        injectZone(form);
-                    }
-                }
+        function findDetailsForm() {
+            const modalRoots = [
+                ...document.querySelectorAll('section[data-modal-content="true"], [role="dialog"], [data-portal="true"]')
+            ];
+
+            for (const root of modalRoots) {
+                const form = root.querySelector?.('form');
+                if (form && DETAIL_FIELD_SELECTORS.some(sel => form.querySelector(sel))) return form;
             }
-        });
+
+            return [...document.querySelectorAll('form')].find(form =>
+                DETAIL_FIELD_SELECTORS.some(sel => form.querySelector(sel))
+            ) || null;
+        }
+
+        function tryInjectZone() {
+            if (!isOnCivitaiEditPage()) return;
+            const form = findDetailsForm();
+            if (!form || form.querySelector('#metaDropZone')) return;
+            injectZone(form);
+        }
+
+        const obs = new MutationObserver(() => tryInjectZone());
         obs.observe(document.body, { childList: true, subtree: true });
+        tryInjectZone();
+
+        // Civitai/Mantine sometimes mounts modal internals after the outer node.
+        // Keep probing briefly after script start and after SPA navigation.
+        let injectProbeCount = 0;
+        const injectProbe = setInterval(() => {
+            tryInjectZone();
+            if (++injectProbeCount >= 80) clearInterval(injectProbe);
+        }, 250);
 
         function injectZone(form){
             const dz = document.createElement("div");
             dz.id = "metaDropZone";
             dz.innerHTML = '<input type="file" hidden accept="image/png,image/jpeg,image/webp">' +
-                '<p>📄 Drop generation image here (or click)</p>';
+                '<p>Drop generation image here (or click)</p>';
             form.prepend(dz);
 
             const fi = dz.firstElementChild;
@@ -98,16 +144,16 @@ function runScriptIfMatch() {
         /* ------------------------------------------------------------------ */
         async function handleFile(file, dz){
             const label = dz.querySelector("p");
-            label.textContent = "⏳ reading…";
+            label.textContent = "reading...";
             try {
                 const buf  = await file.arrayBuffer();
                 const meta = await extractMeta(file.type, buf);
-                if (!meta){ label.textContent = "❌ no metadata"; return; }
+                if (!meta){ label.textContent = "no metadata"; return; }
                 fillForm(parseSD(meta));
-                label.textContent = "✅ filled!";
+                label.textContent = "filled!";
             } catch (err){
                 console.error(err);
-                label.textContent = "❌ error";
+                label.textContent = "error";
             }
         }
 
@@ -319,49 +365,74 @@ function runScriptIfMatch() {
         };
 
         function putSelect(selector, value) {
-            const input   = document.querySelector(selector);
+            if (!value) return;
+
+            const input = document.querySelector(selector);
             if (!input) return;
 
-            /* 0 — already correct? */
-            const hidden = input
-            .closest('[role="combobox"]')
-            ?.querySelector('input[type="hidden"][name="sampler"]');
-            if (hidden && hidden.value === value) return;
+            const hidden = document.querySelector('input[type="hidden"][name="sampler"]');
+            if (hidden && hidden.value === value && input.value === value) return;
 
-            /* 1 — focus & **clear** the field */
             input.focus();
+
             setNativeValue(input, '');
             input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
 
-            /* 2 — Arrow-Down opens the menu */
             input.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'ArrowDown', code: 'ArrowDown', which: 40, keyCode: 40, bubbles: true,
+                key: 'ArrowDown',
+                code: 'ArrowDown',
+                which: 40,
+                keyCode: 40,
+                bubbles: true,
+                cancelable: true,
             }));
 
-            /* 3 — type desired sampler text */
             setTimeout(() => {
                 setNativeValue(input, value);
                 input.dispatchEvent(new Event('input', { bubbles: true }));
 
-                /* 4 — poll for the option & click it */
                 let tries = 0;
-                const max = 20;              // 20 × 75 ms ≈ 1.5 s
+                const max = 30;
+
                 const tryClick = () => {
-                    const opts = [...document.querySelectorAll('div[role="option"]')];
-                    const row  = opts.find(o => o.textContent.trim() === value);
+                    const opts = [...document.querySelectorAll('[role="option"]')];
+                    const row = opts.find(o => o.textContent.trim() === value);
+
                     if (row) {
-                        ['pointerdown', 'pointerup', 'click'].forEach(evt =>
-                                                                      row.dispatchEvent(new MouseEvent(evt, { bubbles: true }))
-                                                                     );
-                        console.debug('[Meta-Fill] Sampler selected:', value);
+                        row.scrollIntoView({ block: 'nearest' });
+
+                        row.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+                        row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                        row.click();
+                        row.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                        row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+
+                        setTimeout(() => {
+                            setNativeValue(input, value);
+                            input.dispatchEvent(new Event('input', { bubbles: true }));
+                            input.dispatchEvent(new Event('change', { bubbles: true }));
+
+                            const hiddenNow = document.querySelector('input[type="hidden"][name="sampler"]');
+                            if (hiddenNow) {
+                                setNativeValue(hiddenNow, value);
+                                hiddenNow.dispatchEvent(new Event('input', { bubbles: true }));
+                                hiddenNow.dispatchEvent(new Event('change', { bubbles: true }));
+                            }
+
+                            input.blur();
+                            console.debug('[Meta-Fill] Sampler committed:', value);
+                        }, 80);
+
                     } else if (++tries < max) {
                         setTimeout(tryClick, 75);
                     } else {
                         console.warn('[Meta-Fill] Sampler option not found:', value);
                     }
                 };
+
                 tryClick();
-            }, 120);                       // let Mantine mount the menu first
+            }, 120);
         }
 
 
@@ -395,6 +466,7 @@ let lastUrl = location.href;
 new MutationObserver(() => {
     if (location.href !== lastUrl) {
         lastUrl = location.href;
+        window._metaFillInit = false;
         runScriptIfMatch();
     }
 }).observe(document.body, { childList: true, subtree: true });
