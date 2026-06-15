@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Civitai Video Rating Re-upload Helper
 // @namespace    https://civitai.com/
-// @version      0.1.9
+// @version      0.2.1
 // @icon         https://civitai.com/favicon.ico
-// @description  Re-upload Civitai post videos missing scanner rating while preserving metadata. Safe no-delete version with reload-safe auto mode, hover highlighting, and visible video numbers.
+// @description  Re-upload Civitai post videos missing scanner rating while preserving metadata. Safe no-delete version with reload-safe auto mode, robust rating detection, synced numbering, virtual index correction, and resilient media downloading.
 // @match        https://civitai.com/posts/*/edit*
 // @match        https://www.civitai.com/posts/*/edit*
 // @match        https://civitai.green/posts/*/edit*
@@ -14,6 +14,8 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      image.civitai.com
+// @connect      *.civitai.com
+// @connect      *
 // @connect      civitai.com
 // @connect      civitai.red
 // @connect      civitai.green
@@ -42,6 +44,8 @@
         handled: {},
         deleteAfterUpload: false,
         highlightedRoot: null,
+        highlightedRowKey: null,
+        virtualInsertions: [],
     };
 
     function log(...args) {
@@ -92,11 +96,15 @@
 
         return {
             raw: o,
+            sourceCandidates: [url].filter(Boolean).map(src => ({ src, type: mimeType })),
             id,
             name,
             url,
             postId: numberOrNull(o.postId) ?? postId,
+            baseIndex: index,
             index,
+            serverIndex: index,
+            displayNumber: index + 1,
             mimeType,
             width,
             height,
@@ -343,18 +351,33 @@
         return m ? m[0] : null;
     }
 
-    function bestVideoSource(video) {
-        const candidates = [];
-        const current = video.currentSrc || video.src || video.getAttribute('src') || '';
-        if (current) candidates.push({ src: current, type: video.getAttribute('type') || '' });
-        for (const source of video.querySelectorAll('source')) {
-            const src = source.src || source.getAttribute('src') || '';
-            if (!src) continue;
-            candidates.push({ src, type: source.type || source.getAttribute('type') || '' });
+    function allVideoSources(video) {
+        const out = [];
+        const seen = new Set();
+        function add(src, type) {
+            src = String(src || '').trim();
+            if (!src || seen.has(src)) return;
+            seen.add(src);
+            out.push({ src, type: String(type || '') });
         }
-        const mp4 = candidates.find(c => /mp4/i.test(c.type) || /\.mp4(?:\?|$)/i.test(c.src));
-        const webm = candidates.find(c => /webm/i.test(c.type) || /\.webm(?:\?|$)/i.test(c.src));
-        return mp4 || webm || candidates[0] || { src: '', type: '' };
+        // Prefer explicit <source> entries over currentSrc. currentSrc may point at the
+        // browser-selected source, while the alternate source can still work if one CDN
+        // request fails. Prefer MP4 first because it is usually what Civitai accepts best.
+        for (const source of video.querySelectorAll('source')) {
+            add(source.src || source.getAttribute('src') || '', source.type || source.getAttribute('type') || '');
+        }
+        add(video.currentSrc || video.src || video.getAttribute('src') || '', video.getAttribute('type') || '');
+
+        out.sort((a, b) => {
+            const as = /mp4/i.test(a.type) || /\.mp4(?:\?|$)/i.test(a.src) ? 0 : (/webm/i.test(a.type) || /\.webm(?:\?|$)/i.test(a.src) ? 1 : 2);
+            const bs = /mp4/i.test(b.type) || /\.mp4(?:\?|$)/i.test(b.src) ? 0 : (/webm/i.test(b.type) || /\.webm(?:\?|$)/i.test(b.src) ? 1 : 2);
+            return as - bs;
+        });
+        return out;
+    }
+
+    function bestVideoSource(video) {
+        return allVideoSources(video)[0] || { src: '', type: '' };
     }
 
     function countVideosInside(el) {
@@ -363,6 +386,41 @@
 
     function classText(el) {
         return String(el?.className || '');
+    }
+
+    function exactRatingText(text) {
+        const t = String(text || '').replace(/\s+/g, ' ').trim().toUpperCase();
+        if (/^(PG-13|PG|R|X|XXX)$/.test(t)) return t;
+        return '';
+    }
+
+    function isInsideVotableTag(el) {
+        let n = el;
+        for (let i = 0; n && i < 5; i++, n = n.parentElement) {
+            const cls = classText(n);
+            if (/VotableTag|tag-click:image/i.test(cls + ' ' + String(n.getAttribute?.('data-activity') || ''))) return true;
+        }
+        return false;
+    }
+
+    function ratingInfoFromRoot(root) {
+        if (!root) return { hasRating: false, text: '' };
+        const browsingBadges = [...root.querySelectorAll('[class*="BrowsingLevelBadge"]')]
+            .filter(el => !state.panel?.contains(el));
+        for (const badge of browsingBadges) {
+            const txt = exactRatingText(badge.textContent || '');
+            if (txt) return { hasRating: true, text: txt };
+            const raw = (badge.textContent || '').replace(/\s+/g, ' ').trim();
+            if (raw) return { hasRating: true, text: raw };
+        }
+        const badgeLabels = [...root.querySelectorAll('.mantine-Badge-root .mantine-Badge-label, .mantine-Badge-root')]
+            .filter(el => !state.panel?.contains(el))
+            .filter(el => !isInsideVotableTag(el));
+        for (const el of badgeLabels) {
+            const txt = exactRatingText(el.textContent || '');
+            if (txt) return { hasRating: true, text: txt };
+        }
+        return { hasRating: false, text: '' };
     }
 
     function looksLikeOneMediaCard(el) {
@@ -476,7 +534,8 @@
         const videos = [...document.querySelectorAll('video')];
         let idx = startIndex;
         for (const video of videos) {
-            const best = bestVideoSource(video);
+            const sourceCandidates = allVideoSources(video);
+            const best = sourceCandidates[0] || { src: '', type: '' };
             const src = best.src || '';
             if (!src) continue;
             const id = uuidFromUrl(src);
@@ -487,21 +546,25 @@
             const root = findVideoCardRoot(video);
             const html = root?.outerHTML || '';
             const text = (root?.innerText || '').replace(/\s+/g, ' ').trim();
-            const ratingBadge = root?.querySelector?.('.BrowsingLevelBadge_root__P8TZA') || null;
-            const ratingText = (ratingBadge?.textContent || '').trim();
-            const hasRating = Boolean(ratingBadge) || /\b(PG-13|PG|R|X|XXX)\b/i.test(ratingText);
+            const ratingInfo = ratingInfoFromRoot(root);
+            const ratingText = ratingInfo.text;
+            const hasRating = ratingInfo.hasRating;
             const size = aspectSizeFromCard(root);
             const meta = domMetaFromCard(root, size);
             const mime = best.type || guessMime(src) || 'video/mp4';
             const name = filenameFromUrl(src, id ? `${id}.mp4` : `dom_video_${idx}.mp4`);
 
             out.push({
-                raw: { domOnly: true, src },
+                raw: { domOnly: true, src, sourceCandidates },
+                sourceCandidates,
                 id,
                 name,
                 url: src,
                 postId,
-                index: idx++,
+                baseIndex: idx,
+                index: idx,
+                serverIndex: idx,
+                displayNumber: idx + 1,
                 mimeType: mime,
                 width: size.width,
                 height: size.height,
@@ -515,24 +578,53 @@
                 debugRootVideoCount: countVideosInside(root),
                 domRoot: root,
             });
+            idx++;
         }
         return out;
     }
 
     function collectDomRatingHints() {
         const hints = [];
-        const videos = [...document.querySelectorAll('video, source[type^="video/"]')];
+        const videos = [...document.querySelectorAll('video')];
         for (const video of videos) {
-            const root = video.closest('[data-index], .mantine-Card-root, .mantine-Paper-root, .mantine-Stack-root, .mantine-Group-root') || video.parentElement;
-            const text = (root?.innerText || '').replace(/\s+/g, ' ').trim();
-            const html = root?.outerHTML || '';
+            const root = findVideoCardRoot(video);
+            const info = ratingInfoFromRoot(root);
             hints.push({
-                src: video.currentSrc || video.src || video.getAttribute('src') || '',
-                hasRating: /BrowsingLevelBadge|\b(PG-13|PG|R|X|XXX)\b/i.test(html + ' ' + text),
-                text,
+                src: bestVideoSource(video).src || video.currentSrc || video.src || video.getAttribute('src') || '',
+                hasRating: info.hasRating,
+                ratingText: info.text,
+                text: (root?.innerText || '').replace(/\s+/g, ' ').trim(),
             });
         }
         return hints;
+    }
+
+
+    function virtualIndexDeltaForBaseIndex(baseIndex) {
+        const base = numberOrNull(baseIndex) ?? 0;
+        return (state.virtualInsertions || []).filter(x => (numberOrNull(x.baseIndex) ?? -1) <= base).length;
+    }
+
+    function applyVirtualServerIndexes(mediaList) {
+        for (const m of mediaList) {
+            const base = numberOrNull(m.baseIndex ?? m.index) ?? 0;
+            m.baseIndex = base;
+            m.displayNumber = numberOrNull(m.displayNumber) ?? (base + 1);
+            m.serverIndex = base + virtualIndexDeltaForBaseIndex(base);
+        }
+    }
+
+    function recordVirtualInsertion(media, sentIndex) {
+        const base = numberOrNull(media?.baseIndex ?? media?.index) ?? 0;
+        state.virtualInsertions.push({
+            baseIndex: base,
+            sentIndex: numberOrNull(sentIndex),
+            mediaKey: mediaHandledKey(media),
+            at: new Date().toISOString(),
+        });
+        applyVirtualServerIndexes(state.media || []);
+        renderVideoNumberBadges();
+        renderList();
     }
 
     function rebuildMediaList() {
@@ -557,7 +649,7 @@
         const domHints = collectDomRatingHints();
         for (let i = 0; i < found.length && i < domHints.length; i++) {
             found[i].domHasRating = domHints[i].hasRating;
-            if (domHints[i].hasRating) found[i].missingRating = false;
+            if (domHints[i].hasRating) { found[i].missingRating = false; found[i].ratingText = domHints[i].ratingText || found[i].ratingText || 'rated'; }
             else if (!found[i].ratingText) found[i].missingRating = true;
         }
 
@@ -571,6 +663,7 @@
         }
 
         found.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+        applyVirtualServerIndexes(found);
         for (const media of found) {
             if (!media.missingRating && isHandled(media)) clearHandledFor(media);
         }
@@ -581,7 +674,7 @@
         const handled = found.filter(m => m.missingRating && isHandled(m)).length;
         const actionable = found.filter(m => m.missingRating && !isHandled(m)).length;
         const rated = found.length - missing;
-        setStatus(`Found ${found.length} video candidate(s): ${missing} missing rating (${actionable} actionable, ${handled} already handled), ${rated} already rated.`);
+        setStatus(`Found ${found.length} video candidate(s): ${missing} missing rating (${actionable} actionable, ${handled} already handled), ${rated} already rated. Virtual inserted this page: ${state.virtualInsertions.length}.`);
     }
 
     function setStatus(msg, isError = false) {
@@ -608,7 +701,8 @@
 .cvrRow:hover{outline:1px solid #79a8ff;background:#253044}
 .cvrMediaHighlight{outline:5px solid #4da3ff !important;outline-offset:4px !important;box-shadow:0 0 0 4px rgba(77,163,255,.22),0 0 26px rgba(77,163,255,.9) !important;border-radius:10px !important}
 .cvrNumberRoot{position:relative !important;overflow:visible !important}
-.cvrVideoNumberBadge{position:absolute;left:-13px;top:-13px;z-index:999998;background:#ffd400;color:#111;border:2px solid #111;border-radius:999px;min-width:26px;height:26px;padding:0 7px;display:flex;align-items:center;justify-content:center;font:bold 15px/1 Arial,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.55);pointer-events:none}
+.cvrVideoNumberBadge{position:absolute;left:-13px;top:-13px;z-index:999998;background:#ffd400;color:#111;border:2px solid #111;border-radius:999px;min-width:26px;height:26px;padding:0 7px;display:flex;align-items:center;justify-content:center;font:bold 15px/1 Arial,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.55);cursor:pointer;pointer-events:auto}
+.cvrRowFocused{outline:2px solid #ffd400 !important;background:#3a3317 !important}
 .cvrMeta{font-size:12px;color:#aaa;margin:3px 0;word-break:break-word}
 .cvrPrompt{font-size:12px;color:#c9c9c9;max-height:38px;overflow:hidden;margin:3px 0}
 .cvrActions{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
@@ -660,6 +754,37 @@
         }
     }
 
+    function displayNumberForMedia(media, fallbackZeroBased = 0) {
+        const n = numberOrNull(media?.displayNumber);
+        if (n !== null) return n;
+        const base = numberOrNull(media?.baseIndex ?? media?.index);
+        return base !== null ? base + 1 : fallbackZeroBased + 1;
+    }
+
+    function rowKeyForMedia(media) {
+        return `cvr-row-${mediaFingerprint(media)}`;
+    }
+
+    function focusPanelEntryForMedia(media) {
+        if (!state.body) return;
+        state.showOnlyMissing = false;
+        const cb = state.panel?.querySelector('#cvrOnlyMissing');
+        if (cb) cb.checked = false;
+        renderList();
+        const key = rowKeyForMedia(media);
+        const row = state.body.querySelector(`[data-cvr-row-key="${CSS.escape(key)}"]`);
+        if (row) {
+            state.body.querySelectorAll('.cvrRowFocused').forEach(x => x.classList.remove('cvrRowFocused'));
+            row.classList.add('cvrRowFocused');
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            const n = displayNumberForMedia(media);
+            setStatus(`Focused panel entry for video #${n}.`);
+            setTimeout(() => row.classList.remove('cvrRowFocused'), 4500);
+        } else {
+            setStatus('Panel entry was not found. Try Refresh.', true);
+        }
+    }
+
     function renderVideoNumberBadges() {
         clearVideoNumberBadges();
         const media = [...state.media]
@@ -668,11 +793,16 @@
 
         for (const m of media) {
             const root = m.domRoot;
-            const label = Number.isFinite(Number(m.index)) ? Number(m.index) + 1 : media.indexOf(m) + 1;
+            const label = displayNumberForMedia(m, media.indexOf(m));
             const badge = document.createElement('div');
             badge.className = 'cvrVideoNumberBadge';
             badge.textContent = String(label);
-            badge.title = `Video #${label} (index ${m.index ?? '?'})`;
+            badge.title = `Video #${label} (DOM index ${m.baseIndex ?? m.index ?? '?'}, upload index ${m.serverIndex ?? m.index ?? '?'})`;
+            badge.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                focusPanelEntryForMedia(m);
+            });
             root.classList.add('cvrNumberRoot');
             root.appendChild(badge);
         }
@@ -695,12 +825,15 @@
         rows.forEach((m, i) => {
             const row = document.createElement('div');
             row.className = `cvrRow ${m.missingRating ? 'cvrRowMissing' : ''}`;
+            const rowKey = rowKeyForMedia(m);
+            row.setAttribute('data-cvr-row-key', rowKey);
             const prompt = String(m.meta?.prompt || m.raw?.prompt || '').slice(0, 240);
             const handledText = isHandled(m) ? ' | handled: yes' : '';
             const rating = m.missingRating ? 'missing/unknown' : (m.ratingText || 'rated');
+            const displayNo = displayNumberForMedia(m, i);
             row.innerHTML = `
-<div><b>${escapeHtml(m.name)}</b></div>
-<div class="cvrMeta">index: ${m.index ?? '?'} | id: ${escapeHtml(String(m.id ?? '?'))} | rating: ${escapeHtml(rating)}${handledText}</div>
+<div><b>#${displayNo} — ${escapeHtml(m.name)}</b></div>
+<div class="cvrMeta">video #: ${displayNo} | DOM index: ${m.baseIndex ?? m.index ?? '?'} | upload index: ${m.serverIndex ?? m.index ?? '?'} | id: ${escapeHtml(String(m.id ?? '?'))} | rating: ${escapeHtml(rating)}${handledText}</div>
 <div class="cvrMeta">mime: ${escapeHtml(m.mimeType)} | ${m.width || '?'}x${m.height || '?'} | modelVersionId: ${m.modelVersionId ?? '?'}</div>
 <div class="cvrPrompt">${escapeHtml(prompt || '(no prompt found in captured metadata)')}</div>
 <div class="cvrActions">
@@ -742,7 +875,7 @@
         state.highlightedRoot = root;
         if (scroll) {
             root.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
-            setStatus(`Highlighted video entry: index ${media.index ?? '?'} - ${media.name}`);
+            setStatus(`Highlighted video #${displayNumberForMedia(media)} (upload index ${media.serverIndex ?? media.index ?? '?'}) - ${media.name}`);
         }
     }
 
@@ -751,17 +884,29 @@
     }
 
 
-    function gmFetchBlob(url, onProgress) {
+    function headerFromString(headers, name) {
+        const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp('^' + escaped + ':\\s*(.*)$', 'im');
+        const m = String(headers || '').match(re);
+        return m ? m[1].trim() : '';
+    }
+
+    function gmFetchBlobOnce(url, onProgress, opts = {}) {
         return new Promise((resolve, reject) => {
             if (typeof GM_xmlhttpRequest !== 'function') {
                 reject(new Error('GM_xmlhttpRequest is not available. Reinstall the script and confirm the @grant permission.'));
                 return;
             }
+            const responseType = opts.responseType || 'blob';
             GM_xmlhttpRequest({
                 method: 'GET',
                 url,
-                responseType: 'blob',
-                anonymous: false,
+                responseType,
+                anonymous: opts.anonymous !== false,
+                timeout: 10 * 60 * 1000,
+                headers: {
+                    Accept: 'video/mp4,video/webm,video/*,*/*',
+                },
                 onprogress: (ev) => {
                     if (typeof onProgress === 'function' && ev.lengthComputable) {
                         onProgress(ev.loaded, ev.total);
@@ -772,17 +917,117 @@
                         reject(new Error(`Download failed [${res.status}]: ${String(res.responseText || '').slice(0, 200)}`));
                         return;
                     }
-                    const blob = res.response;
+
+                    const contentType = headerFromString(res.responseHeaders, 'content-type') || guessMime(url) || 'video/mp4';
+                    let blob = null;
+                    if (responseType === 'blob') {
+                        blob = res.response instanceof Blob ? res.response : null;
+                    } else if (responseType === 'arraybuffer') {
+                        blob = res.response instanceof ArrayBuffer ? new Blob([res.response], { type: contentType }) : null;
+                    }
+
                     if (!(blob instanceof Blob)) {
-                        reject(new Error('Downloaded response is not a Blob.'));
+                        reject(new Error(`Downloaded response is not usable as ${responseType}.`));
                         return;
                     }
                     resolve(blob);
                 },
-                onerror: () => reject(new Error('Download failed due to a network error.')),
-                ontimeout: () => reject(new Error('Download timed out.')),
+                onerror: (err) => reject(new Error(`Download network error (${responseType}, anonymous=${opts.anonymous !== false}): ${err?.error || err?.message || 'unknown'}`)),
+                ontimeout: () => reject(new Error(`Download timed out (${responseType}, anonymous=${opts.anonymous !== false}).`)),
+                onabort: () => reject(new Error(`Download aborted (${responseType}, anonymous=${opts.anonymous !== false}).`)),
             });
         });
+    }
+
+    async function fetchBlobFallback(url, onProgress) {
+        // Works only when the CDN sends CORS headers, but it is useful as a fallback
+        // when Tampermonkey/GM_xmlhttpRequest fails on a redirect or large blob.
+        const r = await fetch(url, { method: 'GET', credentials: 'omit', cache: 'no-store' });
+        if (!r.ok) throw new Error(`fetch() download failed [${r.status}]`);
+        const contentLength = Number(r.headers.get('content-length') || 0);
+        if (!r.body || !contentLength) return await r.blob();
+
+        const reader = r.body.getReader();
+        const chunks = [];
+        let loaded = 0;
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            loaded += value.byteLength;
+            if (typeof onProgress === 'function') onProgress(loaded, contentLength);
+        }
+        return new Blob(chunks, { type: r.headers.get('content-type') || guessMime(url) || 'video/mp4' });
+    }
+
+    function buildDownloadUrlCandidates(media) {
+        const raw = media?.raw || {};
+        const sources = [];
+        function add(src) {
+            src = String(src || '').trim();
+            if (!src) return;
+            sources.push(src);
+        }
+
+        for (const item of media?.sourceCandidates || raw.sourceCandidates || []) {
+            add(typeof item === 'string' ? item : item?.src);
+        }
+        add(media?.url);
+        add(raw.src);
+        add(raw.url);
+
+        const out = [];
+        const seen = new Set();
+        for (const src of sources) {
+            const variants = [forceOriginalVideoUrl(src), src];
+            for (const v of variants) {
+                if (!v || seen.has(v)) continue;
+                seen.add(v);
+                out.push(v);
+            }
+        }
+        out.sort((a, b) => {
+            const as = /\.mp4(?:\?|$)/i.test(a) ? 0 : (/\.webm(?:\?|$)/i.test(a) ? 1 : 2);
+            const bs = /\.mp4(?:\?|$)/i.test(b) ? 0 : (/\.webm(?:\?|$)/i.test(b) ? 1 : 2);
+            return as - bs;
+        });
+        return out;
+    }
+
+    async function gmFetchBlob(urlOrUrls, onProgress) {
+        const urls = Array.isArray(urlOrUrls) ? urlOrUrls : [urlOrUrls];
+        const attempts = [];
+        let lastError = null;
+
+        for (const url of urls) {
+            const short = filenameFromUrl(url, url).slice(0, 80);
+            const methods = [
+                ['GM blob anonymous', () => gmFetchBlobOnce(url, onProgress, { responseType: 'blob', anonymous: true })],
+                ['GM arraybuffer anonymous', () => gmFetchBlobOnce(url, onProgress, { responseType: 'arraybuffer', anonymous: true })],
+                ['fetch fallback', () => fetchBlobFallback(url, onProgress)],
+                ['GM blob with cookies', () => gmFetchBlobOnce(url, onProgress, { responseType: 'blob', anonymous: false })],
+                ['GM arraybuffer with cookies', () => gmFetchBlobOnce(url, onProgress, { responseType: 'arraybuffer', anonymous: false })],
+            ];
+            for (const [label, fn] of methods) {
+                try {
+                    setStatus(`Downloading original video via ${label}: ${short}`);
+                    const blob = await fn();
+                    if (blob && blob.size > 0) {
+                        log('download succeeded', { label, url, size: blob.size, type: blob.type });
+                        return { blob, url, method: label };
+                    }
+                    throw new Error('Downloaded video is empty.');
+                } catch (e) {
+                    lastError = e;
+                    attempts.push(`${label} ${short}: ${e.message || e}`);
+                    warn('download attempt failed', { label, url, error: e });
+                    await sleep(400);
+                }
+            }
+        }
+
+        const msg = attempts.slice(-8).join(' | ');
+        throw new Error(`All download attempts failed. Last error: ${lastError?.message || lastError || 'unknown'}. Attempts: ${msg}`);
     }
 
     function forceOriginalVideoUrl(url) {
@@ -803,21 +1048,26 @@
     }
 
     async function reuploadFromExistingUrl(media) {
-        const src = forceOriginalVideoUrl(media.url || media.raw?.src || '');
-        if (!src) throw new Error('This video candidate has no source URL. Use local fallback.');
+        const urls = buildDownloadUrlCandidates(media);
+        if (!urls.length) throw new Error('This video candidate has no source URL. Use local fallback.');
 
-        const originalName = filenameFromUrl(src, media.name || `video_${media.index || 0}.mp4`);
+        const firstUrl = urls[0];
+        const originalName = filenameFromUrl(firstUrl, media.name || `video_${media.index || 0}.mp4`);
         const mime = guessMime(originalName) || media.mimeType || 'video/mp4';
         setStatus(`Downloading original video from Civitai: ${originalName}`);
+        log('download candidates', urls);
 
-        const blob = await gmFetchBlob(src, (loaded, total) => {
+        const result = await gmFetchBlob(urls, (loaded, total) => {
             const pct = total ? Math.round((loaded / total) * 100) : 0;
             setStatus(`Downloading original video: ${pct}% (${Math.round(loaded / 1024 / 1024)} / ${Math.round(total / 1024 / 1024)} MB)`);
         });
+        const blob = result.blob || result;
+        const usedUrl = result.url || firstUrl;
 
         if (!blob.size) throw new Error('Downloaded video is empty.');
-        const file = new File([blob], originalName, { type: blob.type || mime });
-        log('downloaded original video', { name: file.name, size: file.size, type: file.type, src });
+        const usedName = filenameFromUrl(usedUrl, originalName);
+        const file = new File([blob], usedName, { type: blob.type || guessMime(usedName) || mime });
+        log('downloaded original video', { name: file.name, size: file.size, type: file.type, usedUrl, method: result.method });
         await reupload(media, file, { deleteOriginal: false });
     }
 
@@ -920,11 +1170,11 @@
         const modelVersionId = numberOrNull(media.modelVersionId ?? media.raw?.modelVersionId);
         const width = numberOrNull(media.width ?? media.metadata?.width);
         const height = numberOrNull(media.height ?? media.metadata?.height);
-        // Keep the same index value used by the original visible card. In single upload testing,
-        // Civitai inserted the new media directly after that source card. Auto mode processes
-        // from bottom to top so earlier insertions do not shift the index of later originals.
-        const index = numberOrNull(media.index) ?? 0;
-        log('addVideoToPost index placement', { originalIndex: media.index, sentIndex: index, name: file.name });
+        // Use a virtual server index. Civitai updates indexes server-side immediately after addImage,
+        // but the visible edit page does not insert the new video until refresh. This offset prevents
+        // later manual uploads on the stale page from being inserted in the wrong position.
+        const index = numberOrNull(media.serverIndex ?? media.index) ?? 0;
+        log('addVideoToPost index placement', { domIndex: media.baseIndex ?? media.index, serverIndex: media.serverIndex, sentIndex: index, name: file.name, virtualInsertions: state.virtualInsertions });
 
         const jsonPayload = {
             name: file.name,
@@ -1078,9 +1328,11 @@
         setStatus('Completing upload...');
         await completeUpload(initInfo, parts);
         setStatus('Adding replacement video to post...');
+        const sentIndex = numberOrNull(media.serverIndex ?? media.index) ?? 0;
         const res = await addVideoToPost(media, initInfo, file);
         log('post.addImage response', res);
-        markHandled(media, { replacementKey: initInfo.key || null, replacementFile: file.name, deletedOriginal: false });
+        markHandled(media, { replacementKey: initInfo.key || null, replacementFile: file.name, deletedOriginal: false, sentIndex });
+        recordVirtualInsertion(media, sentIndex);
 
         if (false && options.deleteOriginal) {
             const del = await deleteOriginalViaDom(media);
@@ -1126,7 +1378,7 @@
 
             const media = queue[0];
             const currentDone = Number(autoState.completed || 0);
-            setStatus(`Auto all safe: processing one entry, then reloading for fresh server indexes. Done so far: ${currentDone}. Current index: ${media.index ?? '?'} - ${media.name}`);
+            setStatus(`Auto all safe: processing one entry, then reloading for fresh server indexes. Done so far: ${currentDone}. Current video #${displayNumberForMedia(media)} / upload index: ${media.serverIndex ?? media.index ?? '?'} - ${media.name}`);
             highlightMedia(media, true);
             await sleep(600);
             await reuploadFromExistingUrl(media);
