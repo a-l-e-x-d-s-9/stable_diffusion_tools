@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Civitai Video Rating Re-upload Helper
 // @namespace    https://civitai.com/
-// @version      0.2.1
+// @version      0.2.2
 // @icon         https://civitai.com/favicon.ico
-// @description  Re-upload Civitai post videos missing scanner rating while preserving metadata. Safe no-delete version with reload-safe auto mode, robust rating detection, synced numbering, virtual index correction, and resilient media downloading.
+// @description  Re-upload Civitai post videos missing scanner rating while preserving metadata. Safe no-delete version with reload-safe auto mode, robust rating detection, synced numbering, virtual index correction, and resilient chunked media downloading.
 // @match        https://civitai.com/posts/*/edit*
 // @match        https://www.civitai.com/posts/*/edit*
 // @match        https://civitai.green/posts/*/edit*
@@ -891,73 +891,236 @@
         return m ? m[1].trim() : '';
     }
 
-    function gmFetchBlobOnce(url, onProgress, opts = {}) {
+    const DOWNLOAD_STALL_TIMEOUT_MS = 45000;
+    const DOWNLOAD_HARD_TIMEOUT_MS = 8 * 60 * 1000;
+    const DOWNLOAD_RANGE_CHUNK_SIZE = 4 * 1024 * 1024;
+    const DOWNLOAD_RANGE_RETRIES = 3;
+
+    function mb(n) {
+        return Math.round((Number(n) || 0) / 1024 / 1024);
+    }
+
+    function gmRequestBinary(url, opts = {}) {
         return new Promise((resolve, reject) => {
             if (typeof GM_xmlhttpRequest !== 'function') {
                 reject(new Error('GM_xmlhttpRequest is not available. Reinstall the script and confirm the @grant permission.'));
                 return;
             }
-            const responseType = opts.responseType || 'blob';
-            GM_xmlhttpRequest({
-                method: 'GET',
+
+            const method = opts.method || 'GET';
+            const responseType = opts.responseType || 'arraybuffer';
+            const anonymous = opts.anonymous !== false;
+            const headers = Object.assign({
+                Accept: 'video/mp4,video/webm,video/*,*/*',
+            }, opts.headers || {});
+            const onProgress = opts.onProgress;
+            const stallMs = opts.stallMs || DOWNLOAD_STALL_TIMEOUT_MS;
+            const hardMs = opts.hardMs || DOWNLOAD_HARD_TIMEOUT_MS;
+
+            let done = false;
+            let lastActivity = Date.now();
+            let request = null;
+            let hardTimer = null;
+            let stallTimer = null;
+
+            function cleanup() {
+                if (hardTimer) clearTimeout(hardTimer);
+                if (stallTimer) clearInterval(stallTimer);
+                hardTimer = null;
+                stallTimer = null;
+            }
+
+            function finish(fn, value) {
+                if (done) return;
+                done = true;
+                cleanup();
+                fn(value);
+            }
+
+            hardTimer = setTimeout(() => {
+                try { request?.abort?.(); } catch {}
+                finish(reject, new Error(`Download hard-timeout after ${Math.round(hardMs / 1000)}s (${method}, ${responseType}, anonymous=${anonymous}).`));
+            }, hardMs);
+
+            stallTimer = setInterval(() => {
+                if (Date.now() - lastActivity > stallMs) {
+                    try { request?.abort?.(); } catch {}
+                    finish(reject, new Error(`Download stalled for ${Math.round(stallMs / 1000)}s (${method}, ${responseType}, anonymous=${anonymous}).`));
+                }
+            }, 5000);
+
+            request = GM_xmlhttpRequest({
+                method,
                 url,
                 responseType,
-                anonymous: opts.anonymous !== false,
-                timeout: 10 * 60 * 1000,
-                headers: {
-                    Accept: 'video/mp4,video/webm,video/*,*/*',
-                },
+                anonymous,
+                timeout: hardMs,
+                headers,
                 onprogress: (ev) => {
-                    if (typeof onProgress === 'function' && ev.lengthComputable) {
-                        onProgress(ev.loaded, ev.total);
+                    lastActivity = Date.now();
+                    if (typeof onProgress === 'function') {
+                        onProgress(Number(ev.loaded || 0), Number(ev.total || 0), !!ev.lengthComputable);
                     }
                 },
                 onload: (res) => {
-                    if (res.status < 200 || res.status >= 300) {
-                        reject(new Error(`Download failed [${res.status}]: ${String(res.responseText || '').slice(0, 200)}`));
-                        return;
-                    }
-
-                    const contentType = headerFromString(res.responseHeaders, 'content-type') || guessMime(url) || 'video/mp4';
-                    let blob = null;
-                    if (responseType === 'blob') {
-                        blob = res.response instanceof Blob ? res.response : null;
-                    } else if (responseType === 'arraybuffer') {
-                        blob = res.response instanceof ArrayBuffer ? new Blob([res.response], { type: contentType }) : null;
-                    }
-
-                    if (!(blob instanceof Blob)) {
-                        reject(new Error(`Downloaded response is not usable as ${responseType}.`));
-                        return;
-                    }
-                    resolve(blob);
+                    lastActivity = Date.now();
+                    finish(resolve, res);
                 },
-                onerror: (err) => reject(new Error(`Download network error (${responseType}, anonymous=${opts.anonymous !== false}): ${err?.error || err?.message || 'unknown'}`)),
-                ontimeout: () => reject(new Error(`Download timed out (${responseType}, anonymous=${opts.anonymous !== false}).`)),
-                onabort: () => reject(new Error(`Download aborted (${responseType}, anonymous=${opts.anonymous !== false}).`)),
+                onerror: (err) => finish(reject, new Error(`Download network error (${method}, ${responseType}, anonymous=${anonymous}): ${err?.error || err?.message || 'unknown'}`)),
+                ontimeout: () => finish(reject, new Error(`Download timed out (${method}, ${responseType}, anonymous=${anonymous}).`)),
+                onabort: () => finish(reject, new Error(`Download aborted (${method}, ${responseType}, anonymous=${anonymous}).`)),
             });
         });
+    }
+
+    function blobFromGmResponse(res, url, responseType) {
+        const contentType = headerFromString(res.responseHeaders, 'content-type') || guessMime(url) || 'video/mp4';
+        if (responseType === 'blob') {
+            if (res.response instanceof Blob) return res.response;
+            throw new Error('Downloaded response is not usable as blob.');
+        }
+        if (responseType === 'arraybuffer') {
+            if (res.response instanceof ArrayBuffer) return new Blob([res.response], { type: contentType });
+            throw new Error('Downloaded response is not usable as arraybuffer.');
+        }
+        throw new Error(`Unsupported responseType: ${responseType}`);
+    }
+
+    async function gmFetchBlobOnce(url, onProgress, opts = {}) {
+        const responseType = opts.responseType || 'blob';
+        const res = await gmRequestBinary(url, {
+            method: 'GET',
+            responseType,
+            anonymous: opts.anonymous !== false,
+            onProgress,
+        });
+        if (res.status < 200 || res.status >= 300) {
+            throw new Error(`Download failed [${res.status}]: ${String(res.responseText || '').slice(0, 200)}`);
+        }
+        return blobFromGmResponse(res, url, responseType);
+    }
+
+    function parseContentRange(headers) {
+        const cr = headerFromString(headers, 'content-range');
+        const m = cr.match(/bytes\s+(\d+)\s*-\s*(\d+)\s*\/\s*(\d+|\*)/i);
+        if (!m) return null;
+        return {
+            start: Number(m[1]),
+            end: Number(m[2]),
+            total: m[3] === '*' ? null : Number(m[3]),
+            raw: cr,
+        };
+    }
+
+    async function gmFetchRangeOnce(url, start, end, onProgress, opts = {}) {
+        const res = await gmRequestBinary(url, {
+            method: 'GET',
+            responseType: 'arraybuffer',
+            anonymous: opts.anonymous !== false,
+            headers: { Range: `bytes=${start}-${end}` },
+            onProgress,
+            stallMs: opts.stallMs || DOWNLOAD_STALL_TIMEOUT_MS,
+            hardMs: opts.hardMs || DOWNLOAD_HARD_TIMEOUT_MS,
+        });
+        if (res.status !== 206 && res.status !== 200) {
+            throw new Error(`Range download failed [${res.status}]: ${String(res.responseText || '').slice(0, 200)}`);
+        }
+        if (!(res.response instanceof ArrayBuffer)) {
+            throw new Error('Range response is not an ArrayBuffer.');
+        }
+        return res;
+    }
+
+    async function gmFetchBlobRangeChunks(url, onProgress, opts = {}) {
+        const anonymous = opts.anonymous !== false;
+        const contentType = guessMime(url) || 'video/mp4';
+
+        setStatus(`Probing video size for chunked download...`);
+        const probe = await gmFetchRangeOnce(url, 0, 0, (loaded, total, computable) => {
+            if (typeof onProgress === 'function') onProgress(loaded, total, computable);
+        }, { anonymous, stallMs: 30000, hardMs: 90000 });
+
+        // If the CDN ignored Range and returned the whole file, use it.
+        if (probe.status === 200) {
+            const blob = new Blob([probe.response], { type: headerFromString(probe.responseHeaders, 'content-type') || contentType });
+            if (typeof onProgress === 'function') onProgress(blob.size, blob.size, true);
+            return blob;
+        }
+
+        const rangeInfo = parseContentRange(probe.responseHeaders);
+        const total = rangeInfo?.total || Number(headerFromString(probe.responseHeaders, 'content-length') || 0);
+        if (!total || total <= 1) {
+            throw new Error(`Chunked download could not determine total size. Content-Range: ${rangeInfo?.raw || 'missing'}`);
+        }
+
+        const chunks = [];
+        let completed = 0;
+        for (let start = 0, chunkIndex = 1; start < total; start += DOWNLOAD_RANGE_CHUNK_SIZE, chunkIndex++) {
+            const end = Math.min(start + DOWNLOAD_RANGE_CHUNK_SIZE - 1, total - 1);
+            let lastErr = null;
+            for (let attempt = 1; attempt <= DOWNLOAD_RANGE_RETRIES; attempt++) {
+                try {
+                    setStatus(`Downloading original video chunk ${chunkIndex}/${Math.ceil(total / DOWNLOAD_RANGE_CHUNK_SIZE)} (${mb(completed)} / ${mb(total)} MB)...`);
+                    const res = await gmFetchRangeOnce(url, start, end, (loaded) => {
+                        if (typeof onProgress === 'function') onProgress(completed + loaded, total, true);
+                    }, { anonymous, stallMs: 30000, hardMs: 120000 });
+
+                    if (res.status === 200 && start === 0) {
+                        const blob = new Blob([res.response], { type: headerFromString(res.responseHeaders, 'content-type') || contentType });
+                        if (typeof onProgress === 'function') onProgress(blob.size, blob.size, true);
+                        return blob;
+                    }
+
+                    chunks.push(res.response);
+                    completed += res.response.byteLength;
+                    if (typeof onProgress === 'function') onProgress(completed, total, true);
+                    lastErr = null;
+                    break;
+                } catch (e) {
+                    lastErr = e;
+                    warn('chunk download attempt failed', { url, start, end, attempt, error: e });
+                    if (attempt < DOWNLOAD_RANGE_RETRIES) await sleep(800 * attempt);
+                }
+            }
+            if (lastErr) throw lastErr;
+        }
+
+        const blob = new Blob(chunks, { type: contentType });
+        if (!blob.size) throw new Error('Chunked download produced an empty blob.');
+        return blob;
     }
 
     async function fetchBlobFallback(url, onProgress) {
         // Works only when the CDN sends CORS headers, but it is useful as a fallback
         // when Tampermonkey/GM_xmlhttpRequest fails on a redirect or large blob.
-        const r = await fetch(url, { method: 'GET', credentials: 'omit', cache: 'no-store' });
-        if (!r.ok) throw new Error(`fetch() download failed [${r.status}]`);
-        const contentLength = Number(r.headers.get('content-length') || 0);
-        if (!r.body || !contentLength) return await r.blob();
+        const controller = new AbortController();
+        let lastActivity = Date.now();
+        const watchdog = setInterval(() => {
+            if (Date.now() - lastActivity > DOWNLOAD_STALL_TIMEOUT_MS) {
+                try { controller.abort(); } catch {}
+            }
+        }, 5000);
+        try {
+            const r = await fetch(url, { method: 'GET', credentials: 'omit', cache: 'no-store', signal: controller.signal });
+            if (!r.ok) throw new Error(`fetch() download failed [${r.status}]`);
+            const contentLength = Number(r.headers.get('content-length') || 0);
+            if (!r.body || !contentLength) return await r.blob();
 
-        const reader = r.body.getReader();
-        const chunks = [];
-        let loaded = 0;
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-            loaded += value.byteLength;
-            if (typeof onProgress === 'function') onProgress(loaded, contentLength);
+            const reader = r.body.getReader();
+            const chunks = [];
+            let loaded = 0;
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                lastActivity = Date.now();
+                chunks.push(value);
+                loaded += value.byteLength;
+                if (typeof onProgress === 'function') onProgress(loaded, contentLength, true);
+            }
+            return new Blob(chunks, { type: r.headers.get('content-type') || guessMime(url) || 'video/mp4' });
+        } finally {
+            clearInterval(watchdog);
         }
-        return new Blob(chunks, { type: r.headers.get('content-type') || guessMime(url) || 'video/mp4' });
     }
 
     function buildDownloadUrlCandidates(media) {
@@ -1002,11 +1165,13 @@
         for (const url of urls) {
             const short = filenameFromUrl(url, url).slice(0, 80);
             const methods = [
-                ['GM blob anonymous', () => gmFetchBlobOnce(url, onProgress, { responseType: 'blob', anonymous: true })],
+                ['GM chunked anonymous', () => gmFetchBlobRangeChunks(url, onProgress, { anonymous: true })],
+                ['GM chunked with cookies', () => gmFetchBlobRangeChunks(url, onProgress, { anonymous: false })],
+                ['fetch streaming fallback', () => fetchBlobFallback(url, onProgress)],
                 ['GM arraybuffer anonymous', () => gmFetchBlobOnce(url, onProgress, { responseType: 'arraybuffer', anonymous: true })],
-                ['fetch fallback', () => fetchBlobFallback(url, onProgress)],
-                ['GM blob with cookies', () => gmFetchBlobOnce(url, onProgress, { responseType: 'blob', anonymous: false })],
+                ['GM blob anonymous', () => gmFetchBlobOnce(url, onProgress, { responseType: 'blob', anonymous: true })],
                 ['GM arraybuffer with cookies', () => gmFetchBlobOnce(url, onProgress, { responseType: 'arraybuffer', anonymous: false })],
+                ['GM blob with cookies', () => gmFetchBlobOnce(url, onProgress, { responseType: 'blob', anonymous: false })],
             ];
             for (const [label, fn] of methods) {
                 try {
@@ -1058,8 +1223,12 @@
         log('download candidates', urls);
 
         const result = await gmFetchBlob(urls, (loaded, total) => {
-            const pct = total ? Math.round((loaded / total) * 100) : 0;
-            setStatus(`Downloading original video: ${pct}% (${Math.round(loaded / 1024 / 1024)} / ${Math.round(total / 1024 / 1024)} MB)`);
+            if (total) {
+                const pct = Math.round((loaded / total) * 100);
+                setStatus(`Downloading original video: ${pct}% (${mb(loaded)} / ${mb(total)} MB)`);
+            } else {
+                setStatus(`Downloading original video: ${mb(loaded)} MB downloaded...`);
+            }
         });
         const blob = result.blob || result;
         const usedUrl = result.url || firstUrl;
