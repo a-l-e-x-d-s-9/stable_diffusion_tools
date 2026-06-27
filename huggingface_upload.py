@@ -1011,6 +1011,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--threads", type=int, default=None, help="Override threads")
     ap.add_argument("--remove", action="store_true", help="Remove local files after successful uploads to all destinations")
     ap.add_argument("--dry_run", action="store_true", help="Do not perform network operations")
+    ap.add_argument("--no_manifest", action="store_true", help="Do not write hf_upload_manifest_*.json report file")
     ap.add_argument("--verbose", action="store_true", help="Verbose logging")
 
     args = ap.parse_args(argv)
@@ -1120,13 +1121,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             q["token"] = "***REDACTED***"
         safe_plans.append(q)
 
-    out_manifest = f"hf_upload_manifest_{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.json"
-    try:
-        with open(out_manifest, "w", encoding="utf-8") as mf:
-            json.dump({"summary": summary, "plans": safe_plans}, mf, indent=2)
-        logging.info(f"Wrote manifest: {out_manifest}")
-    except Exception as e:
-        logging.warning(f"Failed to write manifest: {e}")
+    no_manifest = bool(args.no_manifest) or os.environ.get("HF_UPLOAD_NO_MANIFEST", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    if no_manifest:
+        logging.info("Manifest/report file disabled; not writing hf_upload_manifest_*.json")
+    else:
+        out_manifest = f"hf_upload_manifest_{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.json"
+        try:
+            with open(out_manifest, "w", encoding="utf-8") as mf:
+                json.dump({"summary": summary, "plans": safe_plans}, mf, indent=2)
+            logging.info(f"Wrote manifest: {out_manifest}")
+        except Exception as e:
+            logging.warning(f"Failed to write manifest: {e}")
 
     # Exit code: non-zero for any failed destination or incomplete plan.
     # Previously this only failed when a file failed in *all* destinations, which
