@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Grok Imagine - Auto Image & Video Downloader
 // @namespace    alexds9.scripts
-// @version      2.6.18
-// @description  Auto-download finals (images & videos); skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page; Ctrl+Shift+S toggle
+// @version      2.7.2
+// @description  Auto-download finals (images & videos); WebSocket listen direct image capture; route-safe reliable queue; skip previews via Grok signature; bind nearest prompt chip; write prompt/info into JPEG EXIF; strong dedupe by Signature + URL(normalized) + SHA1; Force mode per-page
 // @author       Alex
 // @match        https://grok.com/imagine*
+// @run-at       document-start
 // @grant        GM_download
 // @grant        GM_registerMenuCommand
 // @grant        GM_getValue
@@ -12,6 +13,7 @@
 // @grant        GM_notification
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @grant        GM_getResourceText
 // @connect      *
 // @connect      assets.grok.com
@@ -254,6 +256,13 @@ async function headContentLength(u) {
   // Route epoch: bump on SPA navigation to cancel stale watchers/tasks
   let routeEpoch = 0;
 
+  // WebSocket listen fallback:
+  // Grok can emit final image URLs through wss://grok.com/ws/imagine/listen before/without
+  // mounting every image in the DOM. The DOM scanner remains the primary path for visible
+  // media, but this catches completed image messages directly from the listen socket.
+  const WS_IMAGE_INFLIGHT = new Set();
+  const WS_IMAGE_SEEN_IDS_THIS_PAGE = new Set();
+
    let forceSeenThisPage = new Set(); // sha1s saved in current page/view when forcePage is on
    let forceSeenVideoThisPage = new Set();
 
@@ -268,7 +277,7 @@ async function headContentLength(u) {
 
     // ---- small async queues to avoid network overload ----
     const MAX_PARALLEL_FETCHES = 5;
-    const MAX_PARALLEL_DOWNLOADS = 4;
+    const MAX_PARALLEL_DOWNLOADS = 1; // reliability: serialize GM_download so Chrome/Tampermonkey does not drop one of a fast 4-image burst
 
     // --- Route helpers & SPA hooks ---
     function normPath(href = location.href) {
@@ -331,6 +340,9 @@ async function headContentLength(u) {
       // clear per-page dedupe sets
       forceSeenThisPage = new Set();
       forceSeenVideoThisPage = new Set();
+      // Do NOT clear WS image state on SPA route changes. Grok often changes
+      // /imagine -> /imagine/post/... while the same 4 final WS images are downloading.
+      // Clearing these sets here can allow races/duplicates during that transition.
 
       // clear in-flight guards so items are eligible again this page
       try {
@@ -535,7 +547,12 @@ async function headContentLength(u) {
   GM_addStyle(`#grok-auto-indicator{position:fixed;top:10px;right:10px;z-index:999999;background:rgba(20,20,24,.9);color:#fff;padding:6px 10px;border-radius:8px;font:12px/1.2 system-ui,Segoe UI,Roboto,Ubuntu,Arial;box-shadow:0 2px 10px rgba(0,0,0,.25);pointer-events:none;user-select:none}`);
   const indicator = document.createElement("div");
   indicator.id = "grok-auto-indicator";
-  document.documentElement.appendChild(indicator);
+  function mountIndicator() {
+    const root = document.documentElement || document.body || document.head;
+    if (!root) { setTimeout(mountIndicator, 25); return; }
+    if (!indicator.isConnected) root.appendChild(indicator);
+  }
+  mountIndicator();
   updateIndicator();
 
   GM_registerMenuCommand("Toggle auto-download (Ctrl+Shift+S)", toggleAuto);
@@ -572,7 +589,12 @@ async function headContentLength(u) {
     if (chips.length) lastSeenPrompt = normText(chips[chips.length - 1].textContent || "");
     if (autoOn) { scanImages(); scanVideos(); }
   });
-  mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+  function observeDocumentRoot() {
+    const root = document.documentElement || document.body || document.head;
+    if (!root) { setTimeout(observeDocumentRoot, 25); return; }
+    mo.observe(root, { childList: true, subtree: true, attributes: true });
+  }
+  observeDocumentRoot();
   // Initial pass shortly after load so we don't wait for a mutation
   setTimeout(() => {
     if (onAllowedRoute() && autoOn) { scanImages(); scanVideos(); }
@@ -966,7 +988,7 @@ async function headContentLength(u) {
         const sizeStr = dims.w && dims.h ? `${dims.w}x${dims.h}` : "";
         const prompt  = getPromptNearestToNode(imgEl) || lastSeenPrompt || "";
         const stamp   = isoStamp(new Date());
-        const short   = sig ? ("sig" + sig.slice(0, 10)) : ("h" + sha1.slice(0, 10));
+        const short   = sig ? ("sig" + safeFileToken(sig, 12)) : ("h" + safeFileToken(sha1, 12));
         const slug    = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
         const fname   = ["grok", stamp, short, sizeStr || null, slug].filter(Boolean).join("_") + ".jpg";
 
@@ -1030,6 +1052,268 @@ async function headContentLength(u) {
         if (sha1) inflightImgSha1.delete(sha1);
       }
     }
+
+
+    function isGrokImagineListenWsUrl(u) {
+      const s = String(u || "");
+      return /(^|:\/\/)grok\.com\/ws\/imagine\/listen/i.test(s) ||
+             /\/ws\/imagine\/listen/i.test(s);
+    }
+
+    function parseJsonMaybe(s) {
+      try { return JSON.parse(s); } catch (_) { return null; }
+    }
+
+    async function handleGrokListenWsPayload(data) {
+      try {
+        let text = "";
+        if (typeof data === "string") {
+          text = data;
+        } else if (data instanceof Blob) {
+          text = await data.text();
+        } else if (data instanceof ArrayBuffer) {
+          text = new TextDecoder("utf-8").decode(new Uint8Array(data));
+        } else if (ArrayBuffer.isView(data)) {
+          text = new TextDecoder("utf-8").decode(data);
+        } else {
+          return;
+        }
+
+        // Usually one JSON object per WebSocket message. Split defensively in case a logger
+        // or browser extension batches newline-delimited JSON.
+        const lines = text.split(/\n+/).map(x => x.trim()).filter(Boolean);
+        for (const line of lines) {
+          const msg = parseJsonMaybe(line);
+          if (msg) handleGrokListenJson(msg);
+        }
+      } catch (e) {
+        console.debug("[Grok downloader][WS] payload parse skipped:", e);
+      }
+    }
+
+    function finalImageUrlFromListenJson(msg) {
+      if (!msg || typeof msg !== "object") return "";
+
+      // Direct image event. The 50% PNG events are previews; the final completed image is
+      // normally the 100% JPG event.
+      if (msg.type === "image") {
+        const pct = Number(msg.percentage_complete || 0);
+        const url = String(msg.url || "");
+        if (pct >= 100 && /^https:\/\/imagine-public\.x\.ai\/imagine-public\/images\/[0-9a-f-]{36}\.(jpe?g|png)(\?|#|$)/i.test(url)) {
+          return url;
+        }
+        return "";
+      }
+
+      // Completion JSON sometimes arrives without a matching final image event in the DOM.
+      // In the captured examples, completed image_id/job_id maps directly to:
+      // https://imagine-public.x.ai/imagine-public/images/<uuid>.jpg
+      if (msg.type === "json" && String(msg.current_status || "").toLowerCase() === "completed") {
+        const pct = Number(msg.percentage_complete || 0);
+        const id = String(msg.image_id || msg.job_id || "");
+        if (pct >= 100 && /^[0-9a-f-]{36}$/i.test(id)) {
+          return `https://imagine-public.x.ai/imagine-public/images/${id.toLowerCase()}.jpg`;
+        }
+      }
+
+      return "";
+    }
+
+    function finalImageIdFromListenJson(msg, url) {
+      const id = String(msg?.id || msg?.image_id || msg?.job_id || "");
+      if (/^[0-9a-f-]{36}$/i.test(id)) return id.toLowerCase();
+      const m = String(url || "").match(/\/images\/([0-9a-f-]{36})\.(?:jpe?g|png)(?:[?#]|$)/i);
+      return m ? m[1].toLowerCase() : "";
+    }
+
+    function handleGrokListenJson(msg) {
+      if (!autoOn || !onAllowedRoute()) return;
+
+      const url = finalImageUrlFromListenJson(msg);
+      if (!url) return;
+
+      const imageId = finalImageIdFromListenJson(msg, url);
+      const key = imageId || normalizeUrl(url);
+      if (!key) return;
+
+      // Do not allow a completed JSON and a completed image event to race each other.
+      if (WS_IMAGE_SEEN_IDS_THIS_PAGE.has(key) || WS_IMAGE_INFLIGHT.has(key)) {
+        console.debug("[Grok downloader][WS IMG] duplicate/in-flight final skipped", key);
+        return;
+      }
+      WS_IMAGE_INFLIGHT.add(key);
+      console.debug("[Grok downloader][WS IMG] final queued", key, url);
+
+      downloadFinalImageFromListenUrl(url, msg, imageId)
+        .then((saved) => {
+          if (saved) WS_IMAGE_SEEN_IDS_THIS_PAGE.add(key);
+        })
+        .catch((e) => {
+          if (!isEpochChangedError(e)) console.warn("[Grok downloader][WS IMG] failed:", e);
+        })
+        .finally(() => {
+          WS_IMAGE_INFLIGHT.delete(key);
+        });
+    }
+
+    function installGrokImagineListenHook() {
+      try {
+        if (PAGE_WINDOW.__GROK_IMAGINE_LISTEN_DL_HOOKED__) return;
+        PAGE_WINDOW.__GROK_IMAGINE_LISTEN_DL_HOOKED__ = true;
+
+        const NativeWebSocket = PAGE_WINDOW.WebSocket;
+        if (!NativeWebSocket) return;
+
+        const attach = (ws, url) => {
+          try {
+            if (!isGrokImagineListenWsUrl(url)) return;
+            if (ws.__grokImagineDlListenAttached) return;
+            ws.__grokImagineDlListenAttached = true;
+            ws.addEventListener("message", (ev) => {
+              handleGrokListenWsPayload(ev.data);
+            });
+            console.log("[Grok downloader][WS] attached to imagine listen");
+          } catch (e) {
+            console.debug("[Grok downloader][WS] attach failed:", e);
+          }
+        };
+
+        PAGE_WINDOW.WebSocket = new Proxy(NativeWebSocket, {
+          construct(target, args) {
+            const ws = Reflect.construct(target, args);
+            attach(ws, args && args[0]);
+            return ws;
+          },
+          apply(target, thisArg, args) {
+            const ws = Reflect.apply(target, thisArg, args);
+            attach(ws, args && args[0]);
+            return ws;
+          }
+        });
+      } catch (e) {
+        console.warn("[Grok downloader][WS] hook failed:", e);
+      }
+    }
+
+    function sleepMs(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function downloadFinalImageFromListenUrl(src, msg = {}, imageId = "") {
+      if (!autoOn || !onAllowedRoute()) return false;
+
+      // WS final image messages belong to the generation itself, not to the current SPA route.
+      // Grok can change /imagine -> /imagine/post/<id> exactly while the final 4-image burst
+      // is being saved. DOM watchers should cancel on route changes, but WS downloads should not.
+      const myEpoch = null;
+      const normSrc = normalizeUrl(src);
+      const gKey = imageId ? `img:${imageId}` : `img_url:${normSrc}`;
+
+      if (!forcePage && gKey && globalSeen.has(gKey)) return false;
+      if (inflightImgUrl.has(normSrc)) return false;
+      inflightImgUrl.add(normSrc);
+
+      let sha1 = null;
+      let pageLockKey = null;
+      let pageLockHeld = false;
+      let pageLockKeep = false;
+
+      try {
+        let bytes = null;
+        let dimsGate = { w: 0, h: 0 };
+
+        // Completed JSON can arrive a fraction before the synthesized .jpg is ready.
+        // Retry invalid/non-image bytes a few times instead of dropping that final forever.
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const abuf = await withRetry(() => fetchQ(() => gmFetchArrayBuffer(src)));
+          bytes = new Uint8Array(abuf);
+
+          dimsGate = await imageDims(bytes).catch(() => ({ w: 0, h: 0 }));
+          const areaGate = (dimsGate.w || 0) * (dimsGate.h || 0);
+          const dimsOk   = Math.min(dimsGate.w || 0, dimsGate.h || 0) >= MIN_IMG_SHORT_SIDE
+                        && areaGate >= MIN_IMG_AREA;
+          if (dimsOk) break;
+
+          if (attempt >= 5) return false;
+          await sleepMs(350 * (attempt + 1));
+        }
+
+        let meta = {};
+        try {
+          meta = await exifr.parse(bytes.buffer, { userComment: true });
+        } catch {}
+
+        const sig = extractSignature(meta);
+        sha1 = await sha1Hex(bytes);
+
+        if (inflightImgSha1.has(sha1)) return false;
+        inflightImgSha1.add(sha1);
+
+        if (!forcePage) {
+          if (sig && seenSig.has(sig)) return false;
+          if (seenImg.has(sha1)) return false;
+        } else {
+          if (forceSeenThisPage.has(sha1) || forceInflightThisPage.has(sha1)) return false;
+          forceInflightThisPage.add(sha1);
+        }
+
+        pageLockKey = "img|" + normSrc;
+        if (!acquirePageLock("img", pageLockKey, 10 * 60 * 1000)) return false;
+        pageLockHeld = true;
+
+        const sizeStr = (dimsGate.w && dimsGate.h)
+          ? `${dimsGate.w}x${dimsGate.h}`
+          : ((msg.width && msg.height) ? `${msg.width}x${msg.height}` : "");
+
+        const prompt = normText(msg.full_prompt || msg.prompt || lastSeenPrompt || "");
+        const stamp  = isoStamp(new Date());
+        const short  = imageId ? ("id" + safeFileToken(imageId, 12)) : (sig ? ("sig" + safeFileToken(sig, 12)) : ("h" + safeFileToken(sha1, 12)));
+        const slug   = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
+        const fname  = ["grok", stamp, short, sizeStr || null, slug].filter(Boolean).join("_") + ".jpg";
+
+        const jpegU8 = await pngOrJpegBytesToJpegWithComment(bytes, {
+          signature: sig || imageId || "",
+          prompt,
+          dims: sizeStr,
+          artist: "",
+          pageUrl: location.href,
+          sha1,
+          src
+        });
+
+        const blob = new Blob([jpegU8], { type: "image/jpeg" });
+        const objUrl = URL.createObjectURL(blob);
+        try {
+          await simpleDownload(objUrl, fname, myEpoch);
+        } catch (e) {
+          const dataUrl = bytesToDataURL("image/jpeg", jpegU8);
+          await simpleDownload(dataUrl, fname, myEpoch);
+        } finally {
+          if (!pageLockKeep && pageLockHeld && pageLockKey) releasePageLock("img", pageLockKey);
+          URL.revokeObjectURL(objUrl);
+        }
+
+        if (sig) seenSig.add(sig);
+        seenImg.add(sha1);
+        if (gKey) {
+          globalSeen.add(gKey);
+          saveGlobalSeenSet(globalSeen);
+        }
+        persistSeen();
+        pageLockKeep = true;
+        if (forcePage) forceSeenThisPage.add(sha1);
+
+        console.log("[Grok downloader][WS IMG] saved", fname);
+        return true;
+      } catch (e) {
+        if (forcePage && sha1) forceInflightThisPage.delete(sha1);
+        throw e;
+      } finally {
+        inflightImgUrl.delete(normSrc);
+        if (sha1) inflightImgSha1.delete(sha1);
+      }
+    }
+
 
 
   // ---------------- Videos ----------------
@@ -1250,9 +1534,9 @@ async function headContentLength(u) {
 
         const stamp = isoStamp(new Date());
         const short =
-          signature ? ("sig" + signature.slice(0, 10)) :
-          sha1       ? ("h"   + sha1.slice(0, 10))    :
-                       ("u"   + hashOfString(normUrl).slice(0, 10));
+          signature ? ("sig" + safeFileToken(signature, 12)) :
+          sha1       ? ("h"   + safeFileToken(sha1, 12))       :
+                       ("u"   + safeFileToken(hashOfString(normUrl), 12));
         const slug  = INCLUDE_PROMPT_IN_NAME && prompt ? "p_" + safeSlug(prompt, PROMPT_SLUG_MAX) : null;
         const filename = ["grokvid", stamp, short, sizeStr || null, slug].filter(Boolean).join("_") + ".mp4";
 
@@ -1854,6 +2138,18 @@ function toLatin1(str) {
     return norm.replace(/[^a-zA-Z0-9 _.-]/g, "").trim().replace(/\s+/g, "_");
   }
 
+  // Safe for short technical filename tokens such as Grok signatures.
+  // Grok signatures can contain '/' and '+' (base64-like). A raw '/' inside the
+  // filename can be treated as a path separator by browser/Tampermonkey download
+  // handling, causing a download to silently disappear even after GM_download onload.
+  function safeFileToken(s, max = 16) {
+    return String(s || "")
+      .slice(0, max)
+      .replace(/[^a-zA-Z0-9._-]/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  }
+
     function anchorDownload(url, name, myEpoch) {
       if (typeof myEpoch === "number" && myEpoch !== routeEpoch) return;
       const a = document.createElement("a");
@@ -1951,5 +2247,9 @@ function toLatin1(str) {
     function bytesToDataURL(mime, u8) {
       return `data:${mime};base64,` + u8ToBase64(u8);
     }
+
+  // Install after all helpers are declared. With @run-at document-start, this is early enough
+  // to catch the page's imagine/listen WebSocket before generation messages arrive.
+  installGrokImagineListenHook();
 
 })();
