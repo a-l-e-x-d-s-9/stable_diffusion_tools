@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Grok Prompt Manager Panel
 // @namespace    alexds9.scripts
-// @version      1.5.3
-// @description  Draggable prompt panel with persistent seconds, titled prompt history, wildcard replacement, and backup/restore.
+// @version      1.5.5
+// @description  Draggable prompt panel with persistent seconds, titled prompt history, wildcard replacement, optional prompt override for REST/WebSocket image/video generation, and backup/restore.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
 // @grant        none
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
@@ -26,6 +27,7 @@
   const K_FOLDED = LS_PREFIX + "folded";
   const K_WILDCARDS = LS_PREFIX + "wildcards";
   const K_WILDCARDS_ENABLED = LS_PREFIX + "wildcardsEnabled";
+  const K_PROMPT_OVERRIDE = LS_PREFIX + "promptOverrideEnabled";
 
   function lsGet(key, fallback) {
     try {
@@ -396,6 +398,7 @@
       enableSideBySide: lsGet(K_SIDEBYSIDE, ""),
       folded: lsGet(K_FOLDED, "0"),
       wildcardsEnabled: lsGet(K_WILDCARDS_ENABLED, "1"),
+      promptOverrideEnabled: lsGet(K_PROMPT_OVERRIDE, "0"),
       prompts: (Array.isArray(prompts) ? prompts : normalizePromptsStore(loadJson(K_PROMPTS, []), loadJson(K_PROMPT_TITLES, []))).map((x) => makePromptItem(promptTitle(x), promptText(x))),
       wildcards: loadWildcards()
     };
@@ -423,6 +426,7 @@
     maybeSet(K_SIDEBYSIDE, obj.enableSideBySide);
     maybeSet(K_FOLDED, obj.folded);
     maybeSet(K_WILDCARDS_ENABLED, obj.wildcardsEnabled);
+    maybeSet(K_PROMPT_OVERRIDE, obj.promptOverrideEnabled);
 
     return { prompts: incomingPrompts.length, wildcards: Object.keys(loadWildcards()).length };
   }
@@ -444,6 +448,7 @@
     const savedSideBySide = lsGet(K_SIDEBYSIDE, "");
     const savedFolded = lsGet(K_FOLDED, "0") === "1";
     const savedWildcardsEnabled = lsGet(K_WILDCARDS_ENABLED, "1") !== "0";
+    const savedPromptOverride = lsGet(K_PROMPT_OVERRIDE, "0") === "1";
     let wildcards = loadWildcards();
 
     const panel = css(el("div"), [
@@ -793,9 +798,22 @@
       highlighter.scrollLeft = promptArea.scrollLeft;
     });
 
+    const promptOverrideRow = css(el("label"), "display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 12px; color: #ddd; user-select: none;");
+    const promptOverride = el("input");
+    promptOverride.type = "checkbox";
+    promptOverride.id = "exp-promptOverride";
+    promptOverride.checked = savedPromptOverride;
+    promptOverride.addEventListener("change", () => lsSet(K_PROMPT_OVERRIDE, promptOverride.checked ? "1" : "0"));
+    promptOverrideRow.appendChild(promptOverride);
+    promptOverrideRow.appendChild(el("span", { textContent: "Override site prompt on generation (images + videos)" }));
+
+    const promptOverrideHint = css(el("div", { textContent: "Use this with a dummy prompt in Grok UI when your panel prompt or wildcard should replace the whole request." }), "margin: -2px 0 6px 22px; font-size: 11px; color: #888; line-height: 1.25;");
+
     promptStack.appendChild(highlighter);
     promptStack.appendChild(promptArea);
 
+    promptG.g.appendChild(promptOverrideRow);
+    promptG.g.appendChild(promptOverrideHint);
     promptG.g.appendChild(promptStack);
     leftCol.appendChild(promptG.g);
 
@@ -1158,6 +1176,7 @@
         resSelect.value = lsGet(K_RESOLUTION, "");
         sbsSelect.value = lsGet(K_SIDEBYSIDE, "");
         wcEnable.checked = lsGet(K_WILDCARDS_ENABLED, "1") !== "0";
+        promptOverride.checked = lsGet(K_PROMPT_OVERRIDE, "0") === "1";
         applySearchFilter();
         refreshWildcardSelect("");
         loadWildcardIntoEditor("");
@@ -1330,191 +1349,225 @@
         return match ? match[1] : null;
     };
 
+    function isPromptOverrideEnabled() {
+        const cb = document.getElementById("exp-promptOverride");
+        if (cb) return !!cb.checked;
+        return lsGet(K_PROMPT_OVERRIDE, "0") === "1";
+    }
+
+    function applyModeFlagToMessage(message, mode) {
+        const uiMode = String(mode || "").trim();
+        let msg = String(message || "").trim();
+        if (!uiMode) return msg;
+        if (/--mode=[^\s"]+/i.test(msg)) {
+            return msg.replace(/--mode=[^\s"]+/i, `--mode=${uiMode}`).trim();
+        }
+        return (msg + ` --mode=${uiMode}`).trim();
+    }
+
+    function buildMessageWithPromptOverride(body, promptSanitized) {
+        const msg0 = String(body.message || "").trim();
+
+        // Keep the leading URL token for image-to-video / edit requests.
+        let urlToken = "";
+        const mUrl = msg0.match(/^(https?:\/\/\S+)\s*(.*)$/);
+        if (mUrl) urlToken = mUrl[1] || "";
+
+        // UI mode override wins; otherwise preserve an existing --mode=... flag.
+        const uiMode = document.getElementById("exp-mode")?.value || "";
+        const mMode = msg0.match(/--mode=([^\s"]+)/i);
+        const existingMode = mMode ? (mMode[1] || "") : "";
+        const modeFinal = uiMode || existingMode || "";
+
+        let newMsg = urlToken ? (urlToken + " " + promptSanitized).trim() : promptSanitized;
+        if (modeFinal) newMsg = (newMsg + " --mode=" + modeFinal).trim();
+        return newMsg;
+    }
+
+    function resolvePromptOverrideText() {
+        const rawPrompt = document.getElementById("exp-prompt")?.value ?? "";
+        let promptForRequest = String(rawPrompt || "");
+        const wildcardsEnabled = lsGet(K_WILDCARDS_ENABLED, "1") !== "0";
+
+        if (wildcardsEnabled && /__([A-Za-z0-9_. -]+?)__/.test(promptForRequest)) {
+            const rolled = rollWildcardPrompt(promptForRequest, { askOnProblem: true });
+            if (!rolled.ok) {
+                log("Prompt override cancelled because missing/empty wildcard was not accepted.");
+                return { ok: false, text: "" };
+            }
+            promptForRequest = rolled.text;
+            if (rolled.used && rolled.used.length) {
+                log("Applied wildcards: " + rolled.used.map((x) => "__" + x.name + "__=" + x.choice).join(" | "));
+            }
+        }
+
+        const promptSanitized = String(promptForRequest || "").trim();
+        if (!promptSanitized) {
+            log("Prompt override is enabled, but panel prompt is empty; leaving request unchanged.");
+            return { ok: true, text: "" };
+        }
+
+        return { ok: true, text: promptSanitized };
+    }
+
+    function maybeApplyPromptOverride(body) {
+        if (!isPromptOverrideEnabled()) return { changed: false, ok: true };
+
+        const resolved = resolvePromptOverrideText();
+        if (!resolved.ok) return { changed: false, ok: false };
+        const promptSanitized = resolved.text;
+        if (!promptSanitized) return { changed: false, ok: true };
+
+        body.message = buildMessageWithPromptOverride(body, promptSanitized);
+
+        // Some request shapes may duplicate the user prompt outside message.
+        // Keep these in sync when they exist, without creating unknown fields.
+        if (typeof body.prompt === "string") body.prompt = promptSanitized;
+        if (typeof body.query === "string") body.query = promptSanitized;
+        if (typeof body.input === "string") body.input = promptSanitized;
+
+        log("Applied prompt override.");
+        return { changed: true, ok: true };
+    }
+
     const modifyPayload = (originalBody) => {
         try {
             const body = JSON.parse(originalBody);
 
-            // Only target video generation requests.
-            // Grok changed the request shape: newer payloads may no longer include
-            // body.toolOverrides.videoGen. The current image-to-video request is
-            // identified by modelName "imagine-video-gen" and/or by the nested
-            // videoGenModelConfig under responseMetadata.
+            const modelMap = body.responseMetadata?.modelConfigOverride?.modelMap || {};
+
+            // Video generation request shapes seen so far.
             const hasOldVideoOverride = !!body.toolOverrides?.videoGen;
             const hasCurrentVideoModel = body.modelName === "imagine-video-gen";
-            const hasVideoConfig = !!body.responseMetadata?.modelConfigOverride?.modelMap?.videoGenModelConfig;
+            const hasVideoConfig = !!modelMap.videoGenModelConfig;
+            const isVideoRequest = hasOldVideoOverride || hasCurrentVideoModel || hasVideoConfig;
 
-            if (!hasOldVideoOverride && !hasCurrentVideoModel && !hasVideoConfig) {
+            // Image generation shapes are less stable, so use several conservative hints.
+            const modelName = String(body.modelName || "");
+            const hasImageConfig = !!(
+                modelMap.imageGenModelConfig ||
+                modelMap.imageGenerationModelConfig ||
+                modelMap.imageModelConfig ||
+                modelMap.imagineModelConfig
+            );
+            const hasImageOverride = !!(
+                body.toolOverrides?.imageGen ||
+                body.toolOverrides?.imageGeneration ||
+                body.toolOverrides?.imagine
+            );
+            const hasImagineModelName = /(?:imagine|image[-_ ]?gen|image)/i.test(modelName);
+            const isImageRequest = hasImageConfig || hasImageOverride || hasImagineModelName;
+
+            // Prompt override is an explicit opt-in. This fallback is intentional:
+            // when Grok changes image request shape, the checkbox can still replace
+            // the dummy UI prompt with the panel/wildcard prompt.
+            const promptOverrideCandidate = isPromptOverrideEnabled() && typeof body.message === "string";
+
+            if (!isVideoRequest && !isImageRequest && !promptOverrideCandidate) {
                 return originalBody;
             }
 
-//            const enable = document.getElementById('exp-enable')?.checked;
-//            if (!enable) return originalBody;
+            log('Intercepted Grok generation request: ' + (isVideoRequest ? 'video' : (isImageRequest ? 'image' : 'prompt override')) + '.');
 
-            log('Intercepted Video Gen Request!');
+            const beforePromptJson = JSON.stringify(body);
+            const promptResult = maybeApplyPromptOverride(body);
+            if (!promptResult.ok) return originalBody;
 
-            let config = body.responseMetadata?.modelConfigOverride?.modelMap?.videoGenModelConfig;
-            if (!config) {
-                // Initialize structure if missing (unlikely for video gen but safe)
-                if (!body.responseMetadata) body.responseMetadata = {};
-                if (!body.responseMetadata.modelConfigOverride) body.responseMetadata.modelConfigOverride = {};
-                if (!body.responseMetadata.modelConfigOverride.modelMap) body.responseMetadata.modelConfigOverride.modelMap = {};
-                body.responseMetadata.modelConfigOverride.modelMap.videoGenModelConfig = {};
-                config = body.responseMetadata.modelConfigOverride.modelMap.videoGenModelConfig;
-            }
-
-            // 1. Aspect Ratio
-            const ar = document.getElementById('exp-ar')?.value;
-            if (ar) {
-                log(`Overriding AR: ${config.aspectRatio} -> ${ar}`);
-                config.aspectRatio = ar;
-            }
-
-            // 2. Video Length
-            const len = document.getElementById('exp-len')?.value;
-            if (len !== undefined && len !== null && String(len).trim() !== "") {
-                const val = parseInt(len, 10);
-
-                // 0 means Default / Unchanged.
-                // Any positive number overrides videoLength.
-                if (!isNaN(val) && val > 0) {
-                    log(`Overriding Length: ${config.videoLength} -> ${val}`);
-                    config.videoLength = val;
-                } else if (val === 0) {
-                    log("Leaving Length unchanged because Seconds is 0.");
+            // Video-only controls stay video-only. Prompt override above works for images too.
+            if (isVideoRequest) {
+                let config = modelMap.videoGenModelConfig;
+                if (!config) {
+                    if (!body.responseMetadata) body.responseMetadata = {};
+                    if (!body.responseMetadata.modelConfigOverride) body.responseMetadata.modelConfigOverride = {};
+                    if (!body.responseMetadata.modelConfigOverride.modelMap) body.responseMetadata.modelConfigOverride.modelMap = {};
+                    body.responseMetadata.modelConfigOverride.modelMap.videoGenModelConfig = {};
+                    config = body.responseMetadata.modelConfigOverride.modelMap.videoGenModelConfig;
                 }
-            }
 
-
-            // 3. Mode (message flag --mode=...)
-            const uiMode = document.getElementById("exp-mode")?.value || "";
-            if (uiMode) {
-                const msg = String(body.message || "");
-                if (/--mode=[^\s"]+/i.test(msg)) {
-                    body.message = msg.replace(/--mode=[^\s"]+/i, `--mode=${uiMode}`);
-                } else {
-                    body.message = (msg + ` --mode=${uiMode}`).trim();
+                // 1. Aspect Ratio
+                const ar = document.getElementById('exp-ar')?.value;
+                if (ar) {
+                    log(`Overriding AR: ${config.aspectRatio} -> ${ar}`);
+                    config.aspectRatio = ar;
                 }
-            }
 
-            // 3b. isVideoEdit
-            const uiIsVideoEdit = document.getElementById("exp-isVideoEdit")?.value || "";
-            if (uiIsVideoEdit === "true" || uiIsVideoEdit === "false") {
-                const b = uiIsVideoEdit === "true";
-                log(`Overriding isVideoEdit: ${config.isVideoEdit} -> ${b}`);
-                config.isVideoEdit = b;
-            }
+                // 2. Video Length
+                const len = document.getElementById('exp-len')?.value;
+                if (len !== undefined && len !== null && String(len).trim() !== "") {
+                    const val = parseInt(len, 10);
 
-            // 3c. resolutionName
-            const uiRes = document.getElementById("exp-resolutionName")?.value || "";
-            if (uiRes) {
-                log(`Overriding resolutionName: ${config.resolutionName} -> ${uiRes}`);
-                config.resolutionName = uiRes;
-            }
-
-            // 3d. enableSideBySide (top-level)
-            const uiSbs = document.getElementById("exp-enableSideBySide")?.value || "";
-            if (uiSbs === "true" || uiSbs === "false") {
-                const b = uiSbs === "true";
-                log(`Overriding enableSideBySide: ${body.enableSideBySide} -> ${b}`);
-                body.enableSideBySide = b;
-            }
-
-            // 4. Prompt (apply whenever non-empty, regardless of mode)
-            const rawPrompt = document.getElementById("exp-prompt")?.value ?? "";
-            let promptForRequest = String(rawPrompt || "");
-            const wildcardsEnabled = lsGet(K_WILDCARDS_ENABLED, "1") !== "0";
-            if (wildcardsEnabled && /__([A-Za-z0-9_. -]+?)__/.test(promptForRequest)) {
-                const rolled = rollWildcardPrompt(promptForRequest, { askOnProblem: true });
-                if (!rolled.ok) {
-                    log("Prompt override cancelled because missing/empty wildcard was not accepted.");
-                    return originalBody;
+                    // 0 means Default / Unchanged.
+                    // Any positive number overrides videoLength.
+                    if (!isNaN(val) && val > 0) {
+                        log(`Overriding Length: ${config.videoLength} -> ${val}`);
+                        config.videoLength = val;
+                    } else if (val === 0) {
+                        log("Leaving Length unchanged because Seconds is 0.");
+                    }
                 }
-                promptForRequest = rolled.text;
-                if (rolled.used && rolled.used.length) {
-                    log("Applied wildcards: " + rolled.used.map((x) => "__" + x.name + "__=" + x.choice).join(" | "));
+
+                // 3. Mode (message flag --mode=...)
+                const uiMode = document.getElementById("exp-mode")?.value || "";
+                if (uiMode && !promptResult.changed) {
+                    body.message = applyModeFlagToMessage(body.message, uiMode);
                 }
-            }
-            const promptSanitized = String(promptForRequest || "").trim();
 
-            if (promptSanitized) {
-              const msg0 = String(body.message || "").trim();
+                // 3b. isVideoEdit
+                const uiIsVideoEdit = document.getElementById("exp-isVideoEdit")?.value || "";
+                if (uiIsVideoEdit === "true" || uiIsVideoEdit === "false") {
+                    const b = uiIsVideoEdit === "true";
+                    log(`Overriding isVideoEdit: ${config.isVideoEdit} -> ${b}`);
+                    config.isVideoEdit = b;
+                }
 
-              // Keep the leading URL (first token) if present
-              let urlToken = "";
-              let rest = msg0;
-              const mUrl = msg0.match(/^(https?:\/\/\S+)\s*(.*)$/);
-              if (mUrl) {
-                urlToken = mUrl[1] || "";
-                rest = (mUrl[2] || "").trim();
-              }
+                // 3c. resolutionName
+                const uiRes = document.getElementById("exp-resolutionName")?.value || "";
+                if (uiRes) {
+                    log(`Overriding resolutionName: ${config.resolutionName} -> ${uiRes}`);
+                    config.resolutionName = uiRes;
+                }
 
-              // Determine final mode: UI override wins, else keep existing --mode=..., else none
-              const uiMode2 = document.getElementById("exp-mode")?.value || "";
-              const mMode = msg0.match(/--mode=([^\s"]+)/i);
-              const existingMode = mMode ? (mMode[1] || "") : "";
-              const modeFinal = uiMode2 || existingMode || "";
+                // 3d. enableSideBySide (top-level)
+                const uiSbs = document.getElementById("exp-enableSideBySide")?.value || "";
+                if (uiSbs === "true" || uiSbs === "false") {
+                    const b = uiSbs === "true";
+                    log(`Overriding enableSideBySide: ${body.enableSideBySide} -> ${b}`);
+                    body.enableSideBySide = b;
+                }
 
-              // Remove any existing --mode=... from the rest
-              rest = rest.replace(/--mode=[^\s"]+/ig, "").trim();
+                // 4. Image Swap - unused
+                const swapUrl = false; //document.getElementById('exp-url')?.value?.trim();
+                if (swapUrl) {
+                    const newUuid = extractUuid(swapUrl);
+                    if (newUuid) {
+                        log(`Swapping Image ID: ${config.parentPostId} -> ${newUuid}`);
 
-              let newMsg = "";
-              if (urlToken) newMsg = (urlToken + " " + promptSanitized).trim();
-              else newMsg = promptSanitized;
+                        config.parentPostId = newUuid;
 
-              if (modeFinal) newMsg = (newMsg + " --mode=" + modeFinal).trim();
+                        const urlRegex = /https?:\/\/[^\s"]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[^\s"]*/i;
+                        if (body.message && body.message.match(urlRegex)) {
+                            body.message = body.message.replace(urlRegex, swapUrl);
+                            log('Updated Message URL');
+                        } else {
+                            log('Warning: Could not find URL in message to replace. Appending new URL.');
+                            body.message = swapUrl + " " + body.message;
+                        }
 
-              body.message = newMsg;
-              log("Applied prompt override.");
-            }
-
-            // 5. Image Swap - unused
-            const swapUrl = false; //document.getElementById('exp-url')?.value?.trim();
-            if (swapUrl) {
-                const newUuid = extractUuid(swapUrl);
-                if (newUuid) {
-                    log(`Swapping Image ID: ${config.parentPostId} -> ${newUuid}`);
-
-                    // Update parentPostId
-                    config.parentPostId = newUuid;
-
-                    // Update Message URL
-                    // We need to be careful to replace just the URL part
-                    // Strategy: Find the existing UUID in the message and replace the whole URL containing it?
-                    // Or just prepend the new URL if we are constructing a fresh message?
-                    // Existing message examples:
-                    // "https://.../OLD_UUID.png --mode=normal"
-                    // "https://.../OLD_UUID/content \"prompt\" ..."
-
-                    // Let's try to find the URL in the message
-                    // Regex to find http...UUID...
-                    // It might end with space, quote, or end of string
-                    const urlRegex = /https?:\/\/[^\s"]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[^\s"]*/i;
-
-
-
-                    if (body.message && body.message.match(urlRegex)) {
-                        body.message = body.message.replace(urlRegex, swapUrl);
-                        log('Updated Message URL');
+                        if (body.fileAttachments && Array.isArray(body.fileAttachments)) {
+                            body.fileAttachments = [newUuid];
+                            log('Updated fileAttachments');
+                        }
                     } else {
-                        // Fallback if regex fails (maybe message format changed)
-                        // Just prepend/replace? Let's warn.
-                        log('Warning: Could not find URL in message to replace. Appending new URL.');
-                        body.message = swapUrl + " " + body.message;
+                        log('Error: Invalid UUID in swap URL');
                     }
-
-                    // Update fileAttachments if present (for user uploads)
-                    if (body.fileAttachments && Array.isArray(body.fileAttachments)) {
-                        // If we are swapping, we should probably replace the attachment ID
-                        // Assuming single attachment for video gen
-                        body.fileAttachments = [newUuid];
-                        log('Updated fileAttachments');
-                    }
-                } else {
-                    log('Error: Invalid UUID in swap URL');
                 }
+            } else if (isImageRequest && promptResult.changed) {
+                const uiMode = document.getElementById("exp-mode")?.value || "";
+                if (uiMode) log(`Preserved/applied mode flag for image request: ${uiMode}`);
             }
 
-            return JSON.stringify(body);
+            const afterJson = JSON.stringify(body);
+            return afterJson === beforePromptJson ? originalBody : afterJson;
 
         } catch (e) {
             console.error('[GrokExp] Error modifying payload:', e);
@@ -1565,13 +1618,74 @@
         return originalFetch.apply(this, arguments);
     };
 
+    function maybeModifyWebSocketPayload(data) {
+        try {
+            if (!isPromptOverrideEnabled()) return data;
+            if (typeof data !== "string") return data;
+
+            const trimmed = data.trim();
+            if (!trimmed || trimmed[0] !== "{") return data;
+
+            const body = JSON.parse(data);
+
+            // Image generation currently goes through wss://grok.com/ws/imagine/listen
+            // as: { type:"conversation.item.create", item:{ content:[{ type:"input_text", text:"..." }] } }
+            if (body?.type !== "conversation.item.create") return data;
+            if (!body.item || !Array.isArray(body.item.content)) return data;
+
+            const resolved = resolvePromptOverrideText();
+            if (!resolved.ok) return data;
+            const promptSanitized = resolved.text;
+            if (!promptSanitized) return data;
+
+            let changed = false;
+            for (const part of body.item.content) {
+                if (!part || typeof part !== "object") continue;
+                if (typeof part.text !== "string") continue;
+
+                // Keep this broad because Grok may rename input_text, but text is the field we need.
+                if (part.type === "input_text" || part.type === "text" || !part.type) {
+                    if (part.text !== promptSanitized) {
+                        part.text = promptSanitized;
+                        changed = true;
+                    }
+                }
+            }
+
+            if (!changed) return data;
+            log("Applied WebSocket prompt override for image generation.");
+            return JSON.stringify(body);
+        } catch (e) {
+            console.error('[GrokExp] WebSocket payload modifier error:', e);
+            log('WebSocket payload modifier error: ' + e.message);
+            return data;
+        }
+    }
+
+    const NativeWebSocket = window.WebSocket;
+    if (NativeWebSocket?.prototype?.send) {
+        const originalWsSend = NativeWebSocket.prototype.send;
+        NativeWebSocket.prototype.send = function (data) {
+            try {
+                const wsUrl = String(this?.url || "");
+                if (wsUrl.includes('/ws/imagine/listen')) {
+                    data = maybeModifyWebSocketPayload(data);
+                }
+            } catch (e) {
+                console.error('[GrokExp] WebSocket interceptor error:', e);
+                log('WebSocket interceptor error: ' + e.message);
+            }
+            return originalWsSend.call(this, data);
+        };
+    }
+
     // --- Init ---
     // Wait for body
     const waitInterval = setInterval(() => {
         if (document.body) {
             clearInterval(waitInterval);
             createUI();
-            log('Interceptor Active');
+            log('Fetch + WebSocket interceptors Active');
         }
     }, 300);
 })();
