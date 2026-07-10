@@ -829,7 +829,7 @@
                     </div>
                     <div class="control"><label for="direction">Generation direction</label><select id="direction"><option value="bottom-up">Bottom → Top</option><option value="top-down">Top → Bottom</option></select></div>
                     <div class="control"><label for="concurrency">Simultaneous videos</label><input id="concurrency" type="number" min="1" max="10" step="1"></div>
-                    <div class="control"><label for="generation-limit">Maximum to start</label><div class="limit-controls"><input id="generation-limit" type="number" min="1" max="100000" step="1"><label class="unlimited-label"><input id="unlimited" type="checkbox">Unlimited</label></div></div>
+                    <div class="control"><label for="generation-limit">Generation limit</label><div class="limit-controls"><input id="generation-limit" type="number" min="1" max="100000" step="1"><label class="unlimited-label"><input id="unlimited" type="checkbox">Unlimited</label></div></div>
                     <div class="mode"><span>Start mode</span><b></b></div>
                     <div class="stats">
                         <div class="stat"><b class="active">0</b><span>Active</span></div>
