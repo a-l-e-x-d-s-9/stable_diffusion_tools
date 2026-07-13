@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Image-to-Video Generator
 // @namespace    https://grok.com/
-// @version      1.2.0
-// @description  Generate a limited or unlimited number of videos from images on Grok's Saved page in either direction.
+// @version      1.3.1
+// @description  Generate videos from images on Grok's Saved page with continuous slot refilling in either direction.
 // @author       alexds9
 // @match        https://grok.com/imagine/saved*
 // @run-at       document-idle
@@ -70,7 +70,7 @@
     }
 
     function getConcurrency() {
-        const value = Number(GM_getValue(STORAGE.concurrency, 2));
+        const value = Number(GM_getValue(STORAGE.concurrency, 5));
         return clamp(Number.isFinite(value) ? Math.round(value) : 2, 1, 10);
     }
 
@@ -433,6 +433,14 @@
         }
     }
 
+    async function waitForAvailableSlot(token) {
+        while (state.running && token === state.loopToken) {
+            settlePending();
+            if (state.pending.size < getConcurrency()) return;
+            await sleep(SETTINGS.pollMs);
+        }
+    }
+
     function resetRunCounters() {
         state.attempted.clear();
         state.attemptedSlots.clear();
@@ -539,16 +547,23 @@
             while (state.running && token === state.loopToken) {
                 settlePending();
 
-                // Keep each batch in view until it succeeds or fails, allowing
-                // reliable detection of a returned Make video button.
-                if (state.pending.size > 0) {
-                    await waitForPending(token);
+                // Refill capacity as soon as any individual generation ends.
+                // We only wait when every configured slot is currently busy.
+                const availableSlots = Math.max(0, getConcurrency() - state.pending.size);
+                if (availableSlots <= 0) {
+                    await waitForAvailableSlot(token);
                     continue;
                 }
 
                 const direction = getDirection();
                 const quota = remainingGenerationQuota();
                 if (quota <= 0) {
+                    // No more requests may be started, but keep monitoring the
+                    // final active generations so the counters finish cleanly.
+                    if (state.pending.size > 0) {
+                        await waitForPending(token);
+                        continue;
+                    }
                     state.running = false;
                     state.paused = false;
                     state.finished = true;
@@ -557,6 +572,8 @@
                     render();
                     return;
                 }
+
+                const slotsToFill = Math.min(availableSlots, quota);
 
                 const stopAtExistingVideo = direction === 'top-down' && getGenerationLimit() === Infinity;
                 let allCandidates;
@@ -567,6 +584,10 @@
                     const boundaryIndex = remaining.findIndex(isCompletedVideo);
 
                     if (boundaryIndex === 0) {
+                        if (state.pending.size > 0) {
+                            await waitForPending(token);
+                            continue;
+                        }
                         if (bringIntoView(remaining[0])) {
                             await sleep(SETTINGS.scrollDelayMs);
                             continue;
@@ -606,16 +627,27 @@
                     }
                     const candidates = refreshed
                         .filter(isComfortablyVisible)
-                        .slice(0, Math.min(getConcurrency(), quota));
-                    for (const item of candidates) clickCandidate(item);
-                    await waitForPending(token);
-                    continue;
+                        .slice(0, slotsToFill);
+                    let started = 0;
+                    for (const item of candidates) {
+                        if (clickCandidate(item)) started += 1;
+                    }
+                    if (started > 0) {
+                        // Let Grok update the clicked cards, then immediately
+                        // look for more work if capacity still remains.
+                        await sleep(100);
+                        continue;
+                    }
                 }
 
                 const scroller = getScroller(document.querySelector(SELECTORS.item));
                 const before = scrollerTop(scroller);
                 const reachedEdge = direction === 'top-down' ? scrollerAtBottom(scroller) : before <= 4;
                 if (reachedEdge) {
+                    if (state.pending.size > 0) {
+                        await waitForPending(token);
+                        continue;
+                    }
                     state.topPasses += 1;
                     state.status = direction === 'top-down' ? 'Checking bottom' : 'Checking top';
                     state.lastAction = `${direction === 'top-down' ? 'Bottom' : 'Top'}-of-page check ${state.topPasses}/${SETTINGS.topStablePasses}.`;
