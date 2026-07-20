@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Image-to-Video Generator
 // @namespace    https://grok.com/
-// @version      1.3.1
+// @version      1.3.4
 // @description  Generate videos from images on Grok's Saved page with continuous slot refilling in either direction.
 // @author       alexds9
 // @match        https://grok.com/imagine/saved*
@@ -152,12 +152,10 @@
     }
 
     function getPosition(item) {
-        const inlineTop = Number.parseFloat(item.style.top);
-        const inlineLeft = Number.parseFloat(item.style.left);
-        if (Number.isFinite(inlineTop) && Number.isFinite(inlineLeft)) {
-            return { y: inlineTop, x: inlineLeft };
-        }
-
+        // Grok's masonry now positions cards with CSS transforms while leaving
+        // inline top/left at zero (or at another stale layout value). Rendered
+        // coordinates plus the current scroll offset give stable content-space
+        // positions and preserve the picked card's real row and column.
         const rect = item.getBoundingClientRect();
         const scroller = getScroller(item);
         const scrollTop = isDocumentScroller(scroller) ? window.scrollY : scroller.scrollTop;
@@ -204,8 +202,16 @@
         const exact = findItemByKey(job.key);
         if (exact) return exact;
 
-        // Grok can replace the original image URL with a new generated output
-        // URL when the video finishes. The masonry slot remains stable.
+        // A clicked card now moves to the beginning of Saved. Keep following
+        // that same DOM card if Grok changes its media URL during generation.
+        if (job.element?.isConnected
+            && (mediaKey(job.element) === job.key || isCompletedVideo(job.element))) {
+            return job.element;
+        }
+
+        // Slot fallback is safe only when the gallery is not reordering. In a
+        // bottom-up run, the old slot is immediately occupied by the next image.
+        if (!job.allowSlotFallback) return null;
         return getItems().find(item => {
             const pos = getPosition(item);
             return Math.abs(pos.y - job.y) <= SETTINGS.rowTolerancePx
@@ -274,17 +280,42 @@
     }
 
     function isComfortablyVisible(item) {
-        const rect = item.getBoundingClientRect();
+        const button = makeVideoButton(item);
+        const target = button && button.getClientRects().length > 0 ? button : item;
+        const rect = target.getBoundingClientRect();
         const bounds = visibleBoundsFor(item);
-        return rect.top >= bounds.top + 35 && rect.bottom <= bounds.bottom - 25;
+        return rect.top >= bounds.top + 12 && rect.bottom <= bounds.bottom - 12;
     }
 
     function bringIntoView(item) {
         if (isComfortablyVisible(item)) return false;
-        item.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+
+        // Do not use scrollIntoView here. Grok virtualizes the masonry gallery
+        // and can keep a card near the top mounted while omitting the rows in
+        // between. Jumping directly to that card skips those rows completely.
+        // Move by at most one normal scroll step so each intermediate row gets
+        // mounted and becomes eligible on the next pass.
+        const button = makeVideoButton(item);
+        const target = button && button.getClientRects().length > 0 ? button : item;
+        const rect = target.getBoundingClientRect();
+        const bounds = visibleBoundsFor(item);
+        const comfortableTop = bounds.top + 12;
+        const comfortableBottom = bounds.bottom - 12;
+        const rawDelta = rect.top < comfortableTop
+            ? rect.top - comfortableTop
+            : rect.bottom - comfortableBottom;
+        const delta = clamp(rawDelta, -SETTINGS.scrollStepPx, SETTINGS.scrollStepPx);
+        const scroller = getScroller(item);
+
+        if (isDocumentScroller(scroller)) {
+            window.scrollBy({ top: delta, behavior: 'smooth' });
+        } else {
+            scroller.scrollBy({ top: delta, behavior: 'smooth' });
+        }
+
         const pos = getPosition(item);
         state.status = 'Scrolling to next item';
-        state.lastAction = `Bringing row ${Math.round(pos.y)} into view before continuing.`;
+        state.lastAction = `Advancing ${delta < 0 ? 'up' : 'down'} toward row ${Math.round(pos.y)} before continuing.`;
         render();
         return true;
     }
@@ -354,10 +385,18 @@
         return sameRow ? pb.x - pa.x : pb.y - pa.y;
     }
 
+    function usesDynamicMasonryOrder() {
+        return getDirection() === 'bottom-up';
+    }
+
     function traversalItems() {
         return getItems()
             .filter(allowedByAnchor)
-            .filter(item => !state.attemptedSlots.has(slotKey(item)))
+            // In bottom-up mode, Grok moves every clicked card to the top and
+            // slides the next ungenerated card into the vacated slot. Media keys
+            // prevent duplicate work; rejecting the old slot would skip that
+            // newly shifted card.
+            .filter(item => usesDynamicMasonryOrder() || !state.attemptedSlots.has(slotKey(item)))
             .sort(compareItems);
     }
 
@@ -383,6 +422,8 @@
             key,
             y: pos.y,
             x: pos.x,
+            element: item,
+            allowSlotFallback: !usesDynamicMasonryOrder(),
             clickedAt: Date.now(),
             sawBusyState: false,
         });
@@ -627,7 +668,10 @@
                     }
                     const candidates = refreshed
                         .filter(isComfortablyVisible)
-                        .slice(0, slotsToFill);
+                        // Each bottom-up click changes the gallery order. Click
+                        // one, then re-read the new order before filling the next
+                        // concurrency slot. The loop returns after only 100 ms.
+                        .slice(0, usesDynamicMasonryOrder() ? 1 : slotsToFill);
                     let started = 0;
                     for (const item of candidates) {
                         if (clickCandidate(item)) started += 1;
