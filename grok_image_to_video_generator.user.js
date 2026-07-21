@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Image-to-Video Generator
 // @namespace    https://grok.com/
-// @version      1.3.4
-// @description  Generate videos from images on Grok's Saved page with continuous slot refilling in either direction.
+// @version      1.3.5
+// @description  Generate videos from images on Grok's Saved page while preserving the selected traversal order.
 // @author       alexds9
 // @match        https://grok.com/imagine/saved*
 // @run-at       document-idle
@@ -261,6 +261,14 @@
         }
     }
 
+    function scrollToOffset(scroller, top) {
+        if (isDocumentScroller(scroller)) {
+            window.scrollTo({ top, behavior: 'auto' });
+        } else {
+            scroller.scrollTo({ top, behavior: 'auto' });
+        }
+    }
+
     function scrollerAtBottom(scroller) {
         if (isDocumentScroller(scroller)) {
             const root = document.scrollingElement || document.documentElement;
@@ -340,9 +348,11 @@
         return getItems().sort((a, b) => compareItems(a, b, 'top-down'))[0] || null;
     }
 
-    async function moveToTop(token) {
-        state.status = 'Moving to top';
-        state.lastAction = 'Preparing to generate from the top-left image.';
+    async function moveToTop(token, purpose = 'start') {
+        state.status = purpose === 'monitor' ? 'Watching active videos' : 'Moving to top';
+        state.lastAction = purpose === 'monitor'
+            ? 'Active cards moved to the top; viewing them so Grok reports their progress.'
+            : 'Preparing to generate from the top-left image.';
         render();
 
         for (let pass = 0; pass < 20 && state.running && token === state.loopToken; pass += 1) {
@@ -351,11 +361,27 @@
                 await sleep(SETTINGS.scrollDelayMs);
                 return true;
             }
-            scrollToTop(scroller);
+            if (purpose === 'monitor') scrollToOffset(scroller, 0);
+            else scrollToTop(scroller);
             await sleep(SETTINGS.scrollDelayMs);
         }
         return state.running && token === state.loopToken
             && scrollerTop(getScroller(document.querySelector(SELECTORS.item))) <= 4;
+    }
+
+    async function returnToBottomUpFrontier(token, top) {
+        state.status = 'Returning to generation list';
+        state.lastAction = 'Returning to the saved bottom-up position to select the next image in order.';
+        render();
+
+        for (let pass = 0; pass < 5 && state.running && token === state.loopToken; pass += 1) {
+            const scroller = getScroller(document.querySelector(SELECTORS.item));
+            scrollToOffset(scroller, top);
+            await sleep(SETTINGS.scrollDelayMs);
+            if (Math.abs(scrollerTop(scroller) - top) <= 8) return true;
+        }
+
+        return state.running && token === state.loopToken;
     }
 
     function allowedByAnchor(item) {
@@ -468,6 +494,9 @@
     }
 
     async function waitForPending(token) {
+        if (usesDynamicMasonryOrder() && state.pending.size > 0) {
+            await moveToTop(token, 'monitor');
+        }
         while (state.running && token === state.loopToken && state.pending.size > 0) {
             settlePending();
             if (state.pending.size > 0) await sleep(SETTINGS.pollMs);
@@ -475,10 +504,25 @@
     }
 
     async function waitForAvailableSlot(token) {
+        let generationFrontier = null;
+        if (usesDynamicMasonryOrder() && state.pending.size > 0) {
+            const scroller = getScroller(document.querySelector(SELECTORS.item));
+            generationFrontier = scrollerTop(scroller);
+            const reachedTop = await moveToTop(token, 'monitor');
+            if (!reachedTop) return;
+        }
+
         while (state.running && token === state.loopToken) {
             settlePending();
-            if (state.pending.size < getConcurrency()) return;
+            if (state.pending.size < getConcurrency()) break;
             await sleep(SETTINGS.pollMs);
+        }
+
+        if (generationFrontier !== null
+            && generationFrontier > 4
+            && state.running
+            && token === state.loopToken) {
+            await returnToBottomUpFrontier(token, generationFrontier);
         }
     }
 
@@ -592,6 +636,11 @@
                 // We only wait when every configured slot is currently busy.
                 const availableSlots = Math.max(0, getConcurrency() - state.pending.size);
                 if (availableSlots <= 0) {
+                    // Bottom-up clicks are moved to the beginning of Saved.
+                    // Grok only updates those cards while that part of the
+                    // virtualized gallery is visible. Observe them at the top,
+                    // then return to this exact generation frontier so the next
+                    // request still follows the original bottom-up order.
                     await waitForAvailableSlot(token);
                     continue;
                 }
