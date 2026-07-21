@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Prompt Manager Panel
 // @namespace    alexds9.scripts
-// @version      1.5.5
+// @version      1.5.6
 // @description  Draggable prompt panel with persistent seconds, titled prompt history, wildcard replacement, optional prompt override for REST/WebSocket image/video generation, and backup/restore.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -1577,6 +1577,16 @@
     };
 
     // --- Interceptor ---
+    function isGenerationRequestUrl(url) {
+        try {
+            const pathname = new URL(String(url || ""), window.location.href).pathname;
+            return pathname === "/rest/app-chat/conversations/new" ||
+                /^\/rest\/app-chat\/conversations\/[^/]+\/responses\/?$/.test(pathname);
+        } catch (_) {
+            return false;
+        }
+    }
+
     const originalFetch = window.fetch;
     window.fetch = async function (input, init) {
         let url = input;
@@ -1585,7 +1595,7 @@
         }
 
         const method = String(init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
-        const isTarget = !!url && String(url).includes('/rest/app-chat/conversations/new') && method === 'POST';
+        const isTarget = method === 'POST' && isGenerationRequestUrl(url);
 
         if (isTarget) {
             try {
