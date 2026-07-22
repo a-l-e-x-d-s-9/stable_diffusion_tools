@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta Scan with Full Caption — FAST (hires DOM, minimal changes)
 // @namespace    http://tampermonkey.net/
-// @version      0.42
+// @version      0.43
 // @description  Old fast loop + reliable hi-res picking + robust dedupe + caption
 // @author       You
 // @match        https://www.instagram.com/*
@@ -34,12 +34,71 @@
   let startSlideshow = false;
   let stopSlideshow  = false;
 
+  // Per-run download limit (persistent; configurable from the userscript menu)
+  const savedMaximum = Number.parseInt(GM_getValue('maximum_downloads', 1000), 10);
+  let MAXIMUM_DOWNLOADS = Number.isFinite(savedMaximum) && savedMaximum > 0 ? savedMaximum : 1000;
+  let sessionDownloadCount = 0;
+  let downloadStatus = 'idle';
+  let statusBadge = null;
+  let limitNotificationShown = false;
+
   // caption .txt toggle (persistent; default ON)
   let SAVE_CAPTIONS = GM_getValue('save_captions', true);
 
   // ====== helpers ======
   const log = (...a)=> DEBUG && console.log('[InstaFast]', ...a);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  function ensureStatusBadge(){
+    if (statusBadge && statusBadge.isConnected) return statusBadge;
+    statusBadge = document.createElement('div');
+    statusBadge.id = 'instafast-download-status';
+    Object.assign(statusBadge.style, {
+      position: 'fixed',
+      top: '16px',
+      right: '16px',
+      zIndex: '2147483647',
+      padding: '10px 14px',
+      borderRadius: '8px',
+      background: 'rgba(20, 20, 20, 0.92)',
+      color: '#fff',
+      font: '600 14px/1.35 system-ui, sans-serif',
+      boxShadow: '0 2px 12px rgba(0, 0, 0, 0.35)',
+      pointerEvents: 'none'
+    });
+    (document.body || document.documentElement).appendChild(statusBadge);
+    return statusBadge;
+  }
+
+  function updateDownloadStatus(status = downloadStatus){
+    downloadStatus = status;
+    const badge = ensureStatusBadge();
+    const labels = {
+      running: 'Downloading',
+      stopped: 'Stopped',
+      limit: 'Limit reached'
+    };
+    badge.textContent = `InstaFast — ${labels[status] || 'Ready'}: ${sessionDownloadCount.toLocaleString()} / ${MAXIMUM_DOWNLOADS.toLocaleString()}`;
+    badge.style.border = status === 'running' ? '1px solid #42d392' :
+                         status === 'limit' ? '1px solid #ffb020' : '1px solid #777';
+  }
+
+  function stopDownloadMode(status = 'stopped'){
+    startSlideshow = false;
+    stopSlideshow = true;
+    updateDownloadStatus(status);
+  }
+
+  function stopAtDownloadLimit(){
+    stopDownloadMode('limit');
+    if (limitNotificationShown) return;
+    limitNotificationShown = true;
+    GM_notification({
+      text: `Downloaded ${sessionDownloadCount.toLocaleString()} / ${MAXIMUM_DOWNLOADS.toLocaleString()} images. Download mode stopped.`,
+      title: 'InstaFast — download limit reached',
+      timeout: 4000
+    });
+  }
 
   function isVisible(el){
     if (!el) return false;
@@ -217,7 +276,7 @@
               /\.cdninstagram\.com$/i.test(host);
 
         const startXhr = () => {
-            if (typeof GM_xmlhttpRequest !== 'function') return;
+            if (typeof GM_xmlhttpRequest !== 'function') return false;
             try {
                 GM_xmlhttpRequest({
                     method: 'GET',
@@ -234,8 +293,10 @@
                     onerror:   () => console.warn('[InstaFast] XHR error', url),
                     ontimeout: () => console.warn('[InstaFast] XHR timeout', url),
                 });
+                return true;
             } catch (e) {
                 console.error('[InstaFast] GM_xhr threw', e);
+                return false;
             }
         };
 
@@ -257,14 +318,12 @@
                 return Promise.resolve(true); // fire-and-forget
             } catch (e){
                 console.warn('[InstaFast] GM_download threw', e, '→ falling back to XHR');
-                startXhr();
-                return Promise.resolve(true);
+                return Promise.resolve(startXhr());
             }
         }
 
         // Directly use XHR for fbcdn/cdninstagram (or if GM_download unavailable)
-        startXhr();
-        return Promise.resolve(true);
+        return Promise.resolve(startXhr());
     }
 
 
@@ -283,11 +342,23 @@
         try {
             while (startSlideshow && !stopSlideshow) {
                 await downloadCurrentImages();
+                if (!startSlideshow || stopSlideshow) break;
                 await goToNextImageOrPost();
             }
         } finally {
             isRunning = false;
+            if (downloadStatus === 'running') updateDownloadStatus('stopped');
         }
+    }
+
+    function startDownloadMode(){
+        if (isRunning) return;
+        sessionDownloadCount = 0;
+        limitNotificationShown = false;
+        startSlideshow = true;
+        stopSlideshow = false;
+        updateDownloadStatus('running');
+        startAsyncSlideshow();
     }
 
   async function goToNextImageOrPost(){
@@ -358,6 +429,11 @@
         let captionSaved = false;
 
         for (const img of imgs){
+            if (sessionDownloadCount >= MAXIMUM_DOWNLOADS){
+                stopAtDownloadLimit();
+                break;
+            }
+
             const url = bestHiResFromImg(img);
             if (!url) continue;
 
@@ -372,7 +448,7 @@
             if (!(img.complete && img.naturalWidth > 0)) await sleep(60);
 
             const imageName = getFileName(url);
-            const ok = downloadImage(url, imageName);
+            const ok = await downloadImage(url, imageName);
 
             if (ok){
                 if (SAVE_CAPTIONS && !captionSaved && caption && caption !== "Caption not found"){
@@ -383,6 +459,12 @@
                 downloadedImages[key] = true;
                 downloadedImages[url] = true;
                 GM_setValue('downloadedImages', JSON.stringify(downloadedImages));
+                sessionDownloadCount++;
+                updateDownloadStatus('running');
+                if (sessionDownloadCount >= MAXIMUM_DOWNLOADS){
+                    stopAtDownloadLimit();
+                    break;
+                }
             } else {
                 console.warn('[InstaFast] Download failed, will retry if seen again:', url);
             }
@@ -412,22 +494,40 @@
   window.addEventListener('keydown', (event) => {
     if (!event.ctrlKey || !event.shiftKey) return;
     if (event.code === 'KeyS') {
-      startSlideshow = true;
-      startAsyncSlideshow();
+      startDownloadMode();
     } else if (event.code === 'KeyZ') {
-      startSlideshow = false;
-      stopSlideshow = true;
+      stopDownloadMode();
     }
   });
 
   // menu
   GM_registerMenuCommand('Start Downloading [CTRL+SHIFT+S]', () => {
-    startSlideshow = true;
-    startAsyncSlideshow();
+    startDownloadMode();
   });
   GM_registerMenuCommand('Stop Downloading [CTRL+SHIFT+Z]', () => {
-    startSlideshow = false;
-    stopSlideshow = true;
+    stopDownloadMode();
+  });
+  GM_registerMenuCommand(`Set maximum downloads (currently ${MAXIMUM_DOWNLOADS})`, () => {
+    const answer = window.prompt('Maximum images to download per run:', String(MAXIMUM_DOWNLOADS));
+    if (answer === null) return;
+    const parsed = Number(answer.trim());
+    if (!Number.isInteger(parsed) || parsed < 1){
+      GM_notification({
+        text: 'Enter a whole number greater than zero.',
+        title: 'InstaFast — invalid maximum',
+        timeout: 3000
+      });
+      return;
+    }
+    MAXIMUM_DOWNLOADS = parsed;
+    GM_setValue('maximum_downloads', MAXIMUM_DOWNLOADS);
+    if (downloadStatus !== 'idle') updateDownloadStatus(downloadStatus);
+    if (isRunning && sessionDownloadCount >= MAXIMUM_DOWNLOADS) stopAtDownloadLimit();
+    GM_notification({
+      text: `Maximum downloads per run set to ${MAXIMUM_DOWNLOADS.toLocaleString()}.`,
+      title: 'InstaFast',
+      timeout: 2500
+    });
   });
   GM_registerMenuCommand(
     `Toggle caption .txt downloads (currently ${SAVE_CAPTIONS ? 'ON' : 'OFF'})`,
