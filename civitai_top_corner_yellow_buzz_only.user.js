@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Civitai - Show Yellow Buzz and Today's Sales
 // @namespace    https://civitai.com/
-// @version      1.2.0
-// @description  Shows Yellow Buzz and today's paid-model sales in Civitai's top-right account button.
+// @version      1.3.1
+// @description  Shows Yellow Buzz and a configurable daily paid-model sales counter in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
 // @match        https://civitai.red/*
@@ -18,10 +18,22 @@
   const CACHE_KEY = 'civitai-yellow-buzz-only-v1';
   const SALES_CACHE_KEY = 'civitai-yellow-buzz-sales-today-v1';
   const SALES_LOCK_KEY = `${SALES_CACHE_KEY}-lock`;
+  const SALES_COLOR_SETTINGS_KEY =
+    'civitai-yellow-buzz-sales-color-settings-v1';
   const SALES_REFRESH_MS = 2 * 60 * 1000;
   const SALES_LOCK_MS = 30 * 1000;
   const SALES_PAGE_SIZE = 200;
   const PURCHASE_TRANSACTION_TYPE = 6;
+  const DEFAULT_SALES_COLOR_SETTINGS = Object.freeze({
+    lowMax: 3,
+    highMin: 6,
+    lowEnabled: false,
+    lowColor: '#fa5252',
+    middleEnabled: false,
+    middleColor: '#f59f00',
+    highEnabled: false,
+    highColor: '#40c057',
+  });
 
   const state = {
     lastCombinedText: '',
@@ -31,10 +43,12 @@
     salesDayKey: '',
     salesLoading: false,
     salesError: '',
+    salesColorSettings: null,
+    salesSettingsPanel: null,
     updatePending: false,
   };
 
-  console.info('[Civitai Yellow Buzz] Script v1.2.0 loaded');
+  console.info('[Civitai Yellow Buzz] Script v1.3.1 loaded');
 
   function getUtcDayBounds(now = new Date()) {
     const start = new Date(Date.UTC(
@@ -70,6 +84,81 @@
     }
 
     return null;
+  }
+
+  function normalizeSalesColorSettings(value) {
+    const defaults = DEFAULT_SALES_COLOR_SETTINGS;
+    const lowMax = Number(value?.lowMax);
+    const highMin = Number(value?.highMin);
+    const isHexColor = (color) =>
+      /^#[\da-f]{6}$/i.test(String(color || ''));
+
+    return {
+      lowMax: Number.isInteger(lowMax) && lowMax >= 0
+        ? lowMax
+        : defaults.lowMax,
+      highMin: Number.isInteger(highMin) && highMin >= 0
+        ? highMin
+        : defaults.highMin,
+      lowEnabled: value?.lowEnabled === true,
+      lowColor: isHexColor(value?.lowColor)
+        ? value.lowColor
+        : defaults.lowColor,
+      middleEnabled: value?.middleEnabled === true,
+      middleColor: isHexColor(value?.middleColor)
+        ? value.middleColor
+        : defaults.middleColor,
+      highEnabled: value?.highEnabled === true,
+      highColor: isHexColor(value?.highColor)
+        ? value.highColor
+        : defaults.highColor,
+    };
+  }
+
+  function loadSalesColorSettings() {
+    if (state.salesColorSettings) return state.salesColorSettings;
+
+    try {
+      state.salesColorSettings = normalizeSalesColorSettings(
+        JSON.parse(
+          localStorage.getItem(SALES_COLOR_SETTINGS_KEY) || 'null'
+        )
+      );
+    } catch {
+      state.salesColorSettings = normalizeSalesColorSettings(null);
+    }
+
+    return state.salesColorSettings;
+  }
+
+  function saveSalesColorSettings(settings) {
+    const normalized = normalizeSalesColorSettings(settings);
+    state.salesColorSettings = normalized;
+
+    try {
+      localStorage.setItem(
+        SALES_COLOR_SETTINGS_KEY,
+        JSON.stringify(normalized)
+      );
+    } catch {
+      // The setting still applies until this page is closed.
+    }
+
+    queueUpdate();
+  }
+
+  function getSalesCountColor(count) {
+    const settings = loadSalesColorSettings();
+
+    if (count <= settings.lowMax) {
+      return settings.lowEnabled ? settings.lowColor : '';
+    }
+
+    if (count >= settings.highMin) {
+      return settings.highEnabled ? settings.highColor : '';
+    }
+
+    return settings.middleEnabled ? settings.middleColor : '';
   }
 
   function applySalesCache(cached) {
@@ -635,6 +724,7 @@
       'important'
     );
     text.style.setProperty('color', YELLOW_HEX, 'important');
+    text.style.setProperty('font-size', '0.9em', 'important');
     text.style.setProperty(
       '-webkit-text-fill-color',
       YELLOW_HEX,
@@ -663,6 +753,222 @@
     }
   }
 
+  function closeSalesSettingsPanel() {
+    state.salesSettingsPanel?.remove();
+    state.salesSettingsPanel = null;
+  }
+
+  function styleSettingsButton(button, primary = false) {
+    button.type = 'button';
+    button.style.setProperty('border', '1px solid #5c5f66');
+    button.style.setProperty('border-radius', '5px');
+    button.style.setProperty('padding', '5px 9px');
+    button.style.setProperty('cursor', 'pointer');
+    button.style.setProperty('font-size', '12px');
+    button.style.setProperty(
+      'background',
+      primary ? YELLOW_HEX : 'transparent'
+    );
+    button.style.setProperty('color', primary ? '#1a1b1e' : 'inherit');
+  }
+
+  function openSalesSettingsPanel(badge) {
+    if (state.salesSettingsPanel) {
+      closeSalesSettingsPanel();
+      return;
+    }
+
+    const settings = loadSalesColorSettings();
+    const panel = document.createElement('div');
+    panel.dataset.tmSalesSettings = 'true';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', 'Daily sales color settings');
+    panel.style.setProperty('position', 'fixed');
+    panel.style.setProperty('z-index', '2147483647');
+    panel.style.setProperty('width', '300px');
+    panel.style.setProperty('box-sizing', 'border-box');
+    panel.style.setProperty('padding', '12px');
+    panel.style.setProperty('border', '1px solid #5c5f66');
+    panel.style.setProperty('border-radius', '8px');
+    panel.style.setProperty(
+      'background',
+      'var(--mantine-color-body, #1a1b1e)'
+    );
+    panel.style.setProperty('color', 'var(--mantine-color-text, #f1f3f5)');
+    panel.style.setProperty(
+      'box-shadow',
+      '0 8px 28px rgba(0, 0, 0, 0.35)'
+    );
+    panel.style.setProperty('font-family', 'inherit');
+    panel.style.setProperty('-webkit-text-fill-color', 'currentColor');
+
+    const heading = document.createElement('div');
+    heading.textContent = 'Daily sales colors';
+    heading.style.setProperty('font-size', '15px');
+    heading.style.setProperty('font-weight', '700');
+    heading.style.setProperty('margin-bottom', '3px');
+    panel.appendChild(heading);
+
+    const help = document.createElement('div');
+    help.textContent = 'Unchecked ranges use Civitai\'s default text color.';
+    help.style.setProperty('font-size', '11px');
+    help.style.setProperty('opacity', '0.75');
+    help.style.setProperty('margin-bottom', '10px');
+    panel.appendChild(help);
+
+    function createRow(labelText, enabled, color, threshold) {
+      const row = document.createElement('label');
+      row.style.setProperty('display', 'grid');
+      row.style.setProperty(
+        'grid-template-columns',
+        threshold === null ? '20px 1fr 42px' : '20px 68px 1fr 42px'
+      );
+      row.style.setProperty('align-items', 'center');
+      row.style.setProperty('gap', '6px');
+      row.style.setProperty('margin', '7px 0');
+      row.style.setProperty('font-size', '12px');
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = enabled;
+      checkbox.title = `Enable the ${labelText.toLowerCase()} color`;
+      row.appendChild(checkbox);
+
+      const label = document.createElement('span');
+      label.textContent = labelText;
+      row.appendChild(label);
+
+      let number = null;
+      if (threshold !== null) {
+        number = document.createElement('input');
+        number.type = 'number';
+        number.min = '0';
+        number.step = '1';
+        number.value = String(threshold);
+        number.style.setProperty('width', '100%');
+        number.style.setProperty('box-sizing', 'border-box');
+        number.style.setProperty('padding', '4px');
+        number.style.setProperty('border', '1px solid #5c5f66');
+        number.style.setProperty('border-radius', '4px');
+        number.style.setProperty('background', 'transparent');
+        number.style.setProperty('color', 'inherit');
+        number.style.setProperty('-webkit-text-fill-color', 'currentColor');
+        row.appendChild(number);
+      }
+
+      const picker = document.createElement('input');
+      picker.type = 'color';
+      picker.value = color;
+      picker.title = `${labelText} color`;
+      picker.style.setProperty('width', '42px');
+      picker.style.setProperty('height', '28px');
+      picker.style.setProperty('padding', '1px');
+      picker.style.setProperty('cursor', 'pointer');
+      row.appendChild(picker);
+
+      panel.appendChild(row);
+      return { checkbox, number, picker };
+    }
+
+    const low = createRow(
+      'Low ≤',
+      settings.lowEnabled,
+      settings.lowColor,
+      settings.lowMax
+    );
+    const middle = createRow(
+      'Middle',
+      settings.middleEnabled,
+      settings.middleColor,
+      null
+    );
+    const high = createRow(
+      'High ≥',
+      settings.highEnabled,
+      settings.highColor,
+      settings.highMin
+    );
+
+    const error = document.createElement('div');
+    error.style.setProperty('min-height', '15px');
+    error.style.setProperty('font-size', '11px');
+    error.style.setProperty('color', '#fa5252');
+    error.style.setProperty('-webkit-text-fill-color', '#fa5252');
+    panel.appendChild(error);
+
+    const actions = document.createElement('div');
+    actions.style.setProperty('display', 'flex');
+    actions.style.setProperty('justify-content', 'flex-end');
+    actions.style.setProperty('gap', '6px');
+
+    const reset = document.createElement('button');
+    reset.textContent = 'Reset';
+    styleSettingsButton(reset);
+    reset.addEventListener('click', () => {
+      saveSalesColorSettings(DEFAULT_SALES_COLOR_SETTINGS);
+      closeSalesSettingsPanel();
+    });
+
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    styleSettingsButton(cancel);
+    cancel.addEventListener('click', closeSalesSettingsPanel);
+
+    const save = document.createElement('button');
+    save.textContent = 'Save';
+    styleSettingsButton(save, true);
+    save.addEventListener('click', () => {
+      const lowMax = Number(low.number.value);
+      const highMin = Number(high.number.value);
+
+      if (
+        !Number.isInteger(lowMax) ||
+        lowMax < 0 ||
+        !Number.isInteger(highMin) ||
+        highMin <= lowMax
+      ) {
+        error.textContent = 'High must be a whole number greater than Low.';
+        return;
+      }
+
+      saveSalesColorSettings({
+        lowMax,
+        highMin,
+        lowEnabled: low.checkbox.checked,
+        lowColor: low.picker.value,
+        middleEnabled: middle.checkbox.checked,
+        middleColor: middle.picker.value,
+        highEnabled: high.checkbox.checked,
+        highColor: high.picker.value,
+      });
+      closeSalesSettingsPanel();
+    });
+
+    actions.append(reset, cancel, save);
+    panel.appendChild(actions);
+    panel.addEventListener('click', (event) => event.stopPropagation());
+    document.body.appendChild(panel);
+    state.salesSettingsPanel = panel;
+
+    const badgeRect = badge.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    const left = Math.max(
+      8,
+      Math.min(
+        window.innerWidth - panelRect.width - 8,
+        badgeRect.right - panelRect.width
+      )
+    );
+    let top = badgeRect.bottom + 8;
+
+    if (top + panelRect.height > window.innerHeight - 8) {
+      top = Math.max(8, badgeRect.top - panelRect.height - 8);
+    }
+
+    panel.style.setProperty('left', `${left}px`);
+    panel.style.setProperty('top', `${top}px`);
+  }
+
   function updateSalesBadge(root) {
     let badge = root.querySelector('[data-tm-sales-today="true"]');
     const currentDayKey = getUtcDayBounds().dayKey;
@@ -674,33 +980,97 @@
       badge = document.createElement('span');
       badge.dataset.tmSalesToday = 'true';
       badge.setAttribute('aria-label', 'Paid-model sales today');
-      badge.style.setProperty('margin-left', '5px', 'important');
-      badge.style.setProperty('font-size', '0.75em', 'important');
+      badge.setAttribute('role', 'button');
+      badge.setAttribute('tabindex', '0');
+      badge.style.setProperty('display', 'inline-flex', 'important');
+      badge.style.setProperty('flex-direction', 'row', 'important');
+      badge.style.setProperty('align-items', 'center', 'important');
+      badge.style.setProperty('justify-content', 'center', 'important');
+      badge.style.setProperty('margin-left', '6px', 'important');
+      badge.style.setProperty('min-width', '46px', 'important');
       badge.style.setProperty('font-weight', '600', 'important');
       badge.style.setProperty('line-height', '1', 'important');
       badge.style.setProperty('white-space', 'nowrap', 'important');
       badge.style.setProperty('background', 'none', 'important');
-      badge.style.setProperty('color', YELLOW_HEX, 'important');
-      badge.style.setProperty(
-        '-webkit-text-fill-color',
-        YELLOW_HEX,
-        'important'
-      );
+      badge.style.setProperty('cursor', 'pointer', 'important');
+      badge.style.setProperty('user-select', 'none', 'important');
+
+      const number = document.createElement('span');
+      number.dataset.tmSalesNumber = 'true';
+      number.style.setProperty('font-size', '1em', 'important');
+      number.style.setProperty('font-weight', '700', 'important');
+      number.style.setProperty('margin-right', '5px', 'important');
+
+      const label = document.createElement('span');
+      label.dataset.tmSalesLabel = 'true';
+      label.style.setProperty('display', 'inline-flex', 'important');
+      label.style.setProperty('flex-direction', 'column', 'important');
+      label.style.setProperty('align-items', 'flex-start', 'important');
+      label.style.setProperty('font-size', '0.58em', 'important');
+      label.style.setProperty('font-weight', '600', 'important');
+      label.style.setProperty('line-height', '0.95', 'important');
+
+      const dailyLabel = document.createElement('span');
+      dailyLabel.textContent = 'daily';
+
+      const salesLabel = document.createElement('span');
+      salesLabel.textContent = 'sales';
+
+      label.append(dailyLabel, salesLabel);
+
+      badge.append(number, label);
+      badge.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openSalesSettingsPanel(badge);
+      });
+      badge.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        event.stopPropagation();
+        openSalesSettingsPanel(badge);
+      });
       root.appendChild(badge);
     }
 
+    const number = badge.querySelector('[data-tm-sales-number="true"]');
+
     if (hasCurrentCount) {
-      const noun = state.salesCount === 1 ? 'sale' : 'sales';
-      badge.textContent = `· ${state.salesCount} ${noun}`;
-      badge.title =
-        `${state.salesCount} paid-model ${noun} since 00:00 UTC`;
-      badge.style.removeProperty('display');
+      const color = getSalesCountColor(state.salesCount);
+      const countText = String(state.salesCount);
+      if (number.textContent !== countText) number.textContent = countText;
+      badge.title = `${state.salesCount} paid-model sales since 00:00 UTC. Click to configure colors.`;
+      badge.style.setProperty(
+        'display',
+        'inline-flex',
+        'important'
+      );
+      badge.style.setProperty(
+        'color',
+        color || 'var(--mantine-color-text)',
+        'important'
+      );
+      badge.style.setProperty(
+        '-webkit-text-fill-color',
+        color || 'var(--mantine-color-text)',
+        'important'
+      );
     } else if (state.salesLoading) {
-      badge.textContent = '· … sales';
+      if (number.textContent !== '…') number.textContent = '…';
       badge.title = 'Loading paid-model sales since 00:00 UTC';
-      badge.style.removeProperty('display');
+      badge.style.setProperty('display', 'inline-flex', 'important');
+      badge.style.setProperty(
+        'color',
+        'var(--mantine-color-text)',
+        'important'
+      );
+      badge.style.setProperty(
+        '-webkit-text-fill-color',
+        'var(--mantine-color-text)',
+        'important'
+      );
     } else {
-      badge.textContent = '';
+      if (number.textContent) number.textContent = '';
       badge.title = state.salesError
         ? `Could not load today's sales: ${state.salesError}`
         : '';
@@ -823,11 +1193,32 @@
     );
 
     window.addEventListener('storage', (event) => {
+      if (event.key === SALES_COLOR_SETTINGS_KEY) {
+        state.salesColorSettings = null;
+        loadSalesColorSettings();
+        queueUpdate();
+        return;
+      }
+
       if (event.key !== SALES_CACHE_KEY) return;
 
       const bounds = getUtcDayBounds();
       applySalesCache(loadSalesCache(bounds.dayKey));
     });
+
+    document.addEventListener('click', (event) => {
+      const panel = state.salesSettingsPanel;
+      if (!panel) return;
+      if (panel.contains(event.target)) return;
+      if (event.target?.closest?.('[data-tm-sales-today="true"]')) return;
+      closeSalesSettingsPanel();
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') closeSalesSettingsPanel();
+    });
+
+    window.addEventListener('resize', closeSalesSettingsPanel);
 
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) refreshSalesIfNeeded();
