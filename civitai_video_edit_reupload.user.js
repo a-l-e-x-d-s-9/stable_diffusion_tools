@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Civitai Video Rating Re-upload Helper
 // @namespace    https://civitai.com/
-// @version      0.2.2
+// @version      0.3.1
 // @icon         https://civitai.com/favicon.ico
-// @description  Re-upload Civitai post videos missing scanner rating while preserving metadata. Safe no-delete version with reload-safe auto mode, robust rating detection, synced numbering, virtual index correction, and resilient chunked media downloading.
+// @description  Re-upload Civitai post videos missing scanner rating while preserving metadata/resources, then safely clean handled clones by keeping a tagged copy or the original. Uses last-to-first batch auto mode with one final reload.
 // @match        https://civitai.com/posts/*/edit*
 // @match        https://www.civitai.com/posts/*/edit*
 // @match        https://civitai.green/posts/*/edit*
@@ -28,7 +28,10 @@
     const API_ORIGIN = location.origin;
     const INIT_UPLOAD_ENDPOINT = `${API_ORIGIN}/api/v1/image-upload/multipart`;
     const COMPLETE_UPLOAD_ENDPOINT = `${API_ORIGIN}/api/upload/complete`;
+    const POST_GET_EDIT_ENDPOINT = `${API_ORIGIN}/api/trpc/post.getEdit`;
     const POST_ADD_IMAGE_ENDPOINT = `${API_ORIGIN}/api/trpc/post.addImage`;
+    const POST_ADD_RESOURCE_ENDPOINT = `${API_ORIGIN}/api/trpc/post.addResourceToImage`;
+    const IMAGE_DELETE_ENDPOINT = `${API_ORIGIN}/api/trpc/image.delete`;
     const AUTO_DELAY_MS = 2500;
     const AUTO_RELOAD_DELAY_MS = 2500;
     const AUTO_STATE_PREFIX = 'cvr_auto_reload_v1_';
@@ -41,6 +44,7 @@
         status: null,
         showOnlyMissing: true,
         autoRunning: false,
+        cleanupRunning: false,
         handled: {},
         deleteAfterUpload: false,
         highlightedRoot: null,
@@ -110,6 +114,8 @@
             height,
             modelVersionId,
             modelId: numberOrNull(o.modelId ?? o.model?.id),
+            resourceDescriptors: collectResourceDescriptors(o, meta),
+            contentTags: collectContentTags(o),
             meta,
             metadata,
             ratingText,
@@ -133,6 +139,93 @@
         if (v === null || v === undefined || v === '') return null;
         const n = Number(v);
         return Number.isFinite(n) ? n : null;
+    }
+
+    function normalizeResourceType(type) {
+        const value = String(type || '').trim();
+        const compact = value.toLowerCase().replace(/[\s_-]+/g, '');
+        if (!compact) return '';
+        if (compact === 'checkpoint' || compact === 'model') return 'checkpoint';
+        if (compact === 'lora' || compact === 'locon' || compact === 'lycoris') return 'lora';
+        if (compact === 'textualinversion' || compact === 'embedding' || compact === 'embed') return 'embed';
+        if (compact === 'vae') return 'vae';
+        if (compact === 'controlnet') return 'controlnet';
+        return value.toLowerCase();
+    }
+
+    function mergeResourceDescriptors(...groups) {
+        const byId = new Map();
+        for (const group of groups) {
+            for (const item of Array.isArray(group) ? group : []) {
+                // A generic `id` can be an ImageResource join-row id or model id.
+                // Only the explicit version id is safe to copy.
+                const modelVersionId = numberOrNull(item?.modelVersionId);
+                if (modelVersionId === null) continue;
+                const previous = byId.get(modelVersionId) || { modelVersionId };
+                const type = normalizeResourceType(item?.type ?? item?.modelType);
+                const weight = numberOrNull(item?.weight ?? item?.strength);
+                byId.set(modelVersionId, {
+                    ...previous,
+                    ...(type ? { type } : {}),
+                    ...(weight !== null ? { weight } : {}),
+                });
+            }
+        }
+        return [...byId.values()];
+    }
+
+    function collectResourceDescriptors(raw, meta = raw?.meta) {
+        return mergeResourceDescriptors(
+            raw?.resourceDescriptors,
+            raw?.resourceHelper,
+            raw?.resources,
+            raw?.civitaiResources,
+            raw?.metadata?.civitaiResources,
+            meta?.civitaiResources,
+            // Older Civitai payloads sometimes included modelVersionId here.
+            meta?.resources,
+        );
+    }
+
+    function metaWithCopiedResources(media) {
+        const meta = cloneSerializable(media?.meta || media?.raw?.meta || null) || {};
+        const resources = mergeResourceDescriptors(
+            meta.civitaiResources,
+            collectResourceDescriptors(media?.raw || {}, meta),
+            media?.resourceDescriptors,
+        );
+        if (resources.length) meta.civitaiResources = resources;
+        return Object.keys(meta).length ? meta : null;
+    }
+
+    function collectContentTags(raw) {
+        const candidates = [raw?.tags, raw?.imageTags, raw?.tagsOnImage, raw?.tagIds];
+        const tags = new Map();
+        for (const list of candidates) {
+            for (const item of Array.isArray(list) ? list : []) {
+                const tag = item?.tag ?? item;
+                const id = numberOrNull(tag?.id ?? item?.tagId ?? (typeof tag === 'number' ? tag : null));
+                const name = String(tag?.name ?? tag?.label ?? (typeof tag === 'string' ? tag : '')).replace(/\s+/g, ' ').trim();
+                if (!name && id === null) continue;
+                const key = id !== null ? `id:${id}` : `name:${name.toLowerCase()}`;
+                tags.set(key, { ...(tags.get(key) || {}), ...(id !== null ? { id } : {}), ...(name ? { name } : {}) });
+            }
+        }
+        return [...tags.values()];
+    }
+
+    function mergeContentTags(...groups) {
+        const tags = new Map();
+        for (const group of groups) {
+            for (const tag of Array.isArray(group) ? group : []) {
+                const id = numberOrNull(tag?.id);
+                const name = String(tag?.name || '').replace(/\s+/g, ' ').trim();
+                if (!name && id === null) continue;
+                const key = id !== null ? `id:${id}` : `name:${name.toLowerCase()}`;
+                tags.set(key, { ...(tags.get(key) || {}), ...(id !== null ? { id } : {}), ...(name ? { name } : {}) });
+            }
+        }
+        return [...tags.values()];
     }
 
     function guessMime(name) {
@@ -203,11 +296,27 @@
     function markHandled(media, extra = {}) {
         const key = mediaHandledKey(media);
         if (!key) return;
+        const previous = state.handled[key] || {};
+        const uploads = Array.isArray(previous.uploads) ? [...previous.uploads] : [];
+        if (extra.replacementKey || extra.replacementId) {
+            const upload = {
+                at: new Date().toISOString(),
+                replacementKey: extra.replacementKey || null,
+                replacementId: numberOrNull(extra.replacementId),
+                sentIndex: numberOrNull(extra.sentIndex),
+            };
+            const uploadKey = String(upload.replacementId ?? upload.replacementKey ?? '');
+            if (uploadKey && !uploads.some(x => String(x?.replacementId ?? x?.replacementKey ?? '') === uploadKey)) {
+                uploads.push(upload);
+            }
+        }
         state.handled[key] = {
+            ...previous,
             at: new Date().toISOString(),
-            originalId: media.id || uuidFromUrl(media.url || '') || null,
-            originalUrl: media.url || null,
+            originalId: previous.originalId || media.id || uuidFromUrl(media.url || '') || null,
+            originalUrl: previous.originalUrl || media.url || null,
             promptHash: simpleHash(media?.meta?.prompt || ''),
+            uploads,
             ...extra,
         };
         saveHandledState();
@@ -249,9 +358,13 @@
         localStorage.removeItem(autoStateKey());
     }
 
-    function startReloadSafeAuto() {
+    function startBatchAuto() {
+        if (state.autoRunning) {
+            setStatus('Auto mode is already running.');
+            return;
+        }
         saveAutoState({ active: true, startedAt: new Date().toISOString(), completed: 0 });
-        autoReuploadNextWithReload().catch(e => {
+        autoReuploadAllThenReload().catch(e => {
             console.error(e);
             clearAutoState();
             state.autoRunning = false;
@@ -259,10 +372,172 @@
         });
     }
 
-    function stopReloadSafeAuto() {
+    function stopBatchAuto() {
         clearAutoState();
-        state.autoRunning = false;
-        setStatus('Auto mode stopped.');
+        setStatus(state.autoRunning
+            ? 'Stop requested. The current upload will finish, then auto mode will stop.'
+            : 'Auto mode stopped.');
+    }
+
+    function exactImageId(media) {
+        const id = numberOrNull(media?.id ?? media?.raw?.id ?? media?.raw?.imageId);
+        return Number.isInteger(id) && id > 0 ? id : null;
+    }
+
+    async function refreshExactPostImageData() {
+        const postId = postIdFromUrl();
+        if (!postId) throw new Error('Could not read post id from URL.');
+        const queryVariants = [
+            `${POST_GET_EDIT_ENDPOINT}?input=${encodeURIComponent(JSON.stringify({ json: { id: postId } }))}`,
+            `${POST_GET_EDIT_ENDPOINT}?batch=1&input=${encodeURIComponent(JSON.stringify({ 0: { json: { id: postId } } }))}`,
+        ];
+        let lastFailure = 'unknown response';
+        for (const url of queryVariants) {
+            const response = await fetch(url, {
+                method: 'GET',
+                credentials: 'include',
+                headers: {
+                    'Accept': 'application/json',
+                    'x-client': 'web',
+                    'x-client-date': String(Date.now()),
+                },
+            });
+            const text = await response.text();
+            let json = null;
+            try { json = text ? JSON.parse(text) : null; } catch {}
+            const detail = response.ok ? unwrapTrpcResponse(json) : null;
+            if (detail && Array.isArray(detail.images)) {
+                captureJson(detail, 'direct:post.getEdit:cleanup');
+                log(`Direct post.getEdit resolved ${detail.images.length} post image record(s).`);
+                return detail;
+            }
+            lastFailure = response.ok
+                ? 'response did not contain the post image list'
+                : `[${response.status}]: ${text.slice(0, 400)}`;
+        }
+        throw new Error(`post.getEdit failed: ${lastFailure}`);
+    }
+
+    function mediaMatchesStoredOriginal(media, handledRecord) {
+        const wanted = String(handledRecord?.originalId || uuidFromUrl(handledRecord?.originalUrl || '') || '');
+        if (!wanted) return false;
+        const candidates = [media?.id, uuidFromUrl(media?.url || ''), uuidFromUrl(media?.raw?.url || '')]
+            .filter(Boolean)
+            .map(String);
+        return candidates.includes(wanted);
+    }
+
+    function buildCleanupPlan() {
+        const grouped = new Map();
+        for (const media of state.media) {
+            const key = mediaHandledKey(media);
+            if (!state.handled?.[key]) continue;
+            if (!grouped.has(key)) grouped.set(key, []);
+            grouped.get(key).push(media);
+        }
+
+        const plans = [];
+        for (const [key, unsorted] of grouped) {
+            const seen = new Set();
+            const group = unsorted
+                .filter(media => {
+                    const identity = String(media?.id ?? media?.url ?? '');
+                    if (!identity || seen.has(identity)) return false;
+                    seen.add(identity);
+                    return true;
+                })
+                .sort((a, b) =>
+                    (numberOrNull(a.serverIndex ?? a.index) ?? Number.MAX_SAFE_INTEGER)
+                    - (numberOrNull(b.serverIndex ?? b.index) ?? Number.MAX_SAFE_INTEGER));
+            if (group.length < 2) continue;
+
+            const tagged = group
+                .filter(media => (media.contentTags || []).length > 0)
+                .sort((a, b) =>
+                    (b.contentTags?.length || 0) - (a.contentTags?.length || 0)
+                    || group.indexOf(a) - group.indexOf(b));
+            const handledRecord = state.handled[key];
+            const original = group.find(media => mediaMatchesStoredOriginal(media, handledRecord));
+            const keep = tagged[0] || original || group[0];
+            const remove = group.filter(media => media !== keep);
+            const missingIds = remove.filter(media => exactImageId(media) === null);
+            plans.push({ key, group, keep, remove, missingIds, usedTaggedCopy: tagged.length > 0 });
+        }
+        return plans;
+    }
+
+    async function clearAllReuploadedClones() {
+        if (state.autoRunning || state.cleanupRunning) {
+            setStatus(state.autoRunning ? 'Stop Auto all safe before running Clear all.' : 'Clear all is already running.', true);
+            return;
+        }
+
+        state.cleanupRunning = true;
+        let deleted = 0;
+        try {
+            setStatus('Clear all: resolving exact Civitai image IDs and current tags...');
+            await refreshExactPostImageData();
+            rebuildMediaList();
+            await sleep(500);
+            const plans = buildCleanupPlan();
+            if (!plans.length) {
+                setStatus('Clear all: no handled duplicate video groups were found.');
+                return;
+            }
+
+            const unsafe = plans.filter(plan => plan.missingIds.length);
+            if (unsafe.length) {
+                const missingCount = unsafe.reduce((total, plan) => total + plan.missingIds.length, 0);
+                log('Cleanup entries still missing numeric IDs', unsafe.map(plan => ({
+                    fingerprint: plan.key,
+                    entries: plan.missingIds.map(media => ({ id: media.id, url: media.url, index: media.index, name: media.name })),
+                })));
+                setStatus(`Clear all stopped before deleting anything: ${missingCount} duplicate entr${missingCount === 1 ? 'y still has' : 'ies still have'} no exact numeric Civitai image ID after querying post.getEdit. Details were written to the console.`, true);
+                return;
+            }
+
+            const deleteCount = plans.reduce((total, plan) => total + plan.remove.length, 0);
+            const taggedKeeps = plans.filter(plan => plan.usedTaggedCopy).length;
+            const originalKeeps = plans.length - taggedKeeps;
+            const confirmed = window.confirm(
+                `Clear all will permanently delete ${deleteCount} duplicate video entr${deleteCount === 1 ? 'y' : 'ies'} across ${plans.length} handled group(s).\n\n`
+                + `${taggedKeeps} group(s): keep the copy with the most content tags.\n`
+                + `${originalKeeps} group(s): no tagged copy, keep the original/earliest copy.\n\n`
+                + 'This cannot be undone. Continue?'
+            );
+            if (!confirmed) {
+                setStatus('Clear all cancelled. Nothing was deleted.');
+                return;
+            }
+
+            for (const plan of plans) {
+                // Delete later entries first so any server-side reindexing cannot
+                // affect the identities or order of entries still queued.
+                const targets = [...plan.remove].sort((a, b) =>
+                    (numberOrNull(b.serverIndex ?? b.index) ?? 0)
+                    - (numberOrNull(a.serverIndex ?? a.index) ?? 0));
+                for (const media of targets) {
+                    const id = exactImageId(media);
+                    setStatus(`Clear all: deleting duplicate ${deleted + 1}/${deleteCount} (image id ${id}); keeping image id ${exactImageId(plan.keep) ?? '?'}.`);
+                    await postJson(IMAGE_DELETE_ENDPOINT, { json: { id } }, `delete image ${id}`);
+                    deleted++;
+                    await sleep(500);
+                }
+                delete state.handled[plan.key];
+                saveHandledState();
+            }
+
+            setStatus(`Clear all completed: deleted ${deleted} duplicate video entr${deleted === 1 ? 'y' : 'ies'}. Reloading once...`);
+            await sleep(1500);
+            location.reload();
+        } catch (error) {
+            console.error(error);
+            setStatus(deleted
+                ? `Clear all stopped after deleting ${deleted} entr${deleted === 1 ? 'y' : 'ies'}: ${error.message || error}. Successfully deleted entries remain deleted; reload and retry.`
+                : `Clear all stopped before deleting anything: ${error.message || error}.`, true);
+        } finally {
+            state.cleanupRunning = false;
+        }
     }
 
     function walkJson(root, visitor, maxNodes = 120000) {
@@ -496,18 +771,54 @@
         return m ? { width: Number(m[1]), height: Number(m[2]) } : { width: null, height: null };
     }
 
-    function modelVersionFromDom(root) {
-        const links = [...root.querySelectorAll('a[href*="modelVersionId="]')];
-        // Prefer LoRA/user-added resource if present, otherwise first modelVersionId.
-        const preferred = links.find(a => /LoRA/i.test(a.parentElement?.innerText || a.innerText || '')) || links[0];
-        if (!preferred) return null;
+    function modelVersionIdFromLink(link) {
+        if (!link) return null;
         try {
-            const u = new URL(preferred.getAttribute('href'), location.origin);
+            const u = new URL(link.getAttribute('href'), location.origin);
             return numberOrNull(u.searchParams.get('modelVersionId'));
         } catch {
-            const m = String(preferred.getAttribute('href') || '').match(/modelVersionId=(\d+)/);
+            const m = String(link.getAttribute('href') || '').match(/modelVersionId=(\d+)/);
             return m ? Number(m[1]) : null;
         }
+    }
+
+    function resourceTypeNearLink(link) {
+        let node = link;
+        let bestText = '';
+        for (let depth = 0; node && depth < 5; depth++, node = node.parentElement) {
+            const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+            if (text && (!bestText || text.length < bestText.length)) bestText = text;
+            const match = text.match(/\b(Checkpoint|LoRA|LoCon|LyCORIS|Textual Inversion|Embedding|VAE|ControlNet)\b/i);
+            if (match) return normalizeResourceType(match[1]);
+        }
+        return normalizeResourceType(bestText.match(/\b(lora|checkpoint|embedding|vae)\b/i)?.[1]);
+    }
+
+    function resourceDescriptorsFromDom(root) {
+        if (!root) return [];
+        return mergeResourceDescriptors(
+            [...root.querySelectorAll('a[href*="modelVersionId="]')].map(link => ({
+                modelVersionId: modelVersionIdFromLink(link),
+                type: resourceTypeNearLink(link),
+            })),
+        );
+    }
+
+    function contentTagsFromDom(root) {
+        if (!root) return [];
+        const elements = [...root.querySelectorAll(
+            '[data-activity*="tag-click:image"], [class*="VotableTag_mainBadge"]'
+        )];
+        return mergeContentTags(elements.map(element => {
+            const name = (element.innerText || element.textContent || '').replace(/\s+/g, ' ').trim();
+            return name && !/^(tag|add tag)$/i.test(name) ? { name } : null;
+        }).filter(Boolean));
+    }
+
+    function modelVersionFromDom(root) {
+        // The top-level field is the primary model association, not a container for
+        // every resource. Never put an arbitrary LoRA here.
+        return resourceDescriptorsFromDom(root).find(x => x.type === 'checkpoint')?.modelVersionId ?? null;
     }
 
     function domMetaFromCard(root, size) {
@@ -551,6 +862,8 @@
             const hasRating = ratingInfo.hasRating;
             const size = aspectSizeFromCard(root);
             const meta = domMetaFromCard(root, size);
+            const resourceDescriptors = resourceDescriptorsFromDom(root);
+            const contentTags = contentTagsFromDom(root);
             const mime = best.type || guessMime(src) || 'video/mp4';
             const name = filenameFromUrl(src, id ? `${id}.mp4` : `dom_video_${idx}.mp4`);
 
@@ -570,7 +883,9 @@
                 height: size.height,
                 modelVersionId: modelVersionFromDom(root),
                 modelId: null,
-                meta,
+                resourceDescriptors,
+                contentTags,
+                meta: resourceDescriptors.length ? { ...(meta || {}), civitaiResources: resourceDescriptors } : meta,
                 metadata: { width: size.width, height: size.height },
                 ratingText: hasRating ? (ratingText || 'rated') : '',
                 missingRating: !hasRating,
@@ -581,6 +896,67 @@
             idx++;
         }
         return out;
+    }
+
+    function mergeMediaDetails(target, source) {
+        if (!target || !source) return target;
+        const targetExactId = exactImageId(target);
+        const sourceExactId = exactImageId(source);
+        if (targetExactId === null && sourceExactId !== null) {
+            target.id = sourceExactId;
+            // The numeric-ID record comes from post.getEdit and is authoritative
+            // for deletion and current server ordering.
+            for (const key of ['baseIndex', 'index', 'serverIndex', 'displayNumber']) {
+                if (source[key] != null) target[key] = source[key];
+            }
+        }
+        target.resourceDescriptors = mergeResourceDescriptors(
+            target.resourceDescriptors,
+            collectResourceDescriptors(target.raw || {}, target.meta),
+            source.resourceDescriptors,
+            collectResourceDescriptors(source.raw || {}, source.meta),
+        );
+        target.contentTags = mergeContentTags(
+            target.contentTags,
+            collectContentTags(target.raw || {}),
+            source.contentTags,
+            collectContentTags(source.raw || {}),
+        );
+
+        const targetMetaSize = JSON.stringify(target.meta || {}).length;
+        const sourceMetaSize = JSON.stringify(source.meta || {}).length;
+        if (sourceMetaSize > targetMetaSize) target.meta = source.meta;
+        if (target.resourceDescriptors.length) {
+            target.meta = {
+                ...(target.meta || {}),
+                civitaiResources: mergeResourceDescriptors(target.meta?.civitaiResources, target.resourceDescriptors),
+            };
+        }
+
+        const sourceCandidates = [...(target.sourceCandidates || []), ...(source.sourceCandidates || [])];
+        const seenSources = new Set();
+        target.sourceCandidates = sourceCandidates.filter(candidate => {
+            const src = String(candidate?.src || '');
+            if (!src || seenSources.has(src)) return false;
+            seenSources.add(src);
+            return true;
+        });
+
+        for (const key of ['domRoot', 'width', 'height', 'modelVersionId', 'modelId']) {
+            if (target[key] == null && source[key] != null) target[key] = source[key];
+        }
+        if (!target.url && source.url) target.url = source.url;
+        if (!target.ratingText && source.ratingText) target.ratingText = source.ratingText;
+        target.missingRating = Boolean(target.missingRating && source.missingRating);
+        return target;
+    }
+
+    function mediaMatches(a, b) {
+        if (!a || !b) return false;
+        if (a.id != null && b.id != null && String(a.id) === String(b.id)) return true;
+        const aUuid = uuidFromUrl(a.url || '') || a.id;
+        const bUuid = uuidFromUrl(b.url || '') || b.id;
+        return Boolean(aUuid && bUuid && String(aUuid) === String(bUuid));
     }
 
     function collectDomRatingHints() {
@@ -633,15 +1009,20 @@
         collectEmbeddedJson();
 
         const found = [];
-        const seen = new Set();
+        const foundByKey = new Map();
         let fallbackIndex = 0;
         for (const cap of state.captured) {
             walkJson(cap.data, (node) => {
                 if (!objectLooksLikeVideoMedia(node, postId)) return;
                 const media = normalizeMedia(node, fallbackIndex++, postId);
                 const key = media.id || media.url || `${media.name}:${media.index}`;
-                if (seen.has(key)) return;
-                seen.add(key);
+                const existing = foundByKey.get(String(key)) || found.find(candidate => mediaMatches(candidate, media));
+                if (existing) {
+                    mergeMediaDetails(existing, media);
+                    foundByKey.set(String(key), existing);
+                    return;
+                }
+                foundByKey.set(String(key), media);
                 found.push(media);
             });
         }
@@ -655,18 +1036,25 @@
 
         // Fallback for the current Civitai edit UI: some video cards are only visible
         // as DOM markup and never appear in the JSON captured by fetch/script parsing.
-        const seenDom = new Set(found.map(m => m.id || m.url).filter(Boolean));
-        const domFound = collectDomVideoCandidates(postId, found.length, seenDom);
+        const domFound = collectDomVideoCandidates(postId, 0, new Set());
+        let appendedDom = 0;
+        for (const domMedia of domFound) {
+            const existing = found.find(media => mediaMatches(media, domMedia));
+            if (existing) mergeMediaDetails(existing, domMedia);
+            else {
+                found.push(domMedia);
+                appendedDom++;
+            }
+        }
         if (domFound.length) {
-            log(`DOM fallback found ${domFound.length} video candidate(s).`);
-            found.push(...domFound);
+            log(`DOM inspection enriched ${domFound.length - appendedDom} and added ${appendedDom} video candidate(s).`);
         }
 
         found.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
         applyVirtualServerIndexes(found);
-        for (const media of found) {
-            if (!media.missingRating && isHandled(media)) clearHandledFor(media);
-        }
+        // Keep handled fingerprints even after a replacement receives a rating/tag.
+        // Clear-all needs this proof to limit destructive cleanup to groups created
+        // by this script. The marker is removed by cleanup or Clear state.
         state.media = found;
         renderVideoNumberBadges();
         renderList();
@@ -719,8 +1107,9 @@
     <label class="cvrSmall"><input id="cvrOnlyMissing" type="checkbox" checked> missing only</label>
     <button id="cvrAutoAll">Auto all safe</button>
     <button id="cvrStopAuto" class="cvrStop">Stop</button>
+    <button id="cvrClearAll" class="cvrDanger" title="Remove re-upload clones, keeping a tagged copy or otherwise the original">Clear all</button>
     <button id="cvrRefresh">Refresh</button>
-    <button id="cvrClearHandled" title="Clear handled cache for this post">Clear state</button>
+    <button id="cvrClearHandled" title="Forget handled/re-upload history for this post without deleting videos">Clear state</button>
     <button id="cvrMin">_</button>
   </div>
 </div>
@@ -731,8 +1120,9 @@
         state.body = panel.querySelector('#cvrBody');
         state.status = panel.querySelector('#cvrStatus');
         panel.querySelector('#cvrRefresh').addEventListener('click', rebuildMediaList);
-        panel.querySelector('#cvrAutoAll').addEventListener('click', startReloadSafeAuto);
-        panel.querySelector('#cvrStopAuto').addEventListener('click', stopReloadSafeAuto);
+        panel.querySelector('#cvrAutoAll').addEventListener('click', startBatchAuto);
+        panel.querySelector('#cvrStopAuto').addEventListener('click', stopBatchAuto);
+        panel.querySelector('#cvrClearAll').addEventListener('click', clearAllReuploadedClones);
         panel.querySelector('#cvrClearHandled').addEventListener('click', clearAllHandledState);
         panel.querySelector('#cvrOnlyMissing').addEventListener('change', (e) => {
             state.showOnlyMissing = e.target.checked;
@@ -834,7 +1224,7 @@
             row.innerHTML = `
 <div><b>#${displayNo} — ${escapeHtml(m.name)}</b></div>
 <div class="cvrMeta">video #: ${displayNo} | DOM index: ${m.baseIndex ?? m.index ?? '?'} | upload index: ${m.serverIndex ?? m.index ?? '?'} | id: ${escapeHtml(String(m.id ?? '?'))} | rating: ${escapeHtml(rating)}${handledText}</div>
-<div class="cvrMeta">mime: ${escapeHtml(m.mimeType)} | ${m.width || '?'}x${m.height || '?'} | modelVersionId: ${m.modelVersionId ?? '?'}</div>
+<div class="cvrMeta">mime: ${escapeHtml(m.mimeType)} | ${m.width || '?'}x${m.height || '?'} | primary modelVersionId: ${m.modelVersionId ?? '?'} | resources: ${(m.resourceDescriptors || []).length} | content tags: ${(m.contentTags || []).length}</div>
 <div class="cvrPrompt">${escapeHtml(prompt || '(no prompt found in captured metadata)')}</div>
 <div class="cvrActions">
   <button data-act="show">Show</button>
@@ -1237,7 +1627,7 @@
         const usedName = filenameFromUrl(usedUrl, originalName);
         const file = new File([blob], usedName, { type: blob.type || guessMime(usedName) || mime });
         log('downloaded original video', { name: file.name, size: file.size, type: file.type, usedUrl, method: result.method });
-        await reupload(media, file, { deleteOriginal: false });
+        return reupload(media, file, { deleteOriginal: false });
     }
 
     function chooseAndReupload(media) {
@@ -1335,7 +1725,7 @@
         const postId = postIdFromUrl();
         if (!postId) throw new Error('Could not read post id from URL.');
         const mime = file.type || guessMime(file.name) || media.mimeType || 'video/mp4';
-        const meta = cloneSerializable(media.meta || media.raw?.meta || null);
+        const meta = metaWithCopiedResources(media);
         const modelVersionId = numberOrNull(media.modelVersionId ?? media.raw?.modelVersionId);
         const width = numberOrNull(media.width ?? media.metadata?.width);
         const height = numberOrNull(media.height ?? media.metadata?.height);
@@ -1372,6 +1762,54 @@
             },
         };
         return postJson(POST_ADD_IMAGE_ENDPOINT, body, 'post.addImage');
+    }
+
+    function unwrapTrpcResponse(value) {
+        const root = Array.isArray(value) ? value[0] : value;
+        return root?.result?.data?.json
+            ?? root?.result?.data
+            ?? root?.data?.json
+            ?? root?.json
+            ?? root;
+    }
+
+    async function copyAdditionalResourcesToReplacement(media, addImageResponse) {
+        const wanted = mergeResourceDescriptors(
+            media?.resourceDescriptors,
+            collectResourceDescriptors(media?.raw || {}, media?.meta),
+            media?.meta?.civitaiResources,
+        );
+        if (!wanted.length) return { copied: 0, existing: 0, failed: [] };
+
+        const replacement = unwrapTrpcResponse(addImageResponse);
+        const imageId = numberOrNull(replacement?.id);
+        if (imageId === null) {
+            warn('Could not find replacement image id; resource associations could not be verified.', addImageResponse);
+            return { copied: 0, existing: 0, failed: wanted.map(x => x.modelVersionId) };
+        }
+
+        const existingIds = new Set(collectResourceDescriptors(replacement, replacement?.meta).map(x => x.modelVersionId));
+        let copied = 0;
+        let existing = 0;
+        const failed = [];
+        for (const resource of wanted) {
+            const modelVersionId = resource.modelVersionId;
+            if (existingIds.has(modelVersionId)) {
+                existing++;
+                continue;
+            }
+            try {
+                await postJson(POST_ADD_RESOURCE_ENDPOINT, {
+                    json: { id: [imageId], modelVersionId },
+                }, `copy resource ${modelVersionId}`);
+                existingIds.add(modelVersionId);
+                copied++;
+            } catch (error) {
+                failed.push(modelVersionId);
+                warn(`Could not copy resource modelVersionId ${modelVersionId}`, error);
+            }
+        }
+        return { copied, existing, failed };
     }
 
     function cloneSerializable(v) {
@@ -1500,7 +1938,18 @@
         const sentIndex = numberOrNull(media.serverIndex ?? media.index) ?? 0;
         const res = await addVideoToPost(media, initInfo, file);
         log('post.addImage response', res);
-        markHandled(media, { replacementKey: initInfo.key || null, replacementFile: file.name, deletedOriginal: false, sentIndex });
+        const replacementId = numberOrNull(unwrapTrpcResponse(res)?.id);
+        setStatus('Verifying copied model and LoRA resources...');
+        const resourceCopy = await copyAdditionalResourcesToReplacement(media, res);
+        markHandled(media, {
+            replacementKey: initInfo.key || null,
+            replacementId,
+            replacementFile: file.name,
+            deletedOriginal: false,
+            sentIndex,
+            resourcesCopied: resourceCopy.copied,
+            resourceCopyFailures: resourceCopy.failed,
+        });
         recordVirtualInsertion(media, sentIndex);
 
         if (false && options.deleteOriginal) {
@@ -1514,12 +1963,15 @@
                 setStatus(`Replacement added, but original was not deleted automatically: ${del.reason}.`, true);
             }
         } else {
-            setStatus('Done. Replacement video was added with copied metadata. Original deletion is disabled.');
+            const resourceStatus = resourceCopy.failed.length
+                ? ` ${resourceCopy.failed.length} resource association(s) could not be copied; see the console.`
+                : ` Verified ${resourceCopy.copied + resourceCopy.existing} model/LoRA resource association(s).`;
+            setStatus(`Done. Replacement video was added with copied metadata.${resourceStatus} Original deletion is disabled.`, resourceCopy.failed.length > 0);
         }
-        return res;
+        return { response: res, resourceCopy };
     }
 
-    async function autoReuploadNextWithReload() {
+    async function autoReuploadAllThenReload() {
         if (state.autoRunning) {
             setStatus('Auto mode is already running.');
             return;
@@ -1529,14 +1981,15 @@
             rebuildMediaList();
             await sleep(500);
             const autoState = loadAutoState();
-            if (!autoState.active) {
-                state.autoRunning = false;
-                return;
-            }
+            if (!autoState.active) return;
 
             const queue = state.media
                 .filter(m => m.missingRating && !isHandled(m))
-                .sort((a, b) => (numberOrNull(a.index) ?? 0) - (numberOrNull(b.index) ?? 0));
+                // Insert replacements from the end toward the beginning so each
+                // earlier insertion cannot disturb the order of later entries.
+                .sort((a, b) =>
+                    (numberOrNull(b.serverIndex ?? b.index) ?? 0)
+                    - (numberOrNull(a.serverIndex ?? a.index) ?? 0));
 
             if (!queue.length) {
                 clearAutoState();
@@ -1545,44 +1998,73 @@
                 return;
             }
 
-            const media = queue[0];
-            const currentDone = Number(autoState.completed || 0);
-            setStatus(`Auto all safe: processing one entry, then reloading for fresh server indexes. Done so far: ${currentDone}. Current video #${displayNumberForMedia(media)} / upload index: ${media.serverIndex ?? media.index ?? '?'} - ${media.name}`);
-            highlightMedia(media, true);
-            await sleep(600);
-            await reuploadFromExistingUrl(media);
+            let completed = Number(autoState.completed || 0);
+            for (let position = 0; position < queue.length; position++) {
+                if (!loadAutoState().active) {
+                    setStatus('Auto mode stopped. The completed uploads were kept.');
+                    return;
+                }
 
-            saveAutoState({
-                ...autoState,
-                active: true,
-                completed: currentDone + 1,
-                lastMediaId: media.id || null,
-                lastIndex: media.index ?? null,
-                lastAt: new Date().toISOString(),
-            });
+                const media = queue[position];
+                setStatus(`Auto all safe (last to first): upload ${position + 1}/${queue.length} in this batch; ${completed} completed previously. Current video #${displayNumberForMedia(media)} / upload index: ${media.serverIndex ?? media.index ?? '?'} - ${media.name}`);
+                highlightMedia(media, true);
+                await sleep(600);
+                const uploadResult = await reuploadFromExistingUrl(media);
+                if (uploadResult?.resourceCopy?.failed?.length) {
+                    throw new Error(`Replacement was uploaded, but ${uploadResult.resourceCopy.failed.length} model/LoRA resource association(s) could not be copied. Auto mode stopped; see the console.`);
+                }
 
-            setStatus(`Auto all safe: uploaded one replacement. Reloading in ${Math.round(AUTO_RELOAD_DELAY_MS / 1000)}s so the next index is based on server state.`);
+                // Stop may have been requested while this video's download/upload
+                // was in progress. Do not recreate the cleared auto state.
+                const latestAutoState = loadAutoState();
+                if (!latestAutoState.active) {
+                    setStatus('Current upload finished. Auto mode is now stopped; no page reload was performed.');
+                    return;
+                }
+
+                completed++;
+                saveAutoState({
+                    ...latestAutoState,
+                    active: true,
+                    completed,
+                    lastMediaId: media.id || null,
+                    lastIndex: media.index ?? null,
+                    lastAt: new Date().toISOString(),
+                });
+
+                if (position < queue.length - 1) {
+                    setStatus(`Auto all safe: ${position + 1}/${queue.length} uploaded. Starting the next video in ${Math.round(AUTO_DELAY_MS / 1000)}s; the page will reload only after the full batch.`);
+                    await sleep(AUTO_DELAY_MS);
+                }
+            }
+
+            if (!loadAutoState().active) {
+                setStatus('Auto mode stopped after the final upload; no page reload was performed.');
+                return;
+            }
+            setStatus(`Auto all safe completed ${queue.length} upload(s). Reloading once in ${Math.round(AUTO_RELOAD_DELAY_MS / 1000)}s.`);
             await sleep(AUTO_RELOAD_DELAY_MS);
+            if (!loadAutoState().active) {
+                setStatus('Final page reload cancelled by Stop.');
+                return;
+            }
+            clearAutoState();
             location.reload();
         } finally {
             state.autoRunning = false;
         }
     }
 
-    async function autoReuploadAllMissing() {
-        startReloadSafeAuto();
-    }
-
     function continueAutoAfterLoadIfNeeded() {
         const autoState = loadAutoState();
         if (!autoState.active) return;
-        setStatus(`Auto all safe is active. Continuing after page reload. Completed so far: ${Number(autoState.completed || 0)}.`);
+        setStatus(`Auto all safe is active. Continuing the batch after page load. Completed so far: ${Number(autoState.completed || 0)}.`);
         setTimeout(() => {
-            autoReuploadNextWithReload().catch(e => {
+            autoReuploadAllThenReload().catch(e => {
                 console.error(e);
                 clearAutoState();
                 state.autoRunning = false;
-                setStatus(`Auto error after reload: ${e.message || e}`, true);
+                setStatus(`Auto error after page load: ${e.message || e}`, true);
             });
         }, 2200);
     }
