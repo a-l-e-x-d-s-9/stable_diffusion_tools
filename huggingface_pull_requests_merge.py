@@ -1,6 +1,9 @@
 import argparse
 from huggingface_hub import HfApi, merge_pull_request, get_repo_discussions, change_discussion_status
-from huggingface_hub.utils._errors import BadRequestError
+try:
+    from huggingface_hub.errors import BadRequestError
+except ImportError:  # huggingface_hub < 1.0
+    from huggingface_hub.utils._errors import BadRequestError
 
 
 def get_args():

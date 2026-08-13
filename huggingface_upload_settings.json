@@ -1,6 +1,7 @@
 {
   "_notes": [
     "Example configuration for huggingface_upload.py (multi-destination, per-destination path_in_repository, archiving, sanitize_arcname).",
+    "Set copy_duplicates=true to upload each repeated raw local file to its first destination, then use HfApi.copy_files for later destinations.",
     "This is JSON: no comments. Edit fields as needed.",
     "CLI: python3 huggingface_upload.py --configurations /path/to/this.json --dry_run --verbose"
   ],
@@ -9,6 +10,7 @@
   "token_file": "/home/alex/.hf_token_main",
   "token_env": null,
   "threads": 4,
+  "copy_duplicates": false,
   "max_inflight_per_repo": 2,
   "remove": false,
   "dry_run": true,

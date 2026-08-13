@@ -185,6 +185,7 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     default_exists = cfg.get("default_exists", "skip")
     default_commit_message = cfg.get("default_commit_message", "batch upload {timestamp}")
     use_checksum = bool(cfg.get("use_checksum", False))
+    copy_duplicates = bool(cfg.get("copy_duplicates", False))
     progress_colour = cfg.get("progress_colour", "yellow")
     max_inflight_per_repo = int(cfg.get("max_inflight_per_repo", 2))
 
@@ -329,6 +330,7 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "remove": remove_after,
         "dry_run": dry_run,
         "use_checksum": use_checksum,
+        "copy_duplicates": copy_duplicates,
         "progress_colour": progress_colour,
         "max_inflight_per_repo": max_inflight_per_repo,
         "archive_tmp_dir": archive_tmp_dir,
@@ -535,6 +537,7 @@ def build_zip_folders(folders, source_base, tmpdir, name_tpl, preserve_tree_insi
 def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     dry_run = cfg["dry_run"]
     use_checksum = cfg["use_checksum"]
+    copy_duplicates = cfg["copy_duplicates"]
 
     plans: List[Dict[str, Any]] = []
     delete_tracker: Dict[str, Dict[str, int]] = defaultdict(lambda: {"planned": 0, "succeeded": 0})
@@ -542,6 +545,12 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
     dest_cache_key_map: Dict[Tuple[str, str, str], int] = {}
     dest_state_files: Dict[int, Set[str]] = {}
     dest_clients: Dict[int, Optional[HFClient]] = {}
+
+    # When enabled, the first raw occurrence of a local file is the canonical
+    # Hub source. Later occurrences are copied from it instead of re-uploaded.
+    # realpath is used only as an identity key; repository paths still preserve
+    # the user's original symlink/file names.
+    copy_sources: Dict[str, Dict[str, Any]] = {}
 
     skipped_count = 0
     exists_fail_hits = 0
@@ -671,6 +680,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                     "create_pr": create_pr,
                     "commit_message_tpl": commit_message_tpl,
                     "files": [],
+                    "copies": [],
                     "exists_policy": exists_policy,
                     "preserve_tree": preserve_tree,
                     "archive_remove_local": bool(arch.get("remove_archives_after_upload", False)),
@@ -694,7 +704,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
             if arch["mode"] == "none":
                 for f in files:
                     repo_path = build_repo_path(dest_path_prefix, preserve_tree, base, f)
-                    size = f.stat().st_size if not dry_run else 0
+                    size = f.stat().st_size
                     artifacts.append((str(f), repo_path, size, None))
             elif arch["mode"] == "zip_per_file":
                 # reuse prepared zips if available; in dry_run, synthesize names
@@ -798,16 +808,68 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                             logging.debug(f"checksum failed for {local_path}: {e}")
 
                 if take_action:
-                    plans[plan_idx]["files"].append((local_path, repo_path, size, sha))
+                    identity = os.path.realpath(local_path)
+                    copy_source = copy_sources.get(identity) if copy_duplicates and arch["mode"] == "none" else None
+                    can_copy = (
+                        copy_source is not None
+                        and not create_pr
+                        and (
+                            copy_source["repo_id"] != repo_id
+                            or copy_source["repo_type"] != repo_type
+                            or copy_source["repo_path"] != repo_path
+                        )
+                    )
+
+                    if can_copy:
+                        plans[plan_idx]["copies"].append({
+                            "local_path": local_path,
+                            "source_repo_id": copy_source["repo_id"],
+                            "source_repo_type": copy_source["repo_type"],
+                            "source_path": copy_source["repo_path"],
+                            "destination_path": repo_path,
+                            "size": size,
+                            "source_plan_index": copy_source["source_plan_index"],
+                        })
+                    else:
+                        plans[plan_idx]["files"].append((local_path, repo_path, size, sha))
+                        if copy_duplicates and arch["mode"] == "none" and not create_pr and identity not in copy_sources:
+                            copy_sources[identity] = {
+                                "repo_id": repo_id,
+                                "repo_type": repo_type,
+                                "repo_path": repo_path,
+                                "source_plan_index": plan_idx,
+                            }
                     delete_tracker[local_path]["planned"] += 1  # track archives for removal
                     # track originals for raw uploads
                     if arch["mode"] == "none":
                         # increment planned for original if we want to honor remove flag for raw files
                         delete_tracker.get(local_path, {"planned": 0, "succeeded": 0})
+                elif (
+                    copy_duplicates
+                    and arch["mode"] == "none"
+                    and exists_remote
+                    and exists_policy != "fail"
+                    and not create_pr
+                ):
+                    # An existing file skipped by policy or checksum is
+                    # immediately usable as the canonical copy source; no
+                    # upload dependency is required.
+                    identity = os.path.realpath(local_path)
+                    copy_sources.setdefault(identity, {
+                        "repo_id": repo_id,
+                        "repo_type": repo_type,
+                        "repo_path": repo_path,
+                        "source_plan_index": None,
+                    })
 
+    uploads_planned = sum(len(p["files"]) for p in plans)
+    copies_planned = sum(len(p["copies"]) for p in plans)
     totals = {
         "bytes_planned": sum(sz for p in plans for (_, _, sz, _) in p["files"]),
-        "files_planned": sum(1 for p in plans for _ in p["files"]),
+        "copy_bytes_planned": sum(c["size"] for p in plans for c in p["copies"]),
+        "files_planned": uploads_planned + copies_planned,
+        "uploads_planned": uploads_planned,
+        "copies_planned": copies_planned,
         "destinations": len(plans),
         "skipped_planned": skipped_count,
         "exists_fail_hits": exists_fail_hits,
@@ -819,6 +881,14 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
     return plans, {"delete_tracker": delete_tracker, "totals": totals}
 
 # ------------- Execution -------------
+
+def repo_file_uri(repo_id: str, repo_type: str, path_in_repo: str) -> str:
+    prefixes = {"model": "", "dataset": "datasets/", "space": "spaces/"}
+    if repo_type not in prefixes:
+        raise ConfigError(f"Unsupported repo_type for server-side copy: {repo_type}")
+    clean_path = path_in_repo.lstrip("/")
+    return f"hf://{prefixes[repo_type]}{repo_id}/{clean_path}"
+
 
 def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any], totals: Dict[str, Any]) -> Dict[str, Any]:
     threads = cfg["threads"]
@@ -836,22 +906,29 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any], totals: Dict
 
     results = {
         "uploaded": 0,
+        "locally_uploaded": 0,
+        "copied": 0,
         "failed": 0,
         "bytes_uploaded": 0,
+        "bytes_copied": 0,
         "per_destination": [],
     }
 
-    total_bytes = sum(sz for p in plans for (_, _, sz, _) in p["files"])
-    if total_bytes <= 0:
-        logging.info("Nothing to upload after planning.")
+    total_bytes = (
+        sum(sz for p in plans for (_, _, sz, _) in p["files"])
+        + sum(c["size"] for p in plans for c in p["copies"])
+    )
+    total_actions = sum(len(p["files"]) + len(p["copies"]) for p in plans)
+    if total_actions <= 0:
+        logging.info("Nothing to upload or copy after planning.")
         return results
 
     try:
         pbar = tqdm(total=total_bytes, unit="B", unit_scale=True, unit_divisor=1024,
-                    colour=progress_colour, desc="Uploading")
+                    colour=progress_colour, desc="Publishing")
     except TypeError:
         pbar = tqdm(total=total_bytes, unit="B", unit_scale=True, unit_divisor=1024,
-                    desc="Uploading")
+                    desc="Publishing")
 
     delete_tracker: Dict[str, Dict[str, int]] = cfg["__delete_tracker__"]
     failed_files: Set[str] = set()
@@ -883,7 +960,7 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any], totals: Dict
             files = list(uniq.values())
 
             if not files:
-                return True, {"repo_id": repo_id, "bytes": 0, "files": 0}
+                return True, {"repo_id": repo_id, "operation": "upload", "bytes": 0, "files": 0}
 
             ops = [CommitOperationAdd(path_in_repo=rp, path_or_fileobj=lp) for (lp, rp, sz, sh) in files]
             bytes_in_commit = sum(sz for (_, _, sz, _) in files)
@@ -916,27 +993,132 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any], totals: Dict
                                     logging.info(f"Removed local archive: {lp}")
                             except Exception as e:
                                 logging.warning(f"Failed to remove archive {lp}: {e}")
-                return True, {"repo_id": repo_id, "bytes": bytes_in_commit, "files": len(files)}
+                return True, {"repo_id": repo_id, "operation": "upload", "bytes": bytes_in_commit, "files": len(files)}
             except Exception as e:
                 logging.error(f"Commit failed for {repo_id}: {e}")
                 for lp, _, _, _ in files:
                     failed_files.add(lp)
-                return False, {"repo_id": repo_id, "bytes": 0, "files": 0, "error": str(e)}
+                return False, {"repo_id": repo_id, "operation": "upload", "bytes": 0, "files": 0, "error": str(e)}
         finally:
             sem.release()
 
-    futures = []
+    # Phase 1: upload local files. Copy operations are intentionally delayed
+    # until every possible source upload has completed.
+    upload_status: Dict[int, bool] = {idx: True for idx in range(len(plans))}
+    failed_plan_indexes: Set[int] = set()
     with ThreadPoolExecutor(max_workers=threads) as ex:
-        for plan in plans:
-            futures.append(ex.submit(_commit_for_plan, plan))
+        futures = {
+            ex.submit(_commit_for_plan, plan): idx
+            for idx, plan in enumerate(plans)
+            if plan["files"]
+        }
         for fut in as_completed(futures):
+            plan_idx = futures[fut]
             ok, info = fut.result()
+            upload_status[plan_idx] = ok
             if ok:
-                results["uploaded"] += info.get("files", 0)
+                results["locally_uploaded"] += info.get("files", 0)
                 results["bytes_uploaded"] += info.get("bytes", 0)
             else:
-                results["failed"] += 1
+                failed_plan_indexes.add(plan_idx)
             results["per_destination"].append(info)
+
+    def _copy_for_plan(plan: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+        repo_id = plan["repo_id"]
+        token = plan["token"]
+        copies = plan["copies"]
+        key = (repo_id, token)
+        copied_files = 0
+        copied_bytes = 0
+        errors: List[str] = []
+
+        sem = semaphores[key]
+        sem.acquire()
+        try:
+            api = HfApi()
+            copy_method = getattr(api, "copy_files", None)
+            if not callable(copy_method):
+                error = (
+                    "Installed huggingface_hub does not support HfApi.copy_files for "
+                    "repository-to-repository copies; upgrade huggingface_hub."
+                )
+                for copy_op in copies:
+                    failed_files.add(copy_op["local_path"])
+                logging.error(f"Server-side copy failed for {repo_id}: {error}")
+                return False, {
+                    "repo_id": repo_id,
+                    "operation": "copy",
+                    "bytes": 0,
+                    "files": 0,
+                    "error": error,
+                }
+
+            for copy_op in copies:
+                local_path = copy_op["local_path"]
+                source_plan_index = copy_op["source_plan_index"]
+                if source_plan_index is not None and not upload_status.get(source_plan_index, False):
+                    error = (
+                        f"source upload failed: {copy_op['source_repo_id']}:"
+                        f"{copy_op['source_path']}"
+                    )
+                    logging.error(f"Skipping server-side copy to {repo_id}: {error}")
+                    errors.append(error)
+                    failed_files.add(local_path)
+                    continue
+
+                source_uri = repo_file_uri(
+                    copy_op["source_repo_id"],
+                    copy_op["source_repo_type"],
+                    copy_op["source_path"],
+                )
+                destination_uri = repo_file_uri(
+                    repo_id,
+                    plan["repo_type"],
+                    copy_op["destination_path"],
+                )
+                try:
+                    copy_method(source_uri, destination_uri, token=token)
+                    copied_files += 1
+                    copied_bytes += copy_op["size"]
+                    delete_tracker[local_path]["succeeded"] += 1
+                    pbar.update(copy_op["size"])
+                    logging.info(f"Server-side copied: {source_uri} -> {destination_uri}")
+                except Exception as e:
+                    error = f"{source_uri} -> {destination_uri}: {e}"
+                    logging.error(f"Server-side copy failed: {error}")
+                    errors.append(error)
+                    failed_files.add(local_path)
+
+            info = {
+                "repo_id": repo_id,
+                "operation": "copy",
+                "bytes": copied_bytes,
+                "files": copied_files,
+            }
+            if errors:
+                info["error"] = "; ".join(errors)
+            return not errors, info
+        finally:
+            sem.release()
+
+    # Phase 2: perform the server-side copies after their source commits exist.
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        futures = {
+            ex.submit(_copy_for_plan, plan): idx
+            for idx, plan in enumerate(plans)
+            if plan["copies"]
+        }
+        for fut in as_completed(futures):
+            plan_idx = futures[fut]
+            ok, info = fut.result()
+            results["copied"] += info.get("files", 0)
+            results["bytes_copied"] += info.get("bytes", 0)
+            if not ok:
+                failed_plan_indexes.add(plan_idx)
+            results["per_destination"].append(info)
+
+    results["uploaded"] = results["locally_uploaded"] + results["copied"]
+    results["failed"] = len(failed_plan_indexes)
 
     pbar.close()
 
@@ -1051,7 +1233,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     delete_tracker = aux["delete_tracker"]
     cfg["__delete_tracker__"] = delete_tracker
 
-    logging.info(f"Planned: destinations={totals['destinations']}, files={totals['files_planned']}, bytes={totals['bytes_planned']:,}, skipped={totals.get('skipped_planned', 0)}")
+    logging.info(
+        f"Planned: destinations={totals['destinations']}, "
+        f"uploads={totals.get('uploads_planned', totals['files_planned'])}, "
+        f"copies={totals.get('copies_planned', 0)}, "
+        f"upload_bytes={totals['bytes_planned']:,}, "
+        f"copy_bytes={totals.get('copy_bytes_planned', 0):,}, "
+        f"skipped={totals.get('skipped_planned', 0)}"
+    )
 
     if totals.get("exists_fail_hits", 0) > 0:
         logging.error(f"Aborting due to exists=fail policy: {totals['exists_fail_hits']} conflicting paths found.")
@@ -1060,14 +1249,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Dry run
     if cfg["dry_run"]:
         for idx, p in enumerate(plans, 1):
-            logging.info(f"[{idx}] repo={p['repo_id']} type={p['repo_type']} create_pr={p['create_pr']} exists={p['exists_policy']} files={len(p['files'])}")
+            logging.info(
+                f"[{idx}] repo={p['repo_id']} type={p['repo_type']} "
+                f"create_pr={p['create_pr']} exists={p['exists_policy']} "
+                f"uploads={len(p['files'])} copies={len(p['copies'])}"
+            )
             for local_path, repo_path, size, sha in p["files"][:20]:
-                logging.info(f"  {local_path} -> {p['repo_id']}:{repo_path} ({size} bytes)")
-            extra = len(p["files"]) - 20
+                logging.info(f"  UPLOAD {local_path} -> {p['repo_id']}:{repo_path} ({size} bytes)")
+            for copy_op in p["copies"][:20]:
+                logging.info(
+                    f"  COPY {copy_op['source_repo_id']}:{copy_op['source_path']} -> "
+                    f"{p['repo_id']}:{copy_op['destination_path']} ({copy_op['size']} bytes)"
+                )
+            extra = max(0, len(p["files"]) - 20) + max(0, len(p["copies"]) - 20)
             if extra > 0:
                 logging.info(f"  ... and {extra} more")
         logging.info("Dry run finished.")
         return 0
+
+    if totals.get("copies_planned", 0) > 0 and not callable(getattr(HfApi, "copy_files", None)):
+        logging.error(
+            "Server-side copies were planned, but the installed huggingface_hub "
+            "does not support repository-to-repository HfApi.copy_files. "
+            "Install the version from requirements.txt before uploading."
+        )
+        return 2
 
     # Execute
     results = execute_plans(plans, cfg, totals)
@@ -1076,17 +1282,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     failed_file_count = len(failed_files)
     failed_destination_count = int(results.get("failed", 0) or 0)
     uploaded_count = int(results.get("uploaded", 0) or 0)
+    locally_uploaded_count = int(results.get("locally_uploaded", 0) or 0)
+    copied_count = int(results.get("copied", 0) or 0)
     skipped_count = int(totals.get("skipped_planned", 0) or 0)
     planned_count = int(totals.get("files_planned", 0) or 0)
-    incomplete_count = max(0, planned_count - uploaded_count - skipped_count)
+    incomplete_count = max(0, planned_count - uploaded_count)
 
     # Summary
     summary = {
         "uploaded_files": uploaded_count,
+        "locally_uploaded_files": locally_uploaded_count,
+        "server_side_copied_files": copied_count,
         "failed_destinations": failed_destination_count,
         "bytes_uploaded": results["bytes_uploaded"],
+        "bytes_copied_server_side": results.get("bytes_copied", 0),
         "planned_files": planned_count,
+        "planned_uploads": totals.get("uploads_planned", planned_count),
+        "planned_server_side_copies": totals.get("copies_planned", 0),
         "planned_bytes": totals["bytes_planned"],
+        "planned_copy_bytes": totals.get("copy_bytes_planned", 0),
         "skipped_planned": skipped_count,
         "failed_files": failed_file_count,
         "incomplete_planned": incomplete_count,

@@ -229,6 +229,7 @@ pip install -r requirements.txt
 ## [HuggingFace Upload](huggingface_upload.py)
 ### Features:
 1. Batch upload files to Hugging Face repositories.
+2. With `copy_duplicates: true`, upload a repeated raw file once and use Hugging Face server-side copies for its later destinations.
 
 ## [HuggingFace User Browser Script Get Links](huggingface_user_browser_script_get_links_as_download_script.js)
 ### Features:
