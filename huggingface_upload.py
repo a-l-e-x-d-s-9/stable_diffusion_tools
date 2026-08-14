@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Optional, Tuple, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
-from huggingface_hub import HfApi, CommitOperationAdd
+from huggingface_hub import HfApi, CommitOperationAdd, CommitOperationCopy
 from tqdm import tqdm
 
 # ANSI colors for terminal highlighting
@@ -1025,7 +1025,9 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any], totals: Dict
 
     def _copy_for_plan(plan: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         repo_id = plan["repo_id"]
+        repo_type = plan["repo_type"]
         token = plan["token"]
+        commit_tpl = plan["commit_message_tpl"]
         copies = plan["copies"]
         key = (repo_id, token)
         copied_files = 0
@@ -1036,23 +1038,6 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any], totals: Dict
         sem.acquire()
         try:
             api = HfApi()
-            copy_method = getattr(api, "copy_files", None)
-            if not callable(copy_method):
-                error = (
-                    "Installed huggingface_hub does not support HfApi.copy_files for "
-                    "repository-to-repository copies; upgrade huggingface_hub."
-                )
-                for copy_op in copies:
-                    failed_files.add(copy_op["local_path"])
-                logging.error(f"Server-side copy failed for {repo_id}: {error}")
-                return False, {
-                    "repo_id": repo_id,
-                    "operation": "copy",
-                    "bytes": 0,
-                    "files": 0,
-                    "error": error,
-                }
-
             for copy_op in copies:
                 local_path = copy_op["local_path"]
                 source_plan_index = copy_op["source_plan_index"]
@@ -1077,7 +1062,18 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any], totals: Dict
                     copy_op["destination_path"],
                 )
                 try:
-                    copy_method(source_uri, destination_uri, token=token)
+                    api.create_commit(
+                        repo_id=repo_id,
+                        repo_type=repo_type,
+                        operations=[CommitOperationCopy(
+                            src_path_in_repo=copy_op["source_path"],
+                            path_in_repo=copy_op["destination_path"],
+                            src_repo_id=copy_op["source_repo_id"],
+                            src_repo_type=copy_op["source_repo_type"],
+                        )],
+                        commit_message=commit_tpl.format(timestamp=now_timestamp()),
+                        token=token,
+                    )
                     copied_files += 1
                     copied_bytes += copy_op["size"]
                     delete_tracker[local_path]["succeeded"] += 1
@@ -1266,14 +1262,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 logging.info(f"  ... and {extra} more")
         logging.info("Dry run finished.")
         return 0
-
-    if totals.get("copies_planned", 0) > 0 and not callable(getattr(HfApi, "copy_files", None)):
-        logging.error(
-            "Server-side copies were planned, but the installed huggingface_hub "
-            "does not support repository-to-repository HfApi.copy_files. "
-            "Install the version from requirements.txt before uploading."
-        )
-        return 2
 
     # Execute
     results = execute_plans(plans, cfg, totals)
