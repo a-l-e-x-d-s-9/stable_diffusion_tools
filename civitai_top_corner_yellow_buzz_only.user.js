@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Civitai - Show Yellow Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.4.0
+// @version      1.5.0
 // @description  Shows exact Yellow Buzz and a configurable daily, weekly, or monthly paid-model sales counter in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
 // @match        https://civitai.red/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_registerMenuCommand
 // ==/UserScript==
 
 (() => {
@@ -28,6 +28,8 @@
   const SALES_LOCK_MS = 30 * 1000;
   const SALES_PAGE_SIZE = 200;
   const PURCHASE_TRANSACTION_TYPE = 6;
+  const SALES_SINGLE_CLICK_DELAY_MS = 350;
+  const SALES_LONG_PRESS_MS = 550;
   const SALES_PERIODS = Object.freeze({
     daily: 'Daily',
     weekly: 'Weekly',
@@ -61,7 +63,7 @@
     updatePending: false,
   };
 
-  console.info('[Civitai Yellow Buzz] Script v1.4.0 loaded');
+  console.info('[Civitai Yellow Buzz] Script v1.5.0 loaded');
 
   function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
     let start = new Date(Date.UTC(
@@ -130,6 +132,15 @@
 
     queueUpdate();
     refreshSalesIfNeeded();
+  }
+
+  function cycleSalesPeriod() {
+    const periods = Object.keys(SALES_PERIODS);
+    const currentIndex = periods.indexOf(state.salesPeriod);
+    const nextPeriod = periods[(currentIndex + 1) % periods.length];
+
+    closeSalesSettingsPanel();
+    saveSalesPeriod(nextPeriod);
   }
 
   function readSalesCacheStore() {
@@ -1197,19 +1208,27 @@
     document.body.appendChild(panel);
     state.salesSettingsPanel = panel;
 
-    const badgeRect = badge.getBoundingClientRect();
     const panelRect = panel.getBoundingClientRect();
-    const left = Math.max(
-      8,
-      Math.min(
-        window.innerWidth - panelRect.width - 8,
-        badgeRect.right - panelRect.width
-      )
-    );
-    let top = badgeRect.bottom + 8;
+    let left;
+    let top;
 
-    if (top + panelRect.height > window.innerHeight - 8) {
-      top = Math.max(8, badgeRect.top - panelRect.height - 8);
+    if (badge?.isConnected) {
+      const badgeRect = badge.getBoundingClientRect();
+      left = Math.max(
+        8,
+        Math.min(
+          window.innerWidth - panelRect.width - 8,
+          badgeRect.right - panelRect.width
+        )
+      );
+      top = badgeRect.bottom + 8;
+
+      if (top + panelRect.height > window.innerHeight - 8) {
+        top = Math.max(8, badgeRect.top - panelRect.height - 8);
+      }
+    } else {
+      left = Math.max(8, (window.innerWidth - panelRect.width) / 2);
+      top = Math.max(8, (window.innerHeight - panelRect.height) / 3);
     }
 
     panel.style.setProperty('left', `${left}px`);
@@ -1266,16 +1285,82 @@
       label.append(dailyLabel, salesLabel);
 
       badge.append(number, label);
+      let singleClickTimer = null;
+      let longPressTimer = null;
+      let longPressHandled = false;
+
+      const clearSingleClick = () => {
+        if (singleClickTimer === null) return;
+        clearTimeout(singleClickTimer);
+        singleClickTimer = null;
+      };
+
+      const clearLongPress = () => {
+        if (longPressTimer === null) return;
+        clearTimeout(longPressTimer);
+        longPressTimer = null;
+      };
+
+      badge.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) return;
+
+        longPressHandled = false;
+        clearLongPress();
+        longPressTimer = setTimeout(() => {
+          longPressTimer = null;
+          longPressHandled = true;
+          clearSingleClick();
+          openSalesSettingsPanel(badge);
+        }, SALES_LONG_PRESS_MS);
+      });
+
+      for (const eventName of ['pointerup', 'pointercancel', 'pointerleave']) {
+        badge.addEventListener(eventName, clearLongPress);
+      }
+
       badge.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
+
+        if (longPressHandled) {
+          longPressHandled = false;
+          return;
+        }
+
+        // Wait briefly so the first click of a double-click does not cycle.
+        clearSingleClick();
+        if (event.detail > 1) return;
+
+        singleClickTimer = setTimeout(() => {
+          singleClickTimer = null;
+          cycleSalesPeriod();
+        }, SALES_SINGLE_CLICK_DELAY_MS);
+      });
+      badge.addEventListener('dblclick', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        clearSingleClick();
+        clearLongPress();
+        longPressHandled = false;
         openSalesSettingsPanel(badge);
+      });
+      badge.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        clearSingleClick();
+        clearLongPress();
+        longPressHandled = true;
+        if (!state.salesSettingsPanel) openSalesSettingsPanel(badge);
       });
       badge.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter' && event.key !== ' ') return;
         event.preventDefault();
         event.stopPropagation();
-        openSalesSettingsPanel(badge);
+        if (event.shiftKey) {
+          openSalesSettingsPanel(badge);
+        } else {
+          cycleSalesPeriod();
+        }
       });
       root.appendChild(badge);
     }
@@ -1289,14 +1374,15 @@
     }
     badge.setAttribute(
       'aria-label',
-      `${SALES_PERIODS[state.salesPeriod]} paid-model sales`
+      `${SALES_PERIODS[state.salesPeriod]} paid-model sales. ` +
+      'Activate to cycle the period; Shift+activate for settings.'
     );
 
     if (hasCurrentCount) {
       const color = getSalesCountColor(state.salesCount);
       const countText = String(state.salesCount);
       if (number.textContent !== countText) number.textContent = countText;
-      badge.title = `${state.salesCount} ${periodLabel} paid-model sales from ${bounds.start.toISOString().slice(0, 10)} UTC. Click to change the period or colors.`;
+      badge.title = `${state.salesCount} ${periodLabel} paid-model sales from ${bounds.start.toISOString().slice(0, 10)} UTC. Click to cycle; double-click or hold for settings.`;
       badge.style.setProperty(
         'display',
         'inline-flex',
@@ -1314,7 +1400,7 @@
       );
     } else if (state.salesLoading) {
       if (number.textContent !== '…') number.textContent = '…';
-      badge.title = `Loading ${periodLabel} paid-model sales`;
+      badge.title = `Loading ${periodLabel} paid-model sales. Click to cycle; double-click or hold for settings.`;
       badge.style.setProperty('display', 'inline-flex', 'important');
       badge.style.setProperty(
         'color',
@@ -1332,8 +1418,8 @@
         number.textContent = fallbackText;
       }
       badge.title = state.salesError
-        ? `Could not load ${periodLabel} sales: ${state.salesError}`
-        : `Waiting to load ${periodLabel} paid-model sales. Click to change the period or colors.`;
+        ? `Could not load ${periodLabel} sales: ${state.salesError}. Double-click or hold for settings.`
+        : `Waiting to load ${periodLabel} paid-model sales. Click to cycle; double-click or hold for settings.`;
       badge.style.setProperty('display', 'inline-flex', 'important');
       badge.style.setProperty(
         'color',
@@ -1439,9 +1525,38 @@
     }
   }
 
+  function showSalesSettingsFromMenu() {
+    if (state.salesSettingsPanel) return;
+
+    const showPanel = () => {
+      const badge = document.querySelector(
+        '[data-tm-sales-badge="true"]'
+      );
+      openSalesSettingsPanel(badge);
+    };
+
+    if (document.body) {
+      showPanel();
+    } else {
+      document.addEventListener('DOMContentLoaded', showPanel, {
+        once: true,
+      });
+    }
+  }
+
+  function registerUserscriptMenu() {
+    if (typeof GM_registerMenuCommand !== 'function') return;
+
+    GM_registerMenuCommand(
+      'Show sales settings',
+      showSalesSettingsFromMenu
+    );
+  }
+
   function start() {
     state.salesPeriod = loadSalesPeriod();
     applyExactBuzzCache(loadExactBuzzCache());
+    registerUserscriptMenu();
 
     const observer = new MutationObserver(queueUpdate);
 
