@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Video Rating Re-upload Helper
 // @namespace    https://civitai.com/
-// @version      0.3.1
+// @version      0.4.0
 // @icon         https://civitai.com/favicon.ico
 // @description  Re-upload Civitai post videos missing scanner rating while preserving metadata/resources, then safely clean handled clones by keeping a tagged copy or the original. Uses last-to-first batch auto mode with one final reload.
 // @match        https://civitai.com/posts/*/edit*
@@ -289,8 +289,7 @@
     }
 
     function isHandled(media) {
-        const key = mediaHandledKey(media);
-        return Boolean(key && state.handled && state.handled[key]);
+        return Boolean(handledEntryForMedia(media));
     }
 
     function markHandled(media, extra = {}) {
@@ -323,7 +322,7 @@
     }
 
     function clearHandledFor(media) {
-        const key = mediaHandledKey(media);
+        const key = handledEntryForMedia(media)?.key || mediaHandledKey(media);
         if (key && state.handled && state.handled[key]) {
             delete state.handled[key];
             saveHandledState();
@@ -427,11 +426,126 @@
         return candidates.includes(wanted);
     }
 
+    function handledUploads(handledRecord) {
+        const uploads = Array.isArray(handledRecord?.uploads) ? [...handledRecord.uploads] : [];
+        if (handledRecord?.replacementKey || handledRecord?.replacementId) {
+            const legacy = {
+                at: handledRecord.at || null,
+                replacementKey: handledRecord.replacementKey || null,
+                replacementId: numberOrNull(handledRecord.replacementId),
+                sentIndex: numberOrNull(handledRecord.sentIndex),
+            };
+            const legacyIdentity = String(legacy.replacementId ?? legacy.replacementKey ?? '');
+            if (legacyIdentity && !uploads.some(upload => String(upload?.replacementId ?? upload?.replacementKey ?? '') === legacyIdentity)) {
+                uploads.push(legacy);
+            }
+        }
+        return uploads;
+    }
+
+    function uploadMatchesMedia(upload, media) {
+        const uploadId = numberOrNull(upload?.replacementId);
+        const mediaId = exactImageId(media);
+        if (uploadId !== null && mediaId !== null && uploadId === mediaId) return true;
+
+        const replacementKey = String(upload?.replacementKey || '').split('?')[0];
+        if (!replacementKey) return false;
+        const replacementUuid = uuidFromUrl(replacementKey);
+        const candidates = [media?.id, media?.url, media?.raw?.url, ...(media?.sourceCandidates || []).map(x => x?.src)]
+            .filter(Boolean)
+            .map(value => String(value).split('?')[0]);
+        return candidates.some(candidate =>
+            candidate === replacementKey
+            || candidate.endsWith(`/${replacementKey.replace(/^\/+/, '')}`)
+            || (replacementUuid && (uuidFromUrl(candidate) === replacementUuid || candidate === replacementUuid)));
+    }
+
+    function handledEntryForMedia(media) {
+        const fingerprintKey = mediaHandledKey(media);
+        if (fingerprintKey && state.handled?.[fingerprintKey]) {
+            return { key: fingerprintKey, record: state.handled[fingerprintKey] };
+        }
+        for (const [key, record] of Object.entries(state.handled || {})) {
+            if (mediaMatchesStoredOriginal(media, record) || handledUploads(record).some(upload => uploadMatchesMedia(upload, media))) {
+                return { key, record };
+            }
+        }
+        return null;
+    }
+
+    function handledGroupInfo(media) {
+        const entry = handledEntryForMedia(media);
+        if (!entry) return null;
+        const { key, record } = entry;
+
+        const group = state.media
+            .filter(item => handledEntryForMedia(item)?.key === key)
+            .sort((a, b) =>
+                (numberOrNull(a.serverIndex ?? a.index) ?? Number.MAX_SAFE_INTEGER)
+                - (numberOrNull(b.serverIndex ?? b.index) ?? Number.MAX_SAFE_INTEGER));
+        const original = group.find(item => mediaMatchesStoredOriginal(item, record)) || null;
+        const uploads = handledUploads(record);
+        const matchedUploadIndex = uploads.findIndex(upload => uploadMatchesMedia(upload, media));
+        const isOriginal = mediaMatchesStoredOriginal(media, record);
+        const otherCopies = group.filter(item => !mediaMatchesStoredOriginal(item, record));
+        const fallbackReplacementIndex = otherCopies.indexOf(media);
+        const isReplacement = !isOriginal && matchedUploadIndex >= 0;
+        const isGroupCopy = !isOriginal && !isReplacement;
+        const replacementNumber = isOriginal
+            ? null
+            : (isReplacement ? matchedUploadIndex + 1 : Math.max(1, fallbackReplacementIndex + 1));
+        const originalId = record.originalId || exactImageId(original) || uuidFromUrl(record.originalUrl || '') || '?';
+        const originalNumber = original ? displayNumberForMedia(original, group.indexOf(original)) : null;
+        const groupLabel = originalNumber !== null
+            ? `Original video #${originalNumber} (id ${originalId})`
+            : `Original video id ${originalId}`;
+
+        return {
+            key,
+            record,
+            group,
+            original,
+            uploads,
+            isOriginal,
+            isReplacement,
+            isGroupCopy,
+            replacementNumber,
+            groupLabel,
+        };
+    }
+
+    function forgetDeletedReplacement(media) {
+        const entry = handledEntryForMedia(media);
+        if (!entry) return;
+        const { key, record } = entry;
+
+        const uploads = handledUploads(record).filter(upload => !uploadMatchesMedia(upload, media));
+        const remainingCopies = state.media.filter(item =>
+            item !== media
+            && handledEntryForMedia(item)?.key === key
+            && !mediaMatchesStoredOriginal(item, record));
+        if (!uploads.length && !remainingCopies.length) {
+            delete state.handled[key];
+            saveHandledState();
+            return;
+        }
+
+        const latest = uploads[uploads.length - 1] || null;
+        state.handled[key] = {
+            ...record,
+            uploads,
+            replacementKey: latest?.replacementKey || null,
+            replacementId: latest?.replacementId ?? null,
+            sentIndex: latest?.sentIndex ?? null,
+        };
+        saveHandledState();
+    }
+
     function buildCleanupPlan() {
         const grouped = new Map();
         for (const media of state.media) {
-            const key = mediaHandledKey(media);
-            if (!state.handled?.[key]) continue;
+            const key = handledEntryForMedia(media)?.key;
+            if (!key) continue;
             if (!grouped.has(key)) grouped.set(key, []);
             grouped.get(key).push(media);
         }
@@ -535,6 +649,68 @@
             setStatus(deleted
                 ? `Clear all stopped after deleting ${deleted} entr${deleted === 1 ? 'y' : 'ies'}: ${error.message || error}. Successfully deleted entries remain deleted; reload and retry.`
                 : `Clear all stopped before deleting anything: ${error.message || error}.`, true);
+        } finally {
+            state.cleanupRunning = false;
+        }
+    }
+
+    async function deleteReuploadedMedia(media) {
+        if (state.autoRunning || state.cleanupRunning) {
+            setStatus(state.autoRunning ? 'Stop Auto all safe before deleting a re-upload.' : 'Another deletion is already running.', true);
+            return;
+        }
+
+        state.cleanupRunning = true;
+        try {
+            let target = media;
+            let groupInfo = handledGroupInfo(target);
+            if (!groupInfo?.isReplacement) {
+                setStatus('Delete is only available for videos identified as re-uploads. The original was not touched.', true);
+                return;
+            }
+
+            if (exactImageId(target) === null) {
+                const wantedKey = groupInfo.key;
+                const wantedUpload = groupInfo.uploads.find(upload => uploadMatchesMedia(upload, target)) || null;
+                setStatus('Resolving the exact Civitai image ID before deletion...');
+                await refreshExactPostImageData();
+                rebuildMediaList();
+                target = state.media.find(item =>
+                    handledEntryForMedia(item)?.key === wantedKey
+                    && (mediaMatches(item, media) || (wantedUpload && uploadMatchesMedia(wantedUpload, item)))) || null;
+                groupInfo = target ? handledGroupInfo(target) : null;
+            }
+
+            const id = exactImageId(target);
+            if (!target || id === null || !groupInfo?.isReplacement) {
+                setStatus('Deletion stopped: the selected re-upload could not be matched to an exact numeric Civitai image ID. Try Refresh and retry.', true);
+                return;
+            }
+
+            const rating = target.missingRating ? 'scanner pending/missing' : (target.ratingText || 'rated');
+            const confirmed = window.confirm(
+                `Permanently delete re-upload #${groupInfo.replacementNumber} (image id ${id})?\n\n`
+                + `Group: ${groupInfo.groupLabel}\n`
+                + `Status: ${rating}\n`
+                + `Content tags on this copy: ${(target.contentTags || []).length}\n\n`
+                + 'The original video will not be deleted. This cannot be undone.'
+            );
+            if (!confirmed) {
+                setStatus('Delete cancelled. Nothing was deleted.');
+                return;
+            }
+
+            setStatus(`Deleting re-upload #${groupInfo.replacementNumber} (image id ${id})...`);
+            await postJson(IMAGE_DELETE_ENDPOINT, { json: { id } }, `delete image ${id}`);
+            forgetDeletedReplacement(target);
+            state.media = state.media.filter(item => item !== target && exactImageId(item) !== id);
+            try { target.domRoot?.remove(); } catch {}
+            renderVideoNumberBadges();
+            renderList();
+            setStatus(`Deleted re-upload #${groupInfo.replacementNumber} from ${groupInfo.groupLabel}. The original was kept.`);
+        } catch (error) {
+            console.error(error);
+            setStatus(`Delete failed before the list could be updated: ${error.message || error}`, true);
         } finally {
             state.cleanupRunning = false;
         }
@@ -983,6 +1159,7 @@
 
     function applyVirtualServerIndexes(mediaList) {
         for (const m of mediaList) {
+            if (m.virtualReplacement) continue;
             const base = numberOrNull(m.baseIndex ?? m.index) ?? 0;
             m.baseIndex = base;
             m.displayNumber = numberOrNull(m.displayNumber) ?? (base + 1);
@@ -1001,6 +1178,50 @@
         applyVirtualServerIndexes(state.media || []);
         renderVideoNumberBadges();
         renderList();
+    }
+
+    function addVirtualReplacementToList(original, addImageResponse, initInfo, file, sentIndex) {
+        const responseMedia = unwrapTrpcResponse(addImageResponse);
+        const responseObject = isPlainObject(responseMedia) ? responseMedia : {};
+        const id = numberOrNull(responseObject.id);
+        const url = String(responseObject.url || initInfo?.key || '');
+        const index = numberOrNull(sentIndex) ?? numberOrNull(original?.serverIndex ?? original?.index) ?? 0;
+        const virtual = {
+            raw: responseObject,
+            sourceCandidates: url ? [{ src: url, type: file.type || original.mimeType || 'video/mp4' }] : [],
+            id,
+            name: String(responseObject.name || file.name || original.name || `reupload_${index}`),
+            url,
+            postId: postIdFromUrl(),
+            baseIndex: numberOrNull(original?.baseIndex ?? original?.index) ?? index,
+            index,
+            serverIndex: index,
+            displayNumber: index + 1,
+            mimeType: String(responseObject.mimeType || file.type || original.mimeType || 'video/mp4'),
+            width: numberOrNull(responseObject.width ?? original.width),
+            height: numberOrNull(responseObject.height ?? original.height),
+            modelVersionId: numberOrNull(responseObject.modelVersionId ?? original.modelVersionId),
+            modelId: numberOrNull(responseObject.modelId ?? original.modelId),
+            resourceDescriptors: mergeResourceDescriptors(
+                original.resourceDescriptors,
+                collectResourceDescriptors(responseObject, responseObject.meta),
+            ),
+            contentTags: collectContentTags(responseObject),
+            // Keep the original generation metadata so this temporary row has the
+            // same persistent group fingerprint before the page is reloaded.
+            meta: cloneSerializable(original.meta || responseObject.meta),
+            metadata: cloneSerializable(responseObject.metadata || original.metadata) || {},
+            ratingText: '',
+            missingRating: true,
+            virtualReplacement: true,
+        };
+        state.media.push(virtual);
+        state.media.sort((a, b) =>
+            (numberOrNull(a.serverIndex ?? a.index) ?? Number.MAX_SAFE_INTEGER)
+            - (numberOrNull(b.serverIndex ?? b.index) ?? Number.MAX_SAFE_INTEGER)
+            || Number(Boolean(b.virtualReplacement)) - Number(Boolean(a.virtualReplacement)));
+        renderList();
+        return virtual;
     }
 
     function rebuildMediaList() {
@@ -1062,7 +1283,8 @@
         const handled = found.filter(m => m.missingRating && isHandled(m)).length;
         const actionable = found.filter(m => m.missingRating && !isHandled(m)).length;
         const rated = found.length - missing;
-        setStatus(`Found ${found.length} video candidate(s): ${missing} missing rating (${actionable} actionable, ${handled} already handled), ${rated} already rated. Virtual inserted this page: ${state.virtualInsertions.length}.`);
+        const replacements = found.filter(m => handledGroupInfo(m)?.isReplacement).length;
+        setStatus(`Found ${found.length} video candidate(s): ${missing} missing rating (${actionable} actionable, ${handled} already handled), ${rated} already rated, ${replacements} recorded re-upload(s). Virtual inserted this page: ${state.virtualInsertions.length}.`);
     }
 
     function setStatus(msg, isError = false) {
@@ -1079,19 +1301,26 @@
 #cvrPanel{position:fixed;right:14px;bottom:14px;z-index:999999;width:430px;max-height:72vh;background:#18181b;color:#eee;border:1px solid #444;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.45);font:13px/1.35 Arial,sans-serif;overflow:hidden}
 #cvrPanel button{background:#2f4f80;color:#fff;border:1px solid #4b6fa5;border-radius:6px;padding:5px 8px;cursor:pointer;font:inherit}
 #cvrPanel button:hover{background:#3b6097}
+#cvrPanel button:disabled{background:#333;color:#888;border-color:#4a4a4a;cursor:not-allowed}
 #cvrPanel button.cvrStop{background:#6b3434;border-color:#9a4e4e}
 #cvrPanel button.cvrDanger{background:#6b3434;border-color:#9a4e4e}
-#cvrHead{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:#242428;border-bottom:1px solid #444}
+#cvrHead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:8px 10px;background:#242428;border-bottom:1px solid #444}
+#cvrHead>div{flex-wrap:wrap;justify-content:flex-end}
 #cvrBody{padding:8px 10px;overflow:auto;max-height:55vh}
 #cvrStatus{padding:7px 10px;border-top:1px solid #444;color:#cfcfcf;font-size:12px}
 .cvrRow{border:1px solid #3b3b42;border-radius:8px;margin:7px 0;padding:7px;background:#202024}
 .cvrRowMissing{border-color:#9b6b2f;background:#29231b}
+.cvrRowOriginal{border-color:#59677b;background:#202733}
+.cvrRowReupload{border-color:#397b62;background:#1c2d27}
 .cvrRow:hover{outline:1px solid #79a8ff;background:#253044}
 .cvrMediaHighlight{outline:5px solid #4da3ff !important;outline-offset:4px !important;box-shadow:0 0 0 4px rgba(77,163,255,.22),0 0 26px rgba(77,163,255,.9) !important;border-radius:10px !important}
 .cvrNumberRoot{position:relative !important;overflow:visible !important}
 .cvrVideoNumberBadge{position:absolute;left:-13px;top:-13px;z-index:999998;background:#ffd400;color:#111;border:2px solid #111;border-radius:999px;min-width:26px;height:26px;padding:0 7px;display:flex;align-items:center;justify-content:center;font:bold 15px/1 Arial,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.55);cursor:pointer;pointer-events:auto}
 .cvrRowFocused{outline:2px solid #ffd400 !important;background:#3a3317 !important}
 .cvrMeta{font-size:12px;color:#aaa;margin:3px 0;word-break:break-word}
+.cvrGroup{font-size:12px;color:#a9d5ff;margin:4px 0;padding:4px 6px;border-radius:5px;background:#17202b}
+.cvrState{display:inline-block;margin-left:6px;padding:2px 6px;border-radius:999px;background:#454545;color:#fff;font-size:11px;vertical-align:1px}
+.cvrStateOriginal{background:#50627b}.cvrStateReupload{background:#267154}.cvrStateAction{background:#8a5b24}.cvrStateRated{background:#555}
 .cvrPrompt{font-size:12px;color:#c9c9c9;max-height:38px;overflow:hidden;margin:3px 0}
 .cvrActions{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
 .cvrSmall{font-size:11px;color:#aaa}
@@ -1104,7 +1333,7 @@
 <div id="cvrHead">
   <b>Video rating re-upload</b>
   <div style="display:flex;gap:6px;align-items:center">
-    <label class="cvrSmall"><input id="cvrOnlyMissing" type="checkbox" checked> missing only</label>
+    <label class="cvrSmall" title="Show videos needing work plus every original/re-upload group"><input id="cvrOnlyMissing" type="checkbox" checked> work/reuploads</label>
     <button id="cvrAutoAll">Auto all safe</button>
     <button id="cvrStopAuto" class="cvrStop">Stop</button>
     <button id="cvrClearAll" class="cvrDanger" title="Remove re-upload clones, keeping a tagged copy or otherwise the original">Clear all</button>
@@ -1152,7 +1381,11 @@
     }
 
     function rowKeyForMedia(media) {
-        return `cvr-row-${mediaFingerprint(media)}`;
+        const identity = exactImageId(media)
+            || uuidFromUrl(media?.url || '')
+            || media?.url
+            || `${media?.name || ''}:${media?.serverIndex ?? media?.index ?? ''}`;
+        return `cvr-row-${mediaFingerprint(media)}-${simpleHash(identity)}`;
     }
 
     function focusPanelEntryForMedia(media) {
@@ -1200,13 +1433,15 @@
 
     function renderList() {
         if (!state.body) return;
-        const rows = state.media.filter(m => !state.showOnlyMissing || (m.missingRating && !isHandled(m)));
+        // Handled groups remain visible even after scanner rating arrives. This keeps
+        // both the original and every replacement available for Show/Delete actions.
+        const rows = state.media.filter(m => !state.showOnlyMissing || m.missingRating || isHandled(m));
         if (!rows.length) {
             const total = state.media.length;
             const missing = state.media.filter(m => m.missingRating).length;
             const handled = state.media.filter(m => m.missingRating && isHandled(m)).length;
             const actionable = state.media.filter(m => m.missingRating && !isHandled(m)).length;
-            state.body.innerHTML = `<div class="cvrSmall">No matching actionable videos found. Total: ${total}, missing rating: ${missing}, actionable: ${actionable}, already handled: ${handled}. Debug data was saved to <code>window.__CVR_MEDIA__</code>.</div>`;
+            state.body.innerHTML = `<div class="cvrSmall">No videos needing work or belonging to a re-upload group were found. Total: ${total}, missing rating: ${missing}, actionable: ${actionable}, already handled: ${handled}. Debug data was saved to <code>window.__CVR_MEDIA__</code>.</div>`;
             window.__CVR_MEDIA__ = state.media;
             return;
         }
@@ -1214,22 +1449,40 @@
         state.body.innerHTML = '';
         rows.forEach((m, i) => {
             const row = document.createElement('div');
-            row.className = `cvrRow ${m.missingRating ? 'cvrRowMissing' : ''}`;
+            const groupInfo = handledGroupInfo(m);
+            const roleClass = groupInfo?.isOriginal ? 'cvrRowOriginal' : (groupInfo ? 'cvrRowReupload' : '');
+            row.className = `cvrRow ${m.missingRating ? 'cvrRowMissing' : ''} ${roleClass}`;
             const rowKey = rowKeyForMedia(m);
             row.setAttribute('data-cvr-row-key', rowKey);
             const prompt = String(m.meta?.prompt || m.raw?.prompt || '').slice(0, 240);
-            const handledText = isHandled(m) ? ' | handled: yes' : '';
             const rating = m.missingRating ? 'missing/unknown' : (m.ratingText || 'rated');
             const displayNo = displayNumberForMedia(m, i);
+            const stateLabel = groupInfo?.isOriginal
+                ? 'Original · re-uploaded'
+                : (groupInfo?.isReplacement
+                    ? `Re-upload #${groupInfo.replacementNumber} · ${m.missingRating ? 'scanner pending' : 'rated'}`
+                    : (groupInfo?.isGroupCopy
+                        ? `Group copy · ${m.missingRating ? 'scanner pending' : 'rated'}`
+                        : (m.missingRating ? 'Needs re-upload' : 'Already rated')));
+            const stateClass = groupInfo?.isOriginal
+                ? 'cvrStateOriginal'
+                : (groupInfo ? 'cvrStateReupload' : (m.missingRating ? 'cvrStateAction' : 'cvrStateRated'));
+            const groupHtml = groupInfo
+                ? `<div class="cvrGroup"><b>Group:</b> ${escapeHtml(groupInfo.groupLabel)} · <b>This entry:</b> ${groupInfo.isOriginal ? 'original' : (groupInfo.isReplacement ? `re-upload #${groupInfo.replacementNumber}` : 'unverified group copy')}</div>`
+                : '';
+            const canUpload = m.missingRating && !groupInfo;
+            const showTitle = m.domRoot?.isConnected ? 'Jump to this video card' : 'Reload the Civitai edit page before this new upload can be shown';
             row.innerHTML = `
-<div><b>#${displayNo} — ${escapeHtml(m.name)}</b></div>
-<div class="cvrMeta">video #: ${displayNo} | DOM index: ${m.baseIndex ?? m.index ?? '?'} | upload index: ${m.serverIndex ?? m.index ?? '?'} | id: ${escapeHtml(String(m.id ?? '?'))} | rating: ${escapeHtml(rating)}${handledText}</div>
+<div><b>#${displayNo} — ${escapeHtml(m.name)}</b><span class="cvrState ${stateClass}">${escapeHtml(stateLabel)}</span></div>
+${groupHtml}
+<div class="cvrMeta">video #: ${displayNo} | DOM index: ${m.baseIndex ?? m.index ?? '?'} | upload index: ${m.serverIndex ?? m.index ?? '?'} | id: ${escapeHtml(String(m.id ?? '?'))} | rating: ${escapeHtml(rating)}${m.virtualReplacement ? ' | new upload (reload page to jump)' : ''}</div>
 <div class="cvrMeta">mime: ${escapeHtml(m.mimeType)} | ${m.width || '?'}x${m.height || '?'} | primary modelVersionId: ${m.modelVersionId ?? '?'} | resources: ${(m.resourceDescriptors || []).length} | content tags: ${(m.contentTags || []).length}</div>
 <div class="cvrPrompt">${escapeHtml(prompt || '(no prompt found in captured metadata)')}</div>
 <div class="cvrActions">
-  <button data-act="show">Show</button>
-  <button data-act="autoUpload">Re-upload from site</button>
-  <button data-act="upload">Choose local fallback</button>
+  <button data-act="show" title="${escapeHtml(showTitle)}">Show</button>
+  <button data-act="autoUpload" ${canUpload ? '' : 'disabled'}>${groupInfo ? 'Already re-uploaded' : 'Re-upload from site'}</button>
+  <button data-act="upload" ${canUpload ? '' : 'disabled'}>Choose local fallback</button>
+  ${groupInfo?.isReplacement ? '<button data-act="delete" class="cvrDanger">Delete re-upload</button>' : ''}
   <button data-act="dump">Dump metadata</button>
 </div>`;
             row.addEventListener('mouseenter', () => highlightMedia(m, false));
@@ -1237,6 +1490,9 @@
             row.querySelector('[data-act="show"]').addEventListener('click', () => highlightMedia(m, true));
             row.querySelector('[data-act="autoUpload"]').addEventListener('click', () => reuploadFromExistingUrl(m).catch(e => { console.error(e); setStatus(`Error: ${e.message || e}`, true); }));
             row.querySelector('[data-act="upload"]').addEventListener('click', () => chooseAndReupload(m));
+            row.querySelector('[data-act="delete"]')?.addEventListener('click', () => {
+                deleteReuploadedMedia(m).catch(e => { console.error(e); setStatus(`Delete error: ${e.message || e}`, true); });
+            });
             row.querySelector('[data-act="dump"]').addEventListener('click', () => {
                 window.__CVR_LAST_MEDIA__ = m;
                 console.log('[CVR] selected media metadata:', m);
@@ -1951,6 +2207,7 @@
             resourceCopyFailures: resourceCopy.failed,
         });
         recordVirtualInsertion(media, sentIndex);
+        addVirtualReplacementToList(media, res, initInfo, file, sentIndex);
 
         if (false && options.deleteOriginal) {
             const del = await deleteOriginalViaDom(media);
@@ -1966,7 +2223,7 @@
             const resourceStatus = resourceCopy.failed.length
                 ? ` ${resourceCopy.failed.length} resource association(s) could not be copied; see the console.`
                 : ` Verified ${resourceCopy.copied + resourceCopy.existing} model/LoRA resource association(s).`;
-            setStatus(`Done. Replacement video was added with copied metadata.${resourceStatus} Original deletion is disabled.`, resourceCopy.failed.length > 0);
+            setStatus(`Done. Replacement video was added with copied metadata and remains listed under its original group.${resourceStatus} Reload the edit page before using Show on the new copy.`, resourceCopy.failed.length > 0);
         }
         return { response: res, resourceCopy };
     }
