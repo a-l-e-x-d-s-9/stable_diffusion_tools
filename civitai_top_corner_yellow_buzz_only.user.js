@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Civitai - Show Yellow Buzz and Today's Sales
+// @name         Civitai - Show Yellow Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.3.1
-// @description  Shows Yellow Buzz and a configurable daily paid-model sales counter in Civitai's top-right account button.
+// @version      1.4.0
+// @description  Shows exact Yellow Buzz and a configurable daily, weekly, or monthly paid-model sales counter in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
 // @match        https://civitai.red/*
@@ -15,15 +15,24 @@
 
   const YELLOW_HEX = '#f59f00';
   const YELLOW_RGB = 'rgb(245, 159, 0)';
+  const BUZZ_ACCOUNT_PATH = '/api/trpc/buzz.getBuzzAccount';
   const CACHE_KEY = 'civitai-yellow-buzz-only-v1';
+  const EXACT_BUZZ_CACHE_KEY = 'civitai-yellow-buzz-exact-v1';
+  const EXACT_BUZZ_REFRESH_MS = 2 * 60 * 1000;
   const SALES_CACHE_KEY = 'civitai-yellow-buzz-sales-today-v1';
   const SALES_LOCK_KEY = `${SALES_CACHE_KEY}-lock`;
+  const SALES_PERIOD_KEY = 'civitai-yellow-buzz-sales-period-v1';
   const SALES_COLOR_SETTINGS_KEY =
     'civitai-yellow-buzz-sales-color-settings-v1';
   const SALES_REFRESH_MS = 2 * 60 * 1000;
   const SALES_LOCK_MS = 30 * 1000;
   const SALES_PAGE_SIZE = 200;
   const PURCHASE_TRANSACTION_TYPE = 6;
+  const SALES_PERIODS = Object.freeze({
+    daily: 'Daily',
+    weekly: 'Weekly',
+    monthly: 'Monthly',
+  });
   const DEFAULT_SALES_COLOR_SETTINGS = Object.freeze({
     lowMax: 3,
     highMin: 6,
@@ -39,8 +48,12 @@
     lastCombinedText: '',
     lastCombinedGradient: '',
     lastAppliedYellow: '',
+    exactYellowValue: null,
+    exactYellowText: '',
+    exactBuzzLoading: false,
     salesCount: null,
-    salesDayKey: '',
+    salesPeriod: 'daily',
+    salesPeriodKey: '',
     salesLoading: false,
     salesError: '',
     salesColorSettings: null,
@@ -48,42 +61,115 @@
     updatePending: false,
   };
 
-  console.info('[Civitai Yellow Buzz] Script v1.3.1 loaded');
+  console.info('[Civitai Yellow Buzz] Script v1.4.0 loaded');
 
-  function getUtcDayBounds(now = new Date()) {
-    const start = new Date(Date.UTC(
+  function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
+    let start = new Date(Date.UTC(
       now.getUTCFullYear(),
       now.getUTCMonth(),
       now.getUTCDate()
     ));
 
+    if (period === 'weekly') {
+      const daysSinceMonday = (start.getUTCDay() + 6) % 7;
+      start = new Date(start.getTime() - daysSinceMonday * 86400000);
+    } else if (period === 'monthly') {
+      start = new Date(Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        1
+      ));
+    }
+
+    const end = period === 'daily'
+      ? new Date(start.getTime() + 86400000)
+      : period === 'weekly'
+        ? new Date(start.getTime() + 7 * 86400000)
+        : new Date(Date.UTC(
+          start.getUTCFullYear(),
+          start.getUTCMonth() + 1,
+          1
+        ));
+
     return {
-      dayKey: start.toISOString().slice(0, 10),
+      period,
+      periodKey: `${period}:${start.toISOString().slice(0, 10)}`,
       start,
-      end: new Date(start.getTime() + 24 * 60 * 60 * 1000),
+      end,
     };
   }
 
-  function loadSalesCache(dayKey) {
+  function normalizeSalesPeriod(period) {
+    return Object.prototype.hasOwnProperty.call(SALES_PERIODS, period)
+      ? period
+      : 'daily';
+  }
+
+  function loadSalesPeriod() {
     try {
-      const cached = JSON.parse(
+      return normalizeSalesPeriod(localStorage.getItem(SALES_PERIOD_KEY));
+    } catch {
+      return 'daily';
+    }
+  }
+
+  function saveSalesPeriod(period) {
+    const normalized = normalizeSalesPeriod(period);
+    if (state.salesPeriod === normalized) return;
+
+    state.salesPeriod = normalized;
+    state.salesCount = null;
+    state.salesPeriodKey = '';
+    state.salesError = '';
+
+    try {
+      localStorage.setItem(SALES_PERIOD_KEY, normalized);
+    } catch {
+      // The setting still applies until this page is closed.
+    }
+
+    queueUpdate();
+    refreshSalesIfNeeded();
+  }
+
+  function readSalesCacheStore() {
+    try {
+      const store = JSON.parse(
         localStorage.getItem(SALES_CACHE_KEY) || 'null'
       );
 
-      if (
-        cached &&
-        cached.dayKey === dayKey &&
-        Number.isInteger(cached.count) &&
-        cached.count >= 0 &&
-        Number.isFinite(cached.savedAt)
-      ) {
-        return cached;
+      if (store?.entries && typeof store.entries === 'object') return store;
+
+      // Upgrade the cache written by v1.3.x.
+      if (store?.dayKey && Number.isInteger(store.count)) {
+        return {
+          entries: {
+            daily: {
+              period: 'daily',
+              periodKey: `daily:${store.dayKey}`,
+              count: store.count,
+              savedAt: store.savedAt,
+            },
+          },
+        };
       }
     } catch {
       // Ignore an invalid or unavailable cache.
     }
 
-    return null;
+    return { entries: {} };
+  }
+
+  function loadSalesCache(period, periodKey) {
+    const cached = readSalesCacheStore().entries[period];
+
+    return cached &&
+      cached.periodKey === periodKey &&
+      Number.isInteger(cached.count) &&
+      cached.count >= 0 &&
+      Number.isFinite(cached.savedAt)
+      ? cached
+      : null;
   }
 
   function normalizeSalesColorSettings(value) {
@@ -165,39 +251,43 @@
     if (!cached) return;
 
     state.salesCount = cached.count;
-    state.salesDayKey = cached.dayKey;
+    state.salesPeriodKey = cached.periodKey;
     state.salesError = '';
     queueUpdate();
   }
 
-  function saveSalesCache(dayKey, count) {
+  function saveSalesCache(period, periodKey, count) {
     const cached = {
-      dayKey,
+      period,
+      periodKey,
       count,
       savedAt: Date.now(),
     };
 
     try {
-      localStorage.setItem(SALES_CACHE_KEY, JSON.stringify(cached));
+      const store = readSalesCacheStore();
+      store.entries[period] = cached;
+      localStorage.setItem(SALES_CACHE_KEY, JSON.stringify(store));
     } catch {
       // Continue without cross-tab caching.
     }
 
-    applySalesCache(cached);
+    if (period === state.salesPeriod) applySalesCache(cached);
   }
 
-  function acquireSalesRefreshLock() {
+  function acquireSalesRefreshLock(periodKey) {
     const token = `${Date.now()}-${Math.random()}`;
+    const lockKey = `${SALES_LOCK_KEY}:${periodKey}`;
 
     try {
       const existing = JSON.parse(
-        localStorage.getItem(SALES_LOCK_KEY) || 'null'
+        localStorage.getItem(lockKey) || 'null'
       );
 
       if (existing?.expiresAt > Date.now()) return null;
 
       localStorage.setItem(
-        SALES_LOCK_KEY,
+        lockKey,
         JSON.stringify({
           token,
           expiresAt: Date.now() + SALES_LOCK_MS,
@@ -205,25 +295,25 @@
       );
 
       const saved = JSON.parse(
-        localStorage.getItem(SALES_LOCK_KEY) || 'null'
+        localStorage.getItem(lockKey) || 'null'
       );
 
-      return saved?.token === token ? token : null;
+      return saved?.token === token ? { lockKey, token } : null;
     } catch {
       // localStorage can be disabled; an in-tab loading flag still prevents
       // duplicate requests in this tab.
-      return token;
+      return { lockKey, token };
     }
   }
 
-  function releaseSalesRefreshLock(token) {
+  function releaseSalesRefreshLock(lock) {
     try {
       const saved = JSON.parse(
-        localStorage.getItem(SALES_LOCK_KEY) || 'null'
+        localStorage.getItem(lock.lockKey) || 'null'
       );
 
-      if (saved?.token === token) {
-        localStorage.removeItem(SALES_LOCK_KEY);
+      if (saved?.token === lock.token) {
+        localStorage.removeItem(lock.lockKey);
       }
     } catch {
       // The short lease will expire on its own.
@@ -392,7 +482,7 @@
     ]);
   }
 
-  async function fetchTodaySales(bounds) {
+  async function fetchSales(bounds) {
     const saleIds = new Set();
     const seenCursors = new Set();
     let cursor;
@@ -426,8 +516,8 @@
   async function refreshSalesIfNeeded(force = false) {
     if (state.salesLoading) return;
 
-    const bounds = getUtcDayBounds();
-    const cached = loadSalesCache(bounds.dayKey);
+    const bounds = getUtcSalesBounds();
+    const cached = loadSalesCache(bounds.period, bounds.periodKey);
 
     if (cached) applySalesCache(cached);
 
@@ -439,26 +529,147 @@
       return;
     }
 
-    const lockToken = acquireSalesRefreshLock();
-    if (!lockToken) return;
+    const lock = acquireSalesRefreshLock(bounds.periodKey);
+    if (!lock) return;
 
     state.salesLoading = true;
     state.salesError = '';
     queueUpdate();
 
     try {
-      const count = await fetchTodaySales(bounds);
-      saveSalesCache(bounds.dayKey, count);
+      const count = await fetchSales(bounds);
+      saveSalesCache(bounds.period, bounds.periodKey, count);
     } catch (error) {
-      state.salesError = error?.message || String(error);
+      if (bounds.period === state.salesPeriod) {
+        state.salesError = error?.message || String(error);
+      }
       console.warn(
-        '[Civitai Yellow Buzz] Could not update today\'s sales:',
+        `[Civitai Yellow Buzz] Could not update ${bounds.period} sales:`,
         error
       );
     } finally {
       state.salesLoading = false;
-      releaseSalesRefreshLock(lockToken);
+      releaseSalesRefreshLock(lock);
       queueUpdate();
+      if (bounds.period !== state.salesPeriod) refreshSalesIfNeeded();
+    }
+  }
+
+  function formatExactYellowBuzz(value) {
+    if (!Number.isFinite(value)) return null;
+
+    // Keep a decimal dot and exactly one decimal place for million values.
+    if (Math.abs(value) >= 1e6 && Math.abs(value) < 1e9) {
+      return `${(value / 1e6).toFixed(1)}M`;
+    }
+
+    return valueToCompactNumber(value);
+  }
+
+  function applyExactBuzzCache(cached) {
+    if (
+      !cached ||
+      !Number.isFinite(cached.yellow) ||
+      cached.yellow < 0
+    ) {
+      return;
+    }
+
+    state.exactYellowValue = cached.yellow;
+    state.exactYellowText = formatExactYellowBuzz(cached.yellow);
+    queueUpdate();
+  }
+
+  function loadExactBuzzCache() {
+    try {
+      const cached = JSON.parse(
+        localStorage.getItem(EXACT_BUZZ_CACHE_KEY) || 'null'
+      );
+
+      if (
+        cached &&
+        Number.isFinite(cached.yellow) &&
+        cached.yellow >= 0 &&
+        Number.isFinite(cached.savedAt)
+      ) {
+        return cached;
+      }
+    } catch {
+      // Continue without a cached exact balance.
+    }
+
+    return null;
+  }
+
+  function saveExactBuzzCache(yellow) {
+    const cached = { yellow, savedAt: Date.now() };
+
+    try {
+      localStorage.setItem(EXACT_BUZZ_CACHE_KEY, JSON.stringify(cached));
+    } catch {
+      // The fetched balance still applies until this page is closed.
+    }
+
+    applyExactBuzzCache(cached);
+  }
+
+  async function fetchExactYellowBuzz() {
+    const input = encodeURIComponent(JSON.stringify({
+      json: { authed: true },
+    }));
+    const response = await fetch(
+      `${BUZZ_ACCOUNT_PATH}?input=${input}`,
+      {
+        credentials: 'same-origin',
+        headers: {
+          'x-client': 'web',
+          'x-client-date': String(Date.now()),
+        },
+      }
+    );
+    const body = await response.json().catch(() => null);
+
+    if (!response.ok || body?.error) {
+      const message =
+        body?.error?.json?.message ||
+        body?.error?.message ||
+        `Buzz account request failed (${response.status})`;
+      throw new Error(message);
+    }
+
+    const yellow = body?.result?.data?.json?.yellow;
+    if (!Number.isFinite(yellow) || yellow < 0) {
+      throw new Error('Civitai returned an unexpected Buzz account response');
+    }
+
+    return yellow;
+  }
+
+  async function refreshExactBuzzIfNeeded(force = false) {
+    if (state.exactBuzzLoading) return;
+
+    const cached = loadExactBuzzCache();
+    if (cached) applyExactBuzzCache(cached);
+
+    if (
+      !force &&
+      cached &&
+      Date.now() - cached.savedAt < EXACT_BUZZ_REFRESH_MS
+    ) {
+      return;
+    }
+
+    state.exactBuzzLoading = true;
+
+    try {
+      saveExactBuzzCache(await fetchExactYellowBuzz());
+    } catch (error) {
+      console.warn(
+        '[Civitai Yellow Buzz] Could not update exact Yellow Buzz:',
+        error
+      );
+    } finally {
+      state.exactBuzzLoading = false;
     }
   }
 
@@ -782,7 +993,7 @@
     const panel = document.createElement('div');
     panel.dataset.tmSalesSettings = 'true';
     panel.setAttribute('role', 'dialog');
-    panel.setAttribute('aria-label', 'Daily sales color settings');
+    panel.setAttribute('aria-label', 'Sales view and color settings');
     panel.style.setProperty('position', 'fixed');
     panel.style.setProperty('z-index', '2147483647');
     panel.style.setProperty('width', '300px');
@@ -803,7 +1014,7 @@
     panel.style.setProperty('-webkit-text-fill-color', 'currentColor');
 
     const heading = document.createElement('div');
-    heading.textContent = 'Daily sales colors';
+    heading.textContent = 'Sales settings';
     heading.style.setProperty('font-size', '15px');
     heading.style.setProperty('font-weight', '700');
     heading.style.setProperty('margin-bottom', '3px');
@@ -815,6 +1026,41 @@
     help.style.setProperty('opacity', '0.75');
     help.style.setProperty('margin-bottom', '10px');
     panel.appendChild(help);
+
+    const periodRow = document.createElement('label');
+    periodRow.style.setProperty('display', 'flex');
+    periodRow.style.setProperty('align-items', 'center');
+    periodRow.style.setProperty('justify-content', 'space-between');
+    periodRow.style.setProperty('gap', '10px');
+    periodRow.style.setProperty('margin-bottom', '10px');
+    periodRow.style.setProperty('font-size', '12px');
+
+    const periodLabel = document.createElement('span');
+    periodLabel.textContent = 'Sales period';
+
+    const periodSelect = document.createElement('select');
+    periodSelect.setAttribute('aria-label', 'Sales period');
+    periodSelect.style.setProperty('width', '130px');
+    periodSelect.style.setProperty('padding', '4px');
+    periodSelect.style.setProperty('border', '1px solid #5c5f66');
+    periodSelect.style.setProperty('border-radius', '4px');
+    periodSelect.style.setProperty(
+      'background',
+      'var(--mantine-color-body, #1a1b1e)'
+    );
+    periodSelect.style.setProperty('color', 'inherit');
+    periodSelect.style.setProperty('-webkit-text-fill-color', 'currentColor');
+
+    for (const [value, label] of Object.entries(SALES_PERIODS)) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      option.selected = value === state.salesPeriod;
+      periodSelect.appendChild(option);
+    }
+
+    periodRow.append(periodLabel, periodSelect);
+    panel.appendChild(periodRow);
 
     function createRow(labelText, enabled, color, threshold) {
       const row = document.createElement('label');
@@ -941,6 +1187,7 @@
         highEnabled: high.checkbox.checked,
         highColor: high.picker.value,
       });
+      saveSalesPeriod(periodSelect.value);
       closeSalesSettingsPanel();
     });
 
@@ -970,16 +1217,16 @@
   }
 
   function updateSalesBadge(root) {
-    let badge = root.querySelector('[data-tm-sales-today="true"]');
-    const currentDayKey = getUtcDayBounds().dayKey;
+    let badge = root.querySelector('[data-tm-sales-badge="true"]');
+    const bounds = getUtcSalesBounds();
+    const periodLabel = SALES_PERIODS[state.salesPeriod].toLowerCase();
     const hasCurrentCount =
-      state.salesDayKey === currentDayKey &&
+      state.salesPeriodKey === bounds.periodKey &&
       Number.isInteger(state.salesCount);
 
     if (!badge) {
       badge = document.createElement('span');
-      badge.dataset.tmSalesToday = 'true';
-      badge.setAttribute('aria-label', 'Paid-model sales today');
+      badge.dataset.tmSalesBadge = 'true';
       badge.setAttribute('role', 'button');
       badge.setAttribute('tabindex', '0');
       badge.style.setProperty('display', 'inline-flex', 'important');
@@ -1011,7 +1258,7 @@
       label.style.setProperty('line-height', '0.95', 'important');
 
       const dailyLabel = document.createElement('span');
-      dailyLabel.textContent = 'daily';
+      dailyLabel.dataset.tmSalesPeriodLabel = 'true';
 
       const salesLabel = document.createElement('span');
       salesLabel.textContent = 'sales';
@@ -1034,12 +1281,22 @@
     }
 
     const number = badge.querySelector('[data-tm-sales-number="true"]');
+    const displayedPeriod = badge.querySelector(
+      '[data-tm-sales-period-label="true"]'
+    );
+    if (displayedPeriod.textContent !== periodLabel) {
+      displayedPeriod.textContent = periodLabel;
+    }
+    badge.setAttribute(
+      'aria-label',
+      `${SALES_PERIODS[state.salesPeriod]} paid-model sales`
+    );
 
     if (hasCurrentCount) {
       const color = getSalesCountColor(state.salesCount);
       const countText = String(state.salesCount);
       if (number.textContent !== countText) number.textContent = countText;
-      badge.title = `${state.salesCount} paid-model sales since 00:00 UTC. Click to configure colors.`;
+      badge.title = `${state.salesCount} ${periodLabel} paid-model sales from ${bounds.start.toISOString().slice(0, 10)} UTC. Click to change the period or colors.`;
       badge.style.setProperty(
         'display',
         'inline-flex',
@@ -1057,7 +1314,7 @@
       );
     } else if (state.salesLoading) {
       if (number.textContent !== '…') number.textContent = '…';
-      badge.title = 'Loading paid-model sales since 00:00 UTC';
+      badge.title = `Loading ${periodLabel} paid-model sales`;
       badge.style.setProperty('display', 'inline-flex', 'important');
       badge.style.setProperty(
         'color',
@@ -1070,11 +1327,24 @@
         'important'
       );
     } else {
-      if (number.textContent) number.textContent = '';
+      const fallbackText = state.salesError ? '!' : '…';
+      if (number.textContent !== fallbackText) {
+        number.textContent = fallbackText;
+      }
       badge.title = state.salesError
-        ? `Could not load today's sales: ${state.salesError}`
-        : '';
-      badge.style.setProperty('display', 'none', 'important');
+        ? `Could not load ${periodLabel} sales: ${state.salesError}`
+        : `Waiting to load ${periodLabel} paid-model sales. Click to change the period or colors.`;
+      badge.style.setProperty('display', 'inline-flex', 'important');
+      badge.style.setProperty(
+        'color',
+        'var(--mantine-color-text)',
+        'important'
+      );
+      badge.style.setProperty(
+        '-webkit-text-fill-color',
+        'var(--mantine-color-text)',
+        'important'
+      );
     }
   }
 
@@ -1115,6 +1385,7 @@
     }
 
     const yellowText =
+      state.exactYellowText ||
       exactYellow ||
       loadCachedYellow(state.lastCombinedText) ||
       deriveYellowFromCombined(
@@ -1134,12 +1405,18 @@
 
     state.lastAppliedYellow = yellowText;
 
-    const buzzTitle = state.lastCombinedText
-      ? `Yellow Buzz only — combined total: ${state.lastCombinedText}`
-      : 'Yellow Buzz only';
+    const buzzTitle = Number.isFinite(state.exactYellowValue)
+      ? `Yellow Buzz: ${state.exactYellowValue.toLocaleString('en-US')}`
+      : state.lastCombinedText
+        ? `Yellow Buzz only — combined total: ${state.lastCombinedText}`
+        : 'Yellow Buzz only';
+    const salesBounds = getUtcSalesBounds();
+    const hasCurrentSales =
+      state.salesPeriodKey === salesBounds.periodKey &&
+      Number.isInteger(state.salesCount);
 
-    top.text.title = Number.isInteger(state.salesCount)
-      ? `${buzzTitle} — today's paid-model sales: ${state.salesCount}`
+    top.text.title = hasCurrentSales
+      ? `${buzzTitle} — ${state.salesPeriod} paid-model sales: ${state.salesCount}`
       : buzzTitle;
   }
 
@@ -1163,6 +1440,9 @@
   }
 
   function start() {
+    state.salesPeriod = loadSalesPeriod();
+    applyExactBuzzCache(loadExactBuzzCache());
+
     const observer = new MutationObserver(queueUpdate);
 
     observer.observe(document.documentElement, {
@@ -1193,6 +1473,24 @@
     );
 
     window.addEventListener('storage', (event) => {
+      if (event.key === EXACT_BUZZ_CACHE_KEY) {
+        applyExactBuzzCache(loadExactBuzzCache());
+        return;
+      }
+
+      if (event.key === SALES_PERIOD_KEY) {
+        const period = loadSalesPeriod();
+        if (period !== state.salesPeriod) {
+          state.salesPeriod = period;
+          state.salesCount = null;
+          state.salesPeriodKey = '';
+          state.salesError = '';
+          refreshSalesIfNeeded();
+        }
+        queueUpdate();
+        return;
+      }
+
       if (event.key === SALES_COLOR_SETTINGS_KEY) {
         state.salesColorSettings = null;
         loadSalesColorSettings();
@@ -1202,15 +1500,17 @@
 
       if (event.key !== SALES_CACHE_KEY) return;
 
-      const bounds = getUtcDayBounds();
-      applySalesCache(loadSalesCache(bounds.dayKey));
+      const bounds = getUtcSalesBounds();
+      applySalesCache(
+        loadSalesCache(bounds.period, bounds.periodKey)
+      );
     });
 
     document.addEventListener('click', (event) => {
       const panel = state.salesSettingsPanel;
       if (!panel) return;
       if (panel.contains(event.target)) return;
-      if (event.target?.closest?.('[data-tm-sales-today="true"]')) return;
+      if (event.target?.closest?.('[data-tm-sales-badge="true"]')) return;
       closeSalesSettingsPanel();
     });
 
@@ -1221,7 +1521,10 @@
     window.addEventListener('resize', closeSalesSettingsPanel);
 
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) refreshSalesIfNeeded();
+      if (!document.hidden) {
+        refreshExactBuzzIfNeeded();
+        refreshSalesIfNeeded();
+      }
     });
 
     /*
@@ -1229,9 +1532,11 @@
       changes. The interval repairs the display if that happens.
     */
     setInterval(queueUpdate, 750);
+    setInterval(refreshExactBuzzIfNeeded, 30 * 1000);
     setInterval(refreshSalesIfNeeded, 30 * 1000);
 
     runSeveralTimes();
+    refreshExactBuzzIfNeeded();
     refreshSalesIfNeeded();
   }
 
