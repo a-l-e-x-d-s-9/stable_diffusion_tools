@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai - Show Yellow Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.5.0
+// @version      1.5.1
 // @description  Shows exact Yellow Buzz and a configurable daily, weekly, or monthly paid-model sales counter in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
@@ -18,7 +18,8 @@
   const BUZZ_ACCOUNT_PATH = '/api/trpc/buzz.getBuzzAccount';
   const CACHE_KEY = 'civitai-yellow-buzz-only-v1';
   const EXACT_BUZZ_CACHE_KEY = 'civitai-yellow-buzz-exact-v1';
-  const EXACT_BUZZ_REFRESH_MS = 2 * 60 * 1000;
+  const EXACT_BUZZ_REFRESH_MS = 60 * 1000;
+  const UI_REPAIR_MS = 60 * 1000;
   const SALES_CACHE_KEY = 'civitai-yellow-buzz-sales-today-v1';
   const SALES_LOCK_KEY = `${SALES_CACHE_KEY}-lock`;
   const SALES_PERIOD_KEY = 'civitai-yellow-buzz-sales-period-v1';
@@ -63,7 +64,7 @@
     updatePending: false,
   };
 
-  console.info('[Civitai Yellow Buzz] Script v1.5.0 loaded');
+  console.info('[Civitai Yellow Buzz] Script v1.5.1 loaded');
 
   function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
     let start = new Date(Date.UTC(
@@ -261,10 +262,15 @@
   function applySalesCache(cached) {
     if (!cached) return;
 
+    const changed =
+      state.salesCount !== cached.count ||
+      state.salesPeriodKey !== cached.periodKey ||
+      state.salesError !== '';
+
     state.salesCount = cached.count;
     state.salesPeriodKey = cached.periodKey;
     state.salesError = '';
-    queueUpdate();
+    if (changed) queueUpdate();
   }
 
   function saveSalesCache(period, periodKey, count) {
@@ -586,9 +592,14 @@
       return;
     }
 
+    const formatted = formatExactYellowBuzz(cached.yellow);
+    const changed =
+      state.exactYellowValue !== cached.yellow ||
+      state.exactYellowText !== formatted;
+
     state.exactYellowValue = cached.yellow;
-    state.exactYellowText = formatExactYellowBuzz(cached.yellow);
-    queueUpdate();
+    state.exactYellowText = formatted;
+    if (changed) queueUpdate();
   }
 
   function loadExactBuzzCache() {
@@ -660,7 +671,9 @@
     if (state.exactBuzzLoading) return;
 
     const cached = loadExactBuzzCache();
-    if (cached) applyExactBuzzCache(cached);
+    if (cached && !Number.isFinite(state.exactYellowValue)) {
+      applyExactBuzzCache(cached);
+    }
 
     if (
       !force &&
@@ -918,59 +931,60 @@
     return valueToCompactNumber(yellowValue);
   }
 
+  function setImportantStyle(element, property, value) {
+    const currentValue = element.style.getPropertyValue(property);
+    const valueMatches =
+      currentValue === value ||
+      (value === YELLOW_HEX && currentValue === YELLOW_RGB);
+
+    if (
+      valueMatches &&
+      element.style.getPropertyPriority(property) === 'important'
+    ) {
+      return;
+    }
+
+    element.style.setProperty(property, value, 'important');
+  }
+
+  function setAttributeIfChanged(element, attribute, value) {
+    if (element.getAttribute(attribute) === value) return;
+    element.setAttribute(attribute, value);
+  }
+
   function forceYellowAppearance(root, text) {
-    root.dataset.tmYellowBuzzOnly = 'true';
-    text.dataset.tmYellowBuzzOnly = 'true';
+    if (root.dataset.tmYellowBuzzOnly !== 'true') {
+      root.dataset.tmYellowBuzzOnly = 'true';
+    }
+    if (text.dataset.tmYellowBuzzOnly !== 'true') {
+      text.dataset.tmYellowBuzzOnly = 'true';
+    }
 
-    root.style.setProperty(
-      '--buzz-gradient',
-      YELLOW_HEX,
-      'important'
-    );
-    root.style.setProperty('color', YELLOW_HEX, 'important');
-    root.style.setProperty(
-      '-webkit-text-fill-color',
-      YELLOW_HEX,
-      'important'
-    );
+    setImportantStyle(root, '--buzz-gradient', YELLOW_HEX);
+    setImportantStyle(root, 'color', YELLOW_HEX);
+    setImportantStyle(root, '-webkit-text-fill-color', YELLOW_HEX);
 
-    text.style.setProperty(
-      '--buzz-gradient',
-      YELLOW_HEX,
-      'important'
-    );
-    text.style.setProperty('background', 'none', 'important');
-    text.style.setProperty(
-      'background-image',
-      'none',
-      'important'
-    );
-    text.style.setProperty('color', YELLOW_HEX, 'important');
-    text.style.setProperty('font-size', '0.9em', 'important');
-    text.style.setProperty(
-      '-webkit-text-fill-color',
-      YELLOW_HEX,
-      'important'
-    );
+    setImportantStyle(text, '--buzz-gradient', YELLOW_HEX);
+    setImportantStyle(text, 'background', 'none');
+    setImportantStyle(text, 'background-image', 'none');
+    setImportantStyle(text, 'color', YELLOW_HEX);
+    setImportantStyle(text, 'font-size', '0.9em');
+    setImportantStyle(text, '-webkit-text-fill-color', YELLOW_HEX);
 
     for (const svg of root.querySelectorAll('svg')) {
-      svg.setAttribute('stroke', YELLOW_HEX);
-      svg.setAttribute('fill', YELLOW_HEX);
-      svg.style.setProperty('stroke', YELLOW_HEX, 'important');
-      svg.style.setProperty('fill', YELLOW_HEX, 'important');
+      setAttributeIfChanged(svg, 'stroke', YELLOW_HEX);
+      setAttributeIfChanged(svg, 'fill', YELLOW_HEX);
+      setImportantStyle(svg, 'stroke', YELLOW_HEX);
+      setImportantStyle(svg, 'fill', YELLOW_HEX);
 
       for (const stop of svg.querySelectorAll('stop')) {
-        stop.setAttribute('stop-color', YELLOW_HEX);
-        stop.style.setProperty(
-          'stop-color',
-          YELLOW_HEX,
-          'important'
-        );
+        setAttributeIfChanged(stop, 'stop-color', YELLOW_HEX);
+        setImportantStyle(stop, 'stop-color', YELLOW_HEX);
       }
 
       for (const path of svg.querySelectorAll('path')) {
-        path.style.setProperty('stroke', YELLOW_HEX, 'important');
-        path.style.setProperty('fill', YELLOW_HEX, 'important');
+        setImportantStyle(path, 'stroke', YELLOW_HEX);
+        setImportantStyle(path, 'fill', YELLOW_HEX);
       }
     }
   }
@@ -1566,7 +1580,6 @@
       characterData: true,
       attributes: true,
       attributeFilter: [
-        'style',
         'class',
         'aria-expanded',
       ],
@@ -1646,8 +1659,11 @@
       Civitai is a React application and can replace the header after route
       changes. The interval repairs the display if that happens.
     */
-    setInterval(queueUpdate, 750);
-    setInterval(refreshExactBuzzIfNeeded, 30 * 1000);
+    setInterval(queueUpdate, UI_REPAIR_MS);
+    setInterval(
+      () => refreshExactBuzzIfNeeded(true),
+      EXACT_BUZZ_REFRESH_MS
+    );
     setInterval(refreshSalesIfNeeded, 30 * 1000);
 
     runSeveralTimes();
