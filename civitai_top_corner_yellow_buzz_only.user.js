@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Civitai - Show Yellow Buzz and Sales
+// @name         Civitai - Show Yellow + Green Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.5.1
-// @description  Shows exact Yellow Buzz and a configurable daily, weekly, or monthly paid-model sales counter in Civitai's top-right account button.
+// @version      1.6.1
+// @description  Shows combined Yellow and Green Buzz with configurable daily, weekly, or monthly paid-model sales in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
 // @match        https://civitai.red/*
@@ -15,12 +15,13 @@
 
   const YELLOW_HEX = '#f59f00';
   const YELLOW_RGB = 'rgb(245, 159, 0)';
+  const GREEN_RGB = 'rgb(64, 192, 87)';
+  const BUZZ_DASHBOARD_URL = 'https://civitai.red/user/buzz-dashboard';
   const BUZZ_ACCOUNT_PATH = '/api/trpc/buzz.getBuzzAccount';
-  const CACHE_KEY = 'civitai-yellow-buzz-only-v1';
-  const EXACT_BUZZ_CACHE_KEY = 'civitai-yellow-buzz-exact-v1';
+  const EXACT_BUZZ_CACHE_KEY = 'civitai-yellow-green-buzz-exact-v1';
   const EXACT_BUZZ_REFRESH_MS = 60 * 1000;
   const UI_REPAIR_MS = 60 * 1000;
-  const SALES_CACHE_KEY = 'civitai-yellow-buzz-sales-today-v1';
+  const SALES_CACHE_KEY = 'civitai-yellow-green-buzz-sales-v1';
   const SALES_LOCK_KEY = `${SALES_CACHE_KEY}-lock`;
   const SALES_PERIOD_KEY = 'civitai-yellow-buzz-sales-period-v1';
   const SALES_COLOR_SETTINGS_KEY =
@@ -48,13 +49,13 @@
   });
 
   const state = {
-    lastCombinedText: '',
-    lastCombinedGradient: '',
-    lastAppliedYellow: '',
     exactYellowValue: null,
-    exactYellowText: '',
+    exactGreenValue: null,
+    exactCombinedValue: null,
+    exactCombinedText: '',
     exactBuzzLoading: false,
     salesCount: null,
+    salesByColor: null,
     salesPeriod: 'daily',
     salesPeriodKey: '',
     salesLoading: false,
@@ -64,7 +65,7 @@
     updatePending: false,
   };
 
-  console.info('[Civitai Yellow Buzz] Script v1.5.1 loaded');
+  console.info('[Civitai Buzz] Script v1.6.1 loaded');
 
   function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
     let start = new Date(Date.UTC(
@@ -122,6 +123,7 @@
 
     state.salesPeriod = normalized;
     state.salesCount = null;
+    state.salesByColor = null;
     state.salesPeriodKey = '';
     state.salesError = '';
 
@@ -151,20 +153,6 @@
       );
 
       if (store?.entries && typeof store.entries === 'object') return store;
-
-      // Upgrade the cache written by v1.3.x.
-      if (store?.dayKey && Number.isInteger(store.count)) {
-        return {
-          entries: {
-            daily: {
-              period: 'daily',
-              periodKey: `daily:${store.dayKey}`,
-              count: store.count,
-              savedAt: store.savedAt,
-            },
-          },
-        };
-      }
     } catch {
       // Ignore an invalid or unavailable cache.
     }
@@ -179,6 +167,11 @@
       cached.periodKey === periodKey &&
       Number.isInteger(cached.count) &&
       cached.count >= 0 &&
+      Number.isInteger(cached.byColor?.yellow) &&
+      cached.byColor.yellow >= 0 &&
+      Number.isInteger(cached.byColor?.green) &&
+      cached.byColor.green >= 0 &&
+      cached.count === cached.byColor.yellow + cached.byColor.green &&
       Number.isFinite(cached.savedAt)
       ? cached
       : null;
@@ -213,30 +206,56 @@
     };
   }
 
+  function normalizeSalesColorSettingsStore(value) {
+    const hasPeriodSettings = Object.keys(SALES_PERIODS).some(
+      (period) => value?.[period] && typeof value[period] === 'object'
+    );
+
+    if (hasPeriodSettings) {
+      return Object.fromEntries(
+        Object.keys(SALES_PERIODS).map((period) => [
+          period,
+          normalizeSalesColorSettings(value?.[period]),
+        ])
+      );
+    }
+
+    // Preserve the previous single configuration as the Daily settings.
+    return {
+      daily: normalizeSalesColorSettings(value),
+      weekly: normalizeSalesColorSettings(null),
+      monthly: normalizeSalesColorSettings(null),
+    };
+  }
+
   function loadSalesColorSettings() {
     if (state.salesColorSettings) return state.salesColorSettings;
 
     try {
-      state.salesColorSettings = normalizeSalesColorSettings(
+      state.salesColorSettings = normalizeSalesColorSettingsStore(
         JSON.parse(
           localStorage.getItem(SALES_COLOR_SETTINGS_KEY) || 'null'
         )
       );
     } catch {
-      state.salesColorSettings = normalizeSalesColorSettings(null);
+      state.salesColorSettings = normalizeSalesColorSettingsStore(null);
     }
 
     return state.salesColorSettings;
   }
 
-  function saveSalesColorSettings(settings) {
+  function saveSalesColorSettings(period, settings) {
     const normalized = normalizeSalesColorSettings(settings);
-    state.salesColorSettings = normalized;
+    const store = {
+      ...loadSalesColorSettings(),
+      [normalizeSalesPeriod(period)]: normalized,
+    };
+    state.salesColorSettings = store;
 
     try {
       localStorage.setItem(
         SALES_COLOR_SETTINGS_KEY,
-        JSON.stringify(normalized)
+        JSON.stringify(store)
       );
     } catch {
       // The setting still applies until this page is closed.
@@ -246,7 +265,7 @@
   }
 
   function getSalesCountColor(count) {
-    const settings = loadSalesColorSettings();
+    const settings = loadSalesColorSettings()[state.salesPeriod];
 
     if (count <= settings.lowMax) {
       return settings.lowEnabled ? settings.lowColor : '';
@@ -264,20 +283,24 @@
 
     const changed =
       state.salesCount !== cached.count ||
+      state.salesByColor?.yellow !== cached.byColor.yellow ||
+      state.salesByColor?.green !== cached.byColor.green ||
       state.salesPeriodKey !== cached.periodKey ||
       state.salesError !== '';
 
     state.salesCount = cached.count;
+    state.salesByColor = { ...cached.byColor };
     state.salesPeriodKey = cached.periodKey;
     state.salesError = '';
     if (changed) queueUpdate();
   }
 
-  function saveSalesCache(period, periodKey, count) {
+  function saveSalesCache(period, periodKey, byColor) {
     const cached = {
       period,
       periodKey,
-      count,
+      count: byColor.yellow + byColor.green,
+      byColor,
       savedAt: Date.now(),
     };
 
@@ -499,8 +522,18 @@
     ]);
   }
 
+  function getSaleBuzzType(transaction) {
+    const buzzType = String(transaction?.toAccountType || '').toLowerCase();
+    return buzzType === 'yellow' || buzzType === 'green'
+      ? buzzType
+      : null;
+  }
+
   async function fetchSales(bounds) {
-    const saleIds = new Set();
+    const saleIds = {
+      yellow: new Set(),
+      green: new Set(),
+    };
     const seenCursors = new Set();
     let cursor;
 
@@ -508,16 +541,19 @@
       const page = await fetchTransactionPage({
         start: bounds.start,
         end: bounds.end,
-        accountTypes: ['yellow'],
+        accountTypes: ['yellow', 'green'],
         type: PURCHASE_TRANSACTION_TYPE,
         limit: SALES_PAGE_SIZE,
         ...(cursor ? { cursor } : {}),
       });
 
       for (const transaction of page.transactions) {
-        if (isPaidModelSale(transaction)) {
-          saleIds.add(getSaleIdentity(transaction));
-        }
+        if (!isPaidModelSale(transaction)) continue;
+
+        const buzzType = getSaleBuzzType(transaction);
+        if (!buzzType) continue;
+
+        saleIds[buzzType].add(getSaleIdentity(transaction));
       }
 
       const nextCursor = page.cursor ? String(page.cursor) : '';
@@ -527,7 +563,10 @@
       cursor = nextCursor;
     } while (cursor);
 
-    return saleIds.size;
+    return {
+      yellow: saleIds.yellow.size,
+      green: saleIds.green.size,
+    };
   }
 
   async function refreshSalesIfNeeded(force = false) {
@@ -554,14 +593,14 @@
     queueUpdate();
 
     try {
-      const count = await fetchSales(bounds);
-      saveSalesCache(bounds.period, bounds.periodKey, count);
+      const byColor = await fetchSales(bounds);
+      saveSalesCache(bounds.period, bounds.periodKey, byColor);
     } catch (error) {
       if (bounds.period === state.salesPeriod) {
         state.salesError = error?.message || String(error);
       }
       console.warn(
-        `[Civitai Yellow Buzz] Could not update ${bounds.period} sales:`,
+        `[Civitai Buzz] Could not update ${bounds.period} sales:`,
         error
       );
     } finally {
@@ -572,7 +611,7 @@
     }
   }
 
-  function formatExactYellowBuzz(value) {
+  function formatBuzzBalance(value) {
     if (!Number.isFinite(value)) return null;
 
     // Keep a decimal dot and exactly one decimal place for million values.
@@ -587,18 +626,24 @@
     if (
       !cached ||
       !Number.isFinite(cached.yellow) ||
-      cached.yellow < 0
+      cached.yellow < 0 ||
+      !Number.isFinite(cached.green) ||
+      cached.green < 0
     ) {
       return;
     }
 
-    const formatted = formatExactYellowBuzz(cached.yellow);
+    const combined = cached.yellow + cached.green;
+    const formatted = formatBuzzBalance(combined);
     const changed =
       state.exactYellowValue !== cached.yellow ||
-      state.exactYellowText !== formatted;
+      state.exactGreenValue !== cached.green ||
+      state.exactCombinedText !== formatted;
 
     state.exactYellowValue = cached.yellow;
-    state.exactYellowText = formatted;
+    state.exactGreenValue = cached.green;
+    state.exactCombinedValue = combined;
+    state.exactCombinedText = formatted;
     if (changed) queueUpdate();
   }
 
@@ -612,6 +657,8 @@
         cached &&
         Number.isFinite(cached.yellow) &&
         cached.yellow >= 0 &&
+        Number.isFinite(cached.green) &&
+        cached.green >= 0 &&
         Number.isFinite(cached.savedAt)
       ) {
         return cached;
@@ -623,8 +670,8 @@
     return null;
   }
 
-  function saveExactBuzzCache(yellow) {
-    const cached = { yellow, savedAt: Date.now() };
+  function saveExactBuzzCache(balances) {
+    const cached = { ...balances, savedAt: Date.now() };
 
     try {
       localStorage.setItem(EXACT_BUZZ_CACHE_KEY, JSON.stringify(cached));
@@ -635,7 +682,7 @@
     applyExactBuzzCache(cached);
   }
 
-  async function fetchExactYellowBuzz() {
+  async function fetchExactBuzzBalances() {
     const input = encodeURIComponent(JSON.stringify({
       json: { authed: true },
     }));
@@ -660,18 +707,30 @@
     }
 
     const yellow = body?.result?.data?.json?.yellow;
-    if (!Number.isFinite(yellow) || yellow < 0) {
+    const green = body?.result?.data?.json?.green;
+    if (
+      !Number.isFinite(yellow) ||
+      yellow < 0 ||
+      !Number.isFinite(green) ||
+      green < 0
+    ) {
       throw new Error('Civitai returned an unexpected Buzz account response');
     }
 
-    return yellow;
+    return { yellow, green };
   }
 
   async function refreshExactBuzzIfNeeded(force = false) {
     if (state.exactBuzzLoading) return;
 
     const cached = loadExactBuzzCache();
-    if (cached && !Number.isFinite(state.exactYellowValue)) {
+    if (
+      cached &&
+      (
+        !Number.isFinite(state.exactYellowValue) ||
+        !Number.isFinite(state.exactGreenValue)
+      )
+    ) {
       applyExactBuzzCache(cached);
     }
 
@@ -686,38 +745,15 @@
     state.exactBuzzLoading = true;
 
     try {
-      saveExactBuzzCache(await fetchExactYellowBuzz());
+      saveExactBuzzCache(await fetchExactBuzzBalances());
     } catch (error) {
       console.warn(
-        '[Civitai Yellow Buzz] Could not update exact Yellow Buzz:',
+        '[Civitai Buzz] Could not update exact Buzz balances:',
         error
       );
     } finally {
       state.exactBuzzLoading = false;
     }
-  }
-
-  function compactNumberToValue(text) {
-    const normalized = String(text || '')
-      .trim()
-      .toLowerCase()
-      .replace(/,/g, '')
-      .replace(/\s+/g, '');
-
-    const match = normalized.match(/^([\d.]+)([kmbt])?$/);
-    if (!match) return null;
-
-    const number = Number(match[1]);
-    if (!Number.isFinite(number)) return null;
-
-    const multiplier = {
-      k: 1e3,
-      m: 1e6,
-      b: 1e9,
-      t: 1e12,
-    }[match[2]] || 1;
-
-    return number * multiplier;
   }
 
   function valueToCompactNumber(value) {
@@ -796,141 +832,6 @@
     return null;
   }
 
-  function elementLooksYellow(element) {
-    if (!element) return false;
-
-    const inlineStyle = (
-      element.getAttribute('style') || ''
-    ).toLowerCase();
-
-    const gradient = (
-      element.style.getPropertyValue('--buzz-gradient') || ''
-    ).toLowerCase();
-
-    let computedColor = '';
-
-    try {
-      computedColor = getComputedStyle(element).color;
-    } catch {
-      // Ignore detached or temporarily unavailable elements.
-    }
-
-    return (
-      inlineStyle.includes(YELLOW_HEX) ||
-      inlineStyle.includes(YELLOW_RGB) ||
-      gradient.includes(YELLOW_HEX) ||
-      computedColor === YELLOW_RGB
-    );
-  }
-
-  function getYellowFromOpenMenu() {
-    const dashboardLink = document.querySelector(
-      'a[href="/user/buzz-dashboard"], ' +
-      'a[href^="/user/buzz-dashboard?"], ' +
-      'a[href*="/user/buzz-dashboard"]'
-    );
-
-    if (!dashboardLink) return null;
-
-    const candidates = [
-      ...dashboardLink.querySelectorAll(
-        '[class*="userBuzz"], [style*="--buzz-gradient"]'
-      ),
-    ];
-
-    for (const root of candidates) {
-      if (!elementLooksYellow(root)) continue;
-
-      const text = findBuzzText(root);
-      const value = text?.textContent?.trim();
-
-      if (value) {
-        return value.toUpperCase();
-      }
-    }
-
-    /*
-      Fallback: inspect every compact-number span inside the Buzz dashboard
-      row and use the one whose closest styled ancestor is yellow.
-    */
-    for (const text of dashboardLink.querySelectorAll('span')) {
-      const value = text.textContent?.trim();
-
-      if (!isCompactBuzzText(value)) continue;
-
-      let ancestor = text;
-
-      while (ancestor && ancestor !== dashboardLink) {
-        if (elementLooksYellow(ancestor)) {
-          return value.toUpperCase();
-        }
-
-        ancestor = ancestor.parentElement;
-      }
-    }
-
-    return null;
-  }
-
-  function saveCachedYellow(yellowText, combinedText) {
-    try {
-      localStorage.setItem(
-        CACHE_KEY,
-        JSON.stringify({
-          yellowText,
-          combinedText,
-          savedAt: Date.now(),
-        })
-      );
-    } catch {
-      // Continue without caching.
-    }
-  }
-
-  function loadCachedYellow(combinedText) {
-    try {
-      const cached = JSON.parse(
-        localStorage.getItem(CACHE_KEY) || 'null'
-      );
-
-      if (
-        cached &&
-        typeof cached.yellowText === 'string' &&
-        (
-          !combinedText ||
-          !cached.combinedText ||
-          cached.combinedText === combinedText
-        )
-      ) {
-        return cached.yellowText;
-      }
-    } catch {
-      // Ignore an invalid cache.
-    }
-
-    return null;
-  }
-
-  function deriveYellowFromCombined(combinedText, gradientText) {
-    const total = compactNumberToValue(combinedText);
-    if (total === null) return null;
-
-    const percentages = [
-      ...String(gradientText || '').matchAll(/([\d.]+)%/g),
-    ]
-      .map((match) => Number(match[1]))
-      .filter((number) => Number.isFinite(number));
-
-    const split = percentages.find(
-      (percentage) => percentage > 0 && percentage < 100
-    );
-
-    if (split === undefined) return null;
-
-    const yellowValue = total * ((100 - split) / 100);
-    return valueToCompactNumber(yellowValue);
-  }
-
   function setImportantStyle(element, property, value) {
     const currentValue = element.style.getPropertyValue(property);
     const valueMatches =
@@ -952,24 +853,40 @@
     element.setAttribute(attribute, value);
   }
 
-  function forceYellowAppearance(root, text) {
-    if (root.dataset.tmYellowBuzzOnly !== 'true') {
-      root.dataset.tmYellowBuzzOnly = 'true';
+  function getCombinedBuzzGradient() {
+    const total = state.exactCombinedValue;
+    const yellowPercentage = total > 0
+      ? Math.max(0, Math.min(100, state.exactYellowValue / total * 100))
+      : 50;
+
+    return `linear-gradient(90deg, ${YELLOW_RGB} 0%, ` +
+      `${YELLOW_RGB} ${yellowPercentage}%, ` +
+      `${GREEN_RGB} ${yellowPercentage}%, ${GREEN_RGB} 100%)`;
+  }
+
+  function forceCombinedBuzzAppearance(root, text) {
+    const gradient = getCombinedBuzzGradient();
+
+    if (root.dataset.tmCombinedBuzz !== 'true') {
+      root.dataset.tmCombinedBuzz = 'true';
     }
-    if (text.dataset.tmYellowBuzzOnly !== 'true') {
-      text.dataset.tmYellowBuzzOnly = 'true';
+    if (text.dataset.tmCombinedBuzz !== 'true') {
+      text.dataset.tmCombinedBuzz = 'true';
     }
 
+    // Keep the icon solid Yellow; only the number represents both balances.
     setImportantStyle(root, '--buzz-gradient', YELLOW_HEX);
     setImportantStyle(root, 'color', YELLOW_HEX);
     setImportantStyle(root, '-webkit-text-fill-color', YELLOW_HEX);
 
-    setImportantStyle(text, '--buzz-gradient', YELLOW_HEX);
-    setImportantStyle(text, 'background', 'none');
-    setImportantStyle(text, 'background-image', 'none');
-    setImportantStyle(text, 'color', YELLOW_HEX);
+    setImportantStyle(text, '--buzz-gradient', gradient);
+    setImportantStyle(text, 'background-image', gradient);
+    setImportantStyle(text, 'background-clip', 'text');
+    setImportantStyle(text, '-webkit-background-clip', 'text');
+    setImportantStyle(text, 'color', 'transparent');
     setImportantStyle(text, 'font-size', '0.9em');
-    setImportantStyle(text, '-webkit-text-fill-color', YELLOW_HEX);
+    setImportantStyle(text, '-webkit-text-fill-color', 'transparent');
+    setImportantStyle(text, 'cursor', 'pointer');
 
     for (const svg of root.querySelectorAll('svg')) {
       setAttributeIfChanged(svg, 'stroke', YELLOW_HEX);
@@ -983,6 +900,8 @@
       }
 
       for (const path of svg.querySelectorAll('path')) {
+        setAttributeIfChanged(path, 'stroke', YELLOW_HEX);
+        setAttributeIfChanged(path, 'fill', YELLOW_HEX);
         setImportantStyle(path, 'stroke', YELLOW_HEX);
         setImportantStyle(path, 'fill', YELLOW_HEX);
       }
@@ -1014,7 +933,8 @@
       return;
     }
 
-    const settings = loadSalesColorSettings();
+    const settingsStore = loadSalesColorSettings();
+    const settings = settingsStore[state.salesPeriod];
     const panel = document.createElement('div');
     panel.dataset.tmSalesSettings = 'true';
     panel.setAttribute('role', 'dialog');
@@ -1046,7 +966,9 @@
     panel.appendChild(heading);
 
     const help = document.createElement('div');
-    help.textContent = 'Unchecked ranges use Civitai\'s default text color.';
+    help.textContent =
+      'Each period has separate thresholds and colors. Unchecked ranges ' +
+      'use Civitai\'s default text color.';
     help.style.setProperty('font-size', '11px');
     help.style.setProperty('opacity', '0.75');
     help.style.setProperty('margin-bottom', '10px');
@@ -1160,6 +1082,22 @@
       settings.highMin
     );
 
+    function applySettingsToControls(period) {
+      const periodSettings = settingsStore[normalizeSalesPeriod(period)];
+      low.number.value = String(periodSettings.lowMax);
+      low.checkbox.checked = periodSettings.lowEnabled;
+      low.picker.value = periodSettings.lowColor;
+      middle.checkbox.checked = periodSettings.middleEnabled;
+      middle.picker.value = periodSettings.middleColor;
+      high.number.value = String(periodSettings.highMin);
+      high.checkbox.checked = periodSettings.highEnabled;
+      high.picker.value = periodSettings.highColor;
+    }
+
+    periodSelect.addEventListener('change', () => {
+      applySettingsToControls(periodSelect.value);
+    });
+
     const error = document.createElement('div');
     error.style.setProperty('min-height', '15px');
     error.style.setProperty('font-size', '11px');
@@ -1176,7 +1114,11 @@
     reset.textContent = 'Reset';
     styleSettingsButton(reset);
     reset.addEventListener('click', () => {
-      saveSalesColorSettings(DEFAULT_SALES_COLOR_SETTINGS);
+      saveSalesColorSettings(
+        periodSelect.value,
+        DEFAULT_SALES_COLOR_SETTINGS
+      );
+      saveSalesPeriod(periodSelect.value);
       closeSalesSettingsPanel();
     });
 
@@ -1202,16 +1144,19 @@
         return;
       }
 
-      saveSalesColorSettings({
-        lowMax,
-        highMin,
-        lowEnabled: low.checkbox.checked,
-        lowColor: low.picker.value,
-        middleEnabled: middle.checkbox.checked,
-        middleColor: middle.picker.value,
-        highEnabled: high.checkbox.checked,
-        highColor: high.picker.value,
-      });
+      saveSalesColorSettings(
+        periodSelect.value,
+        {
+          lowMax,
+          highMin,
+          lowEnabled: low.checkbox.checked,
+          lowColor: low.picker.value,
+          middleEnabled: middle.checkbox.checked,
+          middleColor: middle.picker.value,
+          highEnabled: high.checkbox.checked,
+          highColor: high.picker.value,
+        }
+      );
       saveSalesPeriod(periodSelect.value);
       closeSalesSettingsPanel();
     });
@@ -1255,7 +1200,9 @@
     const periodLabel = SALES_PERIODS[state.salesPeriod].toLowerCase();
     const hasCurrentCount =
       state.salesPeriodKey === bounds.periodKey &&
-      Number.isInteger(state.salesCount);
+      Number.isInteger(state.salesCount) &&
+      Number.isInteger(state.salesByColor?.yellow) &&
+      Number.isInteger(state.salesByColor?.green);
 
     if (!badge) {
       badge = document.createElement('span');
@@ -1396,7 +1343,12 @@
       const color = getSalesCountColor(state.salesCount);
       const countText = String(state.salesCount);
       if (number.textContent !== countText) number.textContent = countText;
-      badge.title = `${state.salesCount} ${periodLabel} paid-model sales from ${bounds.start.toISOString().slice(0, 10)} UTC. Click to cycle; double-click or hold for settings.`;
+      badge.title =
+        `${state.salesCount} ${periodLabel} paid-model sales\n` +
+        `Yellow sales: ${state.salesByColor.yellow}\n` +
+        `Green sales: ${state.salesByColor.green}\n` +
+        `From ${bounds.start.toISOString().slice(0, 10)} UTC\n` +
+        'Click to cycle; double-click or hold for settings.';
       badge.style.setProperty(
         'display',
         'inline-flex',
@@ -1448,76 +1400,50 @@
     }
   }
 
+  function enableCombinedBuzzLink(text) {
+    if (text.dataset.tmCombinedBuzzLink === 'true') return;
+
+    text.dataset.tmCombinedBuzzLink = 'true';
+    text.setAttribute('role', 'link');
+    text.setAttribute('tabindex', '0');
+
+    const openDashboard = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      window.location.assign(BUZZ_DASHBOARD_URL);
+    };
+
+    text.addEventListener('click', openDashboard);
+    text.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      openDashboard(event);
+    });
+  }
+
   function update() {
     const top = findTopBuzz();
     if (!top) return;
 
-    const currentText = top.text.textContent.trim().toUpperCase();
-    const currentGradient =
-      top.root.style.getPropertyValue('--buzz-gradient') ||
-      top.root.getAttribute('style') ||
-      '';
-
-    /*
-      Capture Civitai's combined value before replacing it. If React later
-      refreshes the value, it will differ from our last inserted Yellow value.
-    */
-    if (
-      currentText &&
-      currentText !== state.lastAppliedYellow &&
-      isCompactBuzzText(currentText)
-    ) {
-      state.lastCombinedText = currentText;
-    }
-
-    if (
-      currentGradient.includes('linear-gradient') ||
-      currentGradient.includes('%')
-    ) {
-      state.lastCombinedGradient = currentGradient;
-    }
-
-    const exactYellow = getYellowFromOpenMenu();
-
-    if (exactYellow) {
-      state.lastAppliedYellow = exactYellow;
-      saveCachedYellow(exactYellow, state.lastCombinedText);
-    }
-
-    const yellowText =
-      state.exactYellowText ||
-      exactYellow ||
-      loadCachedYellow(state.lastCombinedText) ||
-      deriveYellowFromCombined(
-        state.lastCombinedText,
-        state.lastCombinedGradient
-      );
-
     updateSalesBadge(top.root);
 
-    if (!yellowText) return;
+    const combinedText = state.exactCombinedText;
+    if (!combinedText) return;
 
-    forceYellowAppearance(top.root, top.text);
+    forceCombinedBuzzAppearance(top.root, top.text);
+    enableCombinedBuzzLink(top.text);
 
-    if (top.text.textContent.trim().toUpperCase() !== yellowText) {
-      top.text.textContent = yellowText;
+    if (top.text.textContent.trim().toUpperCase() !== combinedText) {
+      top.text.textContent = combinedText;
     }
 
-    state.lastAppliedYellow = yellowText;
-
-    const buzzTitle = Number.isFinite(state.exactYellowValue)
-      ? `Yellow Buzz: ${state.exactYellowValue.toLocaleString('en-US')}`
-      : state.lastCombinedText
-        ? `Yellow Buzz only — combined total: ${state.lastCombinedText}`
-        : 'Yellow Buzz only';
-    const salesBounds = getUtcSalesBounds();
-    const hasCurrentSales =
-      state.salesPeriodKey === salesBounds.periodKey &&
-      Number.isInteger(state.salesCount);
-
-    top.text.title = hasCurrentSales
-      ? `${buzzTitle} — ${state.salesPeriod} paid-model sales: ${state.salesCount}`
-      : buzzTitle;
+    top.text.title =
+      `Yellow Buzz: ${state.exactYellowValue.toLocaleString('en-US')}\n` +
+      `Green Buzz: ${state.exactGreenValue.toLocaleString('en-US')}`;
+    top.text.setAttribute(
+      'aria-label',
+      'Combined Yellow and Green Buzz: ' +
+      state.exactCombinedValue.toLocaleString('en-US')
+    );
   }
 
   function queueUpdate() {
@@ -1611,6 +1537,7 @@
         if (period !== state.salesPeriod) {
           state.salesPeriod = period;
           state.salesCount = null;
+          state.salesByColor = null;
           state.salesPeriodKey = '';
           state.salesError = '';
           refreshSalesIfNeeded();
