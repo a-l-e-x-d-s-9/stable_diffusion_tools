@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai - Show Yellow + Green Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.7.0
+// @version      1.7.1
 // @description  Shows combined Yellow and Green Buzz with configurable sales counts and a clickable sold-model list in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
@@ -22,6 +22,9 @@
   const EXACT_BUZZ_REFRESH_MS = 60 * 1000;
   const UI_REPAIR_MS = 60 * 1000;
   const SALES_CACHE_KEY = 'civitai-yellow-green-buzz-sales-v1';
+  const SALES_MODEL_METADATA_CACHE_KEY =
+    'civitai-yellow-green-buzz-sale-model-metadata-v1';
+  const SALES_MODEL_METADATA_CACHE_LIMIT = 2000;
   const SALES_LOCK_KEY = `${SALES_CACHE_KEY}-lock`;
   const SALES_PERIOD_KEY = 'civitai-yellow-buzz-sales-period-v1';
   const SALES_COLOR_SETTINGS_KEY =
@@ -68,7 +71,7 @@
     updatePending: false,
   };
 
-  console.info('[Civitai Buzz] Script v1.7.0 loaded');
+  console.info('[Civitai Buzz] Script v1.7.1 loaded');
 
   function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
     let start = new Date(Date.UTC(
@@ -180,13 +183,14 @@
 
     if (!valid) return null;
 
-    const models = Array.isArray(cached.models)
+    const models = cached.modelListVersion === 2 && Array.isArray(cached.models)
       ? cached.models.filter((model) =>
         model &&
         typeof model.name === 'string' &&
         typeof model.href === 'string' &&
         Number.isInteger(model.count) &&
-        model.count > 0
+        model.count > 0 &&
+        Number.isFinite(model.firstSoldAt)
       )
       : null;
 
@@ -323,6 +327,7 @@
       count: sales.byColor.yellow + sales.byColor.green,
       byColor: sales.byColor,
       models: sales.models,
+      modelListVersion: 2,
       savedAt: Date.now(),
     };
 
@@ -572,8 +577,66 @@
     ) || 'Sold model';
   }
 
+  function getSaleTimestamp(transaction) {
+    const timestamp = new Date(transaction?.date).getTime();
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+
+  function readSaleModelMetadataCache() {
+    try {
+      const cache = JSON.parse(
+        localStorage.getItem(SALES_MODEL_METADATA_CACHE_KEY) || 'null'
+      );
+      if (cache?.entries && typeof cache.entries === 'object') return cache;
+    } catch {
+      // Continue with the metadata embedded in the period caches.
+    }
+
+    return { entries: {} };
+  }
+
+  function saveSaleModelMetadata(models) {
+    if (!models.length) return;
+
+    try {
+      const cache = readSaleModelMetadataCache();
+      const savedAt = Date.now();
+
+      for (const model of models) {
+        cache.entries[model.modelVersionId] = {
+          modelVersionId: model.modelVersionId,
+          name: model.name,
+          href: model.href,
+          savedAt,
+        };
+      }
+
+      const entries = Object.entries(cache.entries)
+        .sort((left, right) =>
+          Number(right[1]?.savedAt || 0) - Number(left[1]?.savedAt || 0)
+        )
+        .slice(0, SALES_MODEL_METADATA_CACHE_LIMIT);
+      cache.entries = Object.fromEntries(entries);
+      localStorage.setItem(
+        SALES_MODEL_METADATA_CACHE_KEY,
+        JSON.stringify(cache)
+      );
+    } catch {
+      // The current sales result still contains the resolved model links.
+    }
+  }
+
   function getKnownSaleModels() {
     const known = new Map();
+
+    for (const model of Object.values(readSaleModelMetadataCache().entries)) {
+      if (
+        Number.isInteger(model?.modelVersionId) &&
+        /^\/models\/\d+\?modelVersionId=\d+$/.test(model.href)
+      ) {
+        known.set(model.modelVersionId, model);
+      }
+    }
 
     for (const cached of Object.values(readSalesCacheStore().entries)) {
       if (!Array.isArray(cached?.models)) continue;
@@ -581,7 +644,8 @@
       for (const model of cached.models) {
         if (
           Number.isInteger(model?.modelVersionId) &&
-          /^\/models\/\d+\?modelVersionId=\d+$/.test(model.href)
+          /^\/models\/\d+\?modelVersionId=\d+$/.test(model.href) &&
+          !known.has(model.modelVersionId)
         ) {
           known.set(model.modelVersionId, model);
         }
@@ -640,6 +704,12 @@
       }
     }
 
+    saveSaleModelMetadata(
+      groups.map((group) =>
+        known.get(group.modelVersionId) || metadata.get(group.modelVersionId)
+      ).filter(Boolean)
+    );
+
     return groups.map((group) => {
       const resolved = known.get(group.modelVersionId) ||
         metadata.get(group.modelVersionId);
@@ -650,9 +720,11 @@
         name: resolved?.name || group.name,
         href: resolved?.href || fallbackHref,
         count: group.count,
+        firstSoldAt: group.firstSoldAt,
       };
     }).sort((left, right) =>
-      right.count - left.count || left.name.localeCompare(right.name)
+      right.firstSoldAt - left.firstSoldAt ||
+      left.name.localeCompare(right.name)
     );
   }
 
@@ -687,13 +759,21 @@
         saleIds[buzzType].add(saleIdentity);
         const modelVersionId = getSaleModelVersionId(transaction);
         const name = getSaleDisplayName(transaction);
+        const soldAt = getSaleTimestamp(transaction);
         const key = modelVersionId ? `version:${modelVersionId}` : `name:${name}`;
         const group = salesByModel.get(key) || {
           modelVersionId,
           name,
           count: 0,
+          firstSoldAt: soldAt,
         };
         group.count += 1;
+        if (
+          soldAt > 0 &&
+          (group.firstSoldAt <= 0 || soldAt < group.firstSoldAt)
+        ) {
+          group.firstSoldAt = soldAt;
+        }
         salesByModel.set(key, group);
       }
 
