@@ -185,7 +185,7 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     default_exists = cfg.get("default_exists", "skip")
     default_commit_message = cfg.get("default_commit_message", "batch upload {timestamp}")
     use_checksum = bool(cfg.get("use_checksum", False))
-    copy_duplicates = bool(cfg.get("copy_duplicates", False))
+    copy_duplicates = bool(cfg.get("copy_duplicates", True))
     progress_colour = cfg.get("progress_colour", "yellow")
     max_inflight_per_repo = int(cfg.get("max_inflight_per_repo", 2))
 
@@ -546,11 +546,12 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
     dest_state_files: Dict[int, Set[str]] = {}
     dest_clients: Dict[int, Optional[HFClient]] = {}
 
-    # When enabled, the first raw occurrence of a local file is the canonical
-    # Hub source. Later occurrences are copied from it instead of re-uploaded.
-    # realpath is used only as an identity key; repository paths still preserve
-    # the user's original symlink/file names.
-    copy_sources: Dict[str, Dict[str, Any]] = {}
+    # When enabled, the first eligible occurrence of a local artifact is the
+    # canonical Hub source. Later occurrences are copied from it instead of
+    # re-uploaded. Raw files are identified by realpath across source blocks;
+    # zip_source archives are scoped to their source block because unrelated
+    # sources can legitimately produce archives with the same filename.
+    copy_sources: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 
     skipped_count = 0
     exists_fail_hits = 0
@@ -782,6 +783,12 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
 
             # Existence policy checks and checksum
             for local_path, repo_path, size, sha in artifacts:
+                copy_eligible = arch["mode"] in ("none", "zip_source")
+                if arch["mode"] == "zip_source":
+                    identity = ("zip_source", s_idx, os.path.realpath(local_path))
+                else:
+                    identity = ("raw", os.path.realpath(local_path))
+
                 exists_remote = repo_path in existing_paths
                 take_action = True
                 if exists_remote:
@@ -808,8 +815,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                             logging.debug(f"checksum failed for {local_path}: {e}")
 
                 if take_action:
-                    identity = os.path.realpath(local_path)
-                    copy_source = copy_sources.get(identity) if copy_duplicates and arch["mode"] == "none" else None
+                    copy_source = copy_sources.get(identity) if copy_duplicates and copy_eligible else None
                     can_copy = (
                         copy_source is not None
                         and not create_pr
@@ -823,6 +829,8 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                     if can_copy:
                         plans[plan_idx]["copies"].append({
                             "local_path": local_path,
+                            "archive_mode": arch["mode"],
+                            "source_index": s_idx,
                             "source_repo_id": copy_source["repo_id"],
                             "source_repo_type": copy_source["repo_type"],
                             "source_path": copy_source["repo_path"],
@@ -832,7 +840,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                         })
                     else:
                         plans[plan_idx]["files"].append((local_path, repo_path, size, sha))
-                        if copy_duplicates and arch["mode"] == "none" and not create_pr and identity not in copy_sources:
+                        if copy_duplicates and copy_eligible and not create_pr and identity not in copy_sources:
                             copy_sources[identity] = {
                                 "repo_id": repo_id,
                                 "repo_type": repo_type,
@@ -846,7 +854,7 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                         delete_tracker.get(local_path, {"planned": 0, "succeeded": 0})
                 elif (
                     copy_duplicates
-                    and arch["mode"] == "none"
+                    and copy_eligible
                     and exists_remote
                     and exists_policy != "fail"
                     and not create_pr
@@ -854,7 +862,6 @@ def plan_operations(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str
                     # An existing file skipped by policy or checksum is
                     # immediately usable as the canonical copy source; no
                     # upload dependency is required.
-                    identity = os.path.realpath(local_path)
                     copy_sources.setdefault(identity, {
                         "repo_id": repo_id,
                         "repo_type": repo_type,
@@ -1077,6 +1084,8 @@ def execute_plans(plans: List[Dict[str, Any]], cfg: Dict[str, Any], totals: Dict
                     copied_files += 1
                     copied_bytes += copy_op["size"]
                     delete_tracker[local_path]["succeeded"] += 1
+                    if copy_op.get("archive_mode") == "zip_source":
+                        source_archive_succeed_counts[copy_op["source_index"]] += 1
                     pbar.update(copy_op["size"])
                     logging.info(f"Server-side copied: {source_uri} -> {destination_uri}")
                 except Exception as e:

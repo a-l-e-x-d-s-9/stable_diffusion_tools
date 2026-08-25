@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Civitai - Show Yellow + Green Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.6.1
-// @description  Shows combined Yellow and Green Buzz with configurable daily, weekly, or monthly paid-model sales in Civitai's top-right account button.
+// @version      1.7.0
+// @description  Shows combined Yellow and Green Buzz with configurable sales counts and a clickable sold-model list in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
 // @match        https://civitai.red/*
@@ -56,16 +56,19 @@
     exactBuzzLoading: false,
     salesCount: null,
     salesByColor: null,
+    salesModels: null,
     salesPeriod: 'daily',
     salesPeriodKey: '',
     salesLoading: false,
     salesError: '',
     salesColorSettings: null,
     salesSettingsPanel: null,
+    salesTooltip: null,
+    salesTooltipCloseTimer: null,
     updatePending: false,
   };
 
-  console.info('[Civitai Buzz] Script v1.6.1 loaded');
+  console.info('[Civitai Buzz] Script v1.7.0 loaded');
 
   function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
     let start = new Date(Date.UTC(
@@ -124,6 +127,7 @@
     state.salesPeriod = normalized;
     state.salesCount = null;
     state.salesByColor = null;
+    state.salesModels = null;
     state.salesPeriodKey = '';
     state.salesError = '';
 
@@ -142,6 +146,7 @@
     const currentIndex = periods.indexOf(state.salesPeriod);
     const nextPeriod = periods[(currentIndex + 1) % periods.length];
 
+    closeSalesTooltip();
     closeSalesSettingsPanel();
     saveSalesPeriod(nextPeriod);
   }
@@ -162,8 +167,7 @@
 
   function loadSalesCache(period, periodKey) {
     const cached = readSalesCacheStore().entries[period];
-
-    return cached &&
+    const valid = cached &&
       cached.periodKey === periodKey &&
       Number.isInteger(cached.count) &&
       cached.count >= 0 &&
@@ -172,9 +176,21 @@
       Number.isInteger(cached.byColor?.green) &&
       cached.byColor.green >= 0 &&
       cached.count === cached.byColor.yellow + cached.byColor.green &&
-      Number.isFinite(cached.savedAt)
-      ? cached
+      Number.isFinite(cached.savedAt);
+
+    if (!valid) return null;
+
+    const models = Array.isArray(cached.models)
+      ? cached.models.filter((model) =>
+        model &&
+        typeof model.name === 'string' &&
+        typeof model.href === 'string' &&
+        Number.isInteger(model.count) &&
+        model.count > 0
+      )
       : null;
+
+    return { ...cached, models };
   }
 
   function normalizeSalesColorSettings(value) {
@@ -285,22 +301,28 @@
       state.salesCount !== cached.count ||
       state.salesByColor?.yellow !== cached.byColor.yellow ||
       state.salesByColor?.green !== cached.byColor.green ||
+      JSON.stringify(state.salesModels) !== JSON.stringify(cached.models) ||
       state.salesPeriodKey !== cached.periodKey ||
       state.salesError !== '';
 
     state.salesCount = cached.count;
     state.salesByColor = { ...cached.byColor };
+    state.salesModels = cached.models;
     state.salesPeriodKey = cached.periodKey;
     state.salesError = '';
-    if (changed) queueUpdate();
+    if (changed) {
+      closeSalesTooltip();
+      queueUpdate();
+    }
   }
 
-  function saveSalesCache(period, periodKey, byColor) {
+  function saveSalesCache(period, periodKey, sales) {
     const cached = {
       period,
       periodKey,
-      count: byColor.yellow + byColor.green,
-      byColor,
+      count: sales.byColor.yellow + sales.byColor.green,
+      byColor: sales.byColor,
+      models: sales.models,
       savedAt: Date.now(),
     };
 
@@ -529,11 +551,117 @@
       : null;
   }
 
+  function getSaleModelVersionId(transaction) {
+    const detailsId = Number(transaction?.details?.modelVersionId);
+    if (Number.isInteger(detailsId) && detailsId > 0) return detailsId;
+
+    const match = String(transaction?.externalTransactionId || '').match(
+      /^(?:early-access|permanent-access)-(\d+)-/i
+    );
+    const externalId = Number(match?.[1]);
+    return Number.isInteger(externalId) && externalId > 0
+      ? externalId
+      : null;
+  }
+
+  function getSaleDisplayName(transaction) {
+    const description = String(transaction?.description || '').trim();
+    return description.replace(
+      /^Gain (?:early )?access (?:to|on) model\s*:\s*/i,
+      ''
+    ) || 'Sold model';
+  }
+
+  function getKnownSaleModels() {
+    const known = new Map();
+
+    for (const cached of Object.values(readSalesCacheStore().entries)) {
+      if (!Array.isArray(cached?.models)) continue;
+
+      for (const model of cached.models) {
+        if (
+          Number.isInteger(model?.modelVersionId) &&
+          /^\/models\/\d+\?modelVersionId=\d+$/.test(model.href)
+        ) {
+          known.set(model.modelVersionId, model);
+        }
+      }
+    }
+
+    return known;
+  }
+
+  async function fetchSaleModelMetadata(modelVersionId) {
+    const response = await fetch(
+      `/api/v1/model-versions/${encodeURIComponent(modelVersionId)}`,
+      { credentials: 'same-origin' }
+    );
+    if (!response.ok) return null;
+
+    const version = await response.json().catch(() => null);
+    const modelId = Number(version?.modelId);
+    if (!Number.isInteger(modelId) || modelId <= 0) return null;
+
+    const modelName = String(version?.model?.name || '').trim();
+    const versionName = String(version?.name || '').trim();
+    const name = modelName && versionName
+      ? `${modelName} — ${versionName}`
+      : modelName || versionName || `Model version ${modelVersionId}`;
+
+    return {
+      modelVersionId,
+      name,
+      href: `/models/${encodeURIComponent(modelId)}?modelVersionId=` +
+        encodeURIComponent(modelVersionId),
+    };
+  }
+
+  async function hydrateSaleModels(groups) {
+    const known = getKnownSaleModels();
+    const metadata = new Map();
+    const missingIds = groups
+      .map((group) => group.modelVersionId)
+      .filter((id) => Number.isInteger(id) && !known.has(id));
+
+    // Avoid sending a large monthly list to the public API all at once.
+    for (let index = 0; index < missingIds.length; index += 8) {
+      const results = await Promise.all(
+        missingIds.slice(index, index + 8).map(async (id) => {
+          try {
+            return await fetchSaleModelMetadata(id);
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      for (const result of results) {
+        if (result) metadata.set(result.modelVersionId, result);
+      }
+    }
+
+    return groups.map((group) => {
+      const resolved = known.get(group.modelVersionId) ||
+        metadata.get(group.modelVersionId);
+      const fallbackHref = '/models?query=' + encodeURIComponent(group.name);
+
+      return {
+        modelVersionId: group.modelVersionId,
+        name: resolved?.name || group.name,
+        href: resolved?.href || fallbackHref,
+        count: group.count,
+      };
+    }).sort((left, right) =>
+      right.count - left.count || left.name.localeCompare(right.name)
+    );
+  }
+
   async function fetchSales(bounds) {
     const saleIds = {
       yellow: new Set(),
       green: new Set(),
     };
+    const salesByModel = new Map();
     const seenCursors = new Set();
     let cursor;
 
@@ -553,7 +681,20 @@
         const buzzType = getSaleBuzzType(transaction);
         if (!buzzType) continue;
 
-        saleIds[buzzType].add(getSaleIdentity(transaction));
+        const saleIdentity = getSaleIdentity(transaction);
+        if (saleIds[buzzType].has(saleIdentity)) continue;
+
+        saleIds[buzzType].add(saleIdentity);
+        const modelVersionId = getSaleModelVersionId(transaction);
+        const name = getSaleDisplayName(transaction);
+        const key = modelVersionId ? `version:${modelVersionId}` : `name:${name}`;
+        const group = salesByModel.get(key) || {
+          modelVersionId,
+          name,
+          count: 0,
+        };
+        group.count += 1;
+        salesByModel.set(key, group);
       }
 
       const nextCursor = page.cursor ? String(page.cursor) : '';
@@ -564,8 +705,11 @@
     } while (cursor);
 
     return {
-      yellow: saleIds.yellow.size,
-      green: saleIds.green.size,
+      byColor: {
+        yellow: saleIds.yellow.size,
+        green: saleIds.green.size,
+      },
+      models: await hydrateSaleModels([...salesByModel.values()]),
     };
   }
 
@@ -580,6 +724,7 @@
     if (
       !force &&
       cached &&
+      Array.isArray(cached.models) &&
       Date.now() - cached.savedAt < SALES_REFRESH_MS
     ) {
       return;
@@ -593,8 +738,8 @@
     queueUpdate();
 
     try {
-      const byColor = await fetchSales(bounds);
-      saveSalesCache(bounds.period, bounds.periodKey, byColor);
+      const sales = await fetchSales(bounds);
+      saveSalesCache(bounds.period, bounds.periodKey, sales);
     } catch (error) {
       if (bounds.period === state.salesPeriod) {
         state.salesError = error?.message || String(error);
@@ -928,6 +1073,8 @@
   }
 
   function openSalesSettingsPanel(badge) {
+    closeSalesTooltip();
+
     if (state.salesSettingsPanel) {
       closeSalesSettingsPanel();
       return;
@@ -1194,6 +1341,162 @@
     panel.style.setProperty('top', `${top}px`);
   }
 
+  function clearSalesTooltipCloseTimer() {
+    if (state.salesTooltipCloseTimer === null) return;
+    clearTimeout(state.salesTooltipCloseTimer);
+    state.salesTooltipCloseTimer = null;
+  }
+
+  function closeSalesTooltip() {
+    clearSalesTooltipCloseTimer();
+    const tooltip = state.salesTooltip;
+    if (!tooltip) return;
+
+    const badgeId = tooltip.dataset.tmSalesBadgeId;
+    if (badgeId) {
+      document.getElementById(badgeId)?.removeAttribute('aria-controls');
+    }
+    tooltip.remove();
+    state.salesTooltip = null;
+  }
+
+  function scheduleSalesTooltipClose() {
+    clearSalesTooltipCloseTimer();
+    state.salesTooltipCloseTimer = setTimeout(() => {
+      state.salesTooltipCloseTimer = null;
+      closeSalesTooltip();
+    }, 180);
+  }
+
+  function openSalesTooltip(badge) {
+    clearSalesTooltipCloseTimer();
+    if (state.salesSettingsPanel || !badge?.isConnected) return;
+
+    const bounds = getUtcSalesBounds();
+    const hasCurrentModels =
+      state.salesPeriodKey === bounds.periodKey &&
+      Array.isArray(state.salesModels);
+    if (!hasCurrentModels) return;
+
+    if (state.salesTooltip?.isConnected) return;
+    closeSalesTooltip();
+
+    if (!badge.id) {
+      badge.id = 'tm-civitai-sales-badge';
+    }
+
+    const tooltip = document.createElement('div');
+    tooltip.id = 'tm-civitai-sales-tooltip';
+    tooltip.dataset.tmSalesTooltip = 'true';
+    tooltip.dataset.tmSalesBadgeId = badge.id;
+    tooltip.setAttribute('role', 'dialog');
+    tooltip.setAttribute('aria-label', 'Sold models');
+    tooltip.style.setProperty('position', 'fixed');
+    tooltip.style.setProperty('z-index', '2147483647');
+    tooltip.style.setProperty('width', 'min(360px, calc(100vw - 16px))');
+    tooltip.style.setProperty('box-sizing', 'border-box');
+    tooltip.style.setProperty('padding', '10px');
+    tooltip.style.setProperty('border', '1px solid #5c5f66');
+    tooltip.style.setProperty('border-radius', '8px');
+    tooltip.style.setProperty(
+      'background',
+      'var(--mantine-color-body, #1a1b1e)'
+    );
+    tooltip.style.setProperty('color', 'var(--mantine-color-text, #f1f3f5)');
+    tooltip.style.setProperty('-webkit-text-fill-color', 'currentColor');
+    tooltip.style.setProperty('box-shadow', '0 8px 28px rgba(0, 0, 0, 0.4)');
+    tooltip.style.setProperty('font-family', 'inherit');
+    tooltip.style.setProperty('text-align', 'left');
+
+    const heading = document.createElement('div');
+    heading.textContent = `${SALES_PERIODS[state.salesPeriod]} sold models`;
+    heading.style.setProperty('font-size', '13px');
+    heading.style.setProperty('font-weight', '700');
+    heading.style.setProperty('margin-bottom', '3px');
+
+    const summary = document.createElement('div');
+    summary.textContent =
+      `${state.salesCount} sales · ` +
+      `${state.salesByColor?.yellow ?? 0} yellow · ` +
+      `${state.salesByColor?.green ?? 0} green`;
+    summary.style.setProperty('font-size', '11px');
+    summary.style.setProperty('opacity', '0.72');
+    summary.style.setProperty('margin-bottom', state.salesModels.length ? '8px' : '0');
+
+    tooltip.append(heading, summary);
+
+    if (state.salesModels.length) {
+      const list = document.createElement('div');
+      list.style.setProperty('display', 'flex');
+      list.style.setProperty('flex-direction', 'column');
+      list.style.setProperty('gap', '3px');
+      list.style.setProperty('max-height', 'min(420px, 60vh)');
+      list.style.setProperty('overflow-y', 'auto');
+
+      for (const model of state.salesModels) {
+        const row = document.createElement('div');
+        row.style.setProperty('display', 'grid');
+        row.style.setProperty('grid-template-columns', '34px minmax(0, 1fr)');
+        row.style.setProperty('align-items', 'start');
+        row.style.setProperty('gap', '7px');
+        row.style.setProperty('padding', '4px 5px');
+        row.style.setProperty('border-radius', '5px');
+
+        const count = document.createElement('span');
+        count.textContent = `${model.count}×`;
+        count.title = `${model.count} sale${model.count === 1 ? '' : 's'}`;
+        count.style.setProperty('font-size', '12px');
+        count.style.setProperty('font-weight', '700');
+        count.style.setProperty('color', YELLOW_HEX);
+        count.style.setProperty('-webkit-text-fill-color', YELLOW_HEX);
+        count.style.setProperty('text-align', 'right');
+
+        const link = document.createElement('a');
+        link.href = model.href;
+        link.textContent = model.name;
+        link.title = `Open ${model.name}`;
+        link.style.setProperty('min-width', '0');
+        link.style.setProperty('font-size', '12px');
+        link.style.setProperty('line-height', '1.3');
+        link.style.setProperty('color', '#74c0fc');
+        link.style.setProperty('-webkit-text-fill-color', '#74c0fc');
+        link.style.setProperty('text-decoration', 'none');
+        link.style.setProperty('overflow-wrap', 'anywhere');
+        link.addEventListener('click', (event) => event.stopPropagation());
+        link.addEventListener('auxclick', (event) => event.stopPropagation());
+
+        row.append(count, link);
+        list.appendChild(row);
+      }
+
+      tooltip.appendChild(list);
+    }
+
+    tooltip.addEventListener('mouseenter', clearSalesTooltipCloseTimer);
+    tooltip.addEventListener('mouseleave', scheduleSalesTooltipClose);
+    tooltip.addEventListener('click', (event) => event.stopPropagation());
+    document.body.appendChild(tooltip);
+    state.salesTooltip = tooltip;
+    badge.setAttribute('aria-controls', tooltip.id);
+
+    const badgeRect = badge.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const left = Math.max(
+      8,
+      Math.min(
+        window.innerWidth - tooltipRect.width - 8,
+        badgeRect.right - tooltipRect.width
+      )
+    );
+    let top = badgeRect.bottom + 7;
+    if (top + tooltipRect.height > window.innerHeight - 8) {
+      top = Math.max(8, badgeRect.top - tooltipRect.height - 7);
+    }
+
+    tooltip.style.setProperty('left', `${left}px`);
+    tooltip.style.setProperty('top', `${top}px`);
+  }
+
   function updateSalesBadge(root) {
     let badge = root.querySelector('[data-tm-sales-badge="true"]');
     const bounds = getUtcSalesBounds();
@@ -1221,6 +1524,8 @@
       badge.style.setProperty('background', 'none', 'important');
       badge.style.setProperty('cursor', 'pointer', 'important');
       badge.style.setProperty('user-select', 'none', 'important');
+      badge.addEventListener('mouseenter', () => openSalesTooltip(badge));
+      badge.addEventListener('mouseleave', scheduleSalesTooltipClose);
 
       const number = document.createElement('span');
       number.dataset.tmSalesNumber = 'true';
@@ -1336,19 +1641,15 @@
     badge.setAttribute(
       'aria-label',
       `${SALES_PERIODS[state.salesPeriod]} paid-model sales. ` +
-      'Activate to cycle the period; Shift+activate for settings.'
+      'Hover for sold models; activate to cycle the period; ' +
+      'Shift+activate for settings.'
     );
 
     if (hasCurrentCount) {
       const color = getSalesCountColor(state.salesCount);
       const countText = String(state.salesCount);
       if (number.textContent !== countText) number.textContent = countText;
-      badge.title =
-        `${state.salesCount} ${periodLabel} paid-model sales\n` +
-        `Yellow sales: ${state.salesByColor.yellow}\n` +
-        `Green sales: ${state.salesByColor.green}\n` +
-        `From ${bounds.start.toISOString().slice(0, 10)} UTC\n` +
-        'Click to cycle; double-click or hold for settings.';
+      badge.removeAttribute('title');
       badge.style.setProperty(
         'display',
         'inline-flex',
@@ -1401,23 +1702,45 @@
   }
 
   function enableCombinedBuzzLink(text) {
-    if (text.dataset.tmCombinedBuzzLink === 'true') return;
+    const existingLink = text.closest('a[data-tm-combined-buzz-link="true"]');
+    if (existingLink) {
+      if (existingLink.href !== BUZZ_DASHBOARD_URL) {
+        existingLink.href = BUZZ_DASHBOARD_URL;
+      }
+      return existingLink;
+    }
 
-    text.dataset.tmCombinedBuzzLink = 'true';
-    text.setAttribute('role', 'link');
-    text.setAttribute('tabindex', '0');
+    const parent = text.parentNode;
+    if (!parent) return null;
 
-    const openDashboard = (event) => {
-      event.preventDefault();
+    const link = document.createElement('a');
+    link.dataset.tmCombinedBuzzLink = 'true';
+    link.href = BUZZ_DASHBOARD_URL;
+    link.setAttribute('aria-label', 'Open Buzz dashboard');
+    link.style.setProperty('display', 'inline-flex');
+    link.style.setProperty('align-items', 'center');
+    link.style.setProperty('color', 'inherit');
+    link.style.setProperty('text-decoration', 'none');
+    link.style.setProperty('cursor', 'pointer');
+
+    // Keep the account-menu button from consuming the link interaction while
+    // preserving native link behavior, including middle-click and Ctrl/Cmd-click.
+    for (const eventName of ['pointerdown', 'click', 'auxclick']) {
+      link.addEventListener(eventName, (event) => event.stopPropagation());
+    }
+    link.addEventListener('keydown', (event) => {
       event.stopPropagation();
-      window.location.assign(BUZZ_DASHBOARD_URL);
-    };
-
-    text.addEventListener('click', openDashboard);
-    text.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      openDashboard(event);
+      if (event.key !== ' ') return;
+      event.preventDefault();
+      window.location.assign(link.href);
     });
+
+    parent.insertBefore(link, text);
+    link.appendChild(text);
+    text.dataset.tmCombinedBuzzLink = 'true';
+    text.removeAttribute('role');
+    text.removeAttribute('tabindex');
+    return link;
   }
 
   function update() {
@@ -1430,7 +1753,7 @@
     if (!combinedText) return;
 
     forceCombinedBuzzAppearance(top.root, top.text);
-    enableCombinedBuzzLink(top.text);
+    const buzzLink = enableCombinedBuzzLink(top.text);
 
     if (top.text.textContent.trim().toUpperCase() !== combinedText) {
       top.text.textContent = combinedText;
@@ -1439,7 +1762,7 @@
     top.text.title =
       `Yellow Buzz: ${state.exactYellowValue.toLocaleString('en-US')}\n` +
       `Green Buzz: ${state.exactGreenValue.toLocaleString('en-US')}`;
-    top.text.setAttribute(
+    (buzzLink || top.text).setAttribute(
       'aria-label',
       'Combined Yellow and Green Buzz: ' +
       state.exactCombinedValue.toLocaleString('en-US')
@@ -1538,8 +1861,10 @@
           state.salesPeriod = period;
           state.salesCount = null;
           state.salesByColor = null;
+          state.salesModels = null;
           state.salesPeriodKey = '';
           state.salesError = '';
+          closeSalesTooltip();
           refreshSalesIfNeeded();
         }
         queueUpdate();
@@ -1570,10 +1895,15 @@
     });
 
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') closeSalesSettingsPanel();
+      if (event.key !== 'Escape') return;
+      closeSalesTooltip();
+      closeSalesSettingsPanel();
     });
 
-    window.addEventListener('resize', closeSalesSettingsPanel);
+    window.addEventListener('resize', () => {
+      closeSalesTooltip();
+      closeSalesSettingsPanel();
+    });
 
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
