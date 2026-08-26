@@ -14,9 +14,11 @@ Algorithms:
 Default selection:
   gaussian=0.25, scunet=0.25, drunet=0.25, fbcnn=0.25, blank=0.0
 
-Images are assigned independently in deterministic source-file order using the
-configured seed, then processed in algorithm batches. Each neural model is loaded
-for its complete batch and released before the next model is loaded.
+Images are assigned reproducibly using the configured seed. By default, balanced
+assignment first calculates group sizes that
+match the requested probabilities as closely as whole-image counts allow, then
+randomly shuffles those assignments. Images are processed in algorithm batches;
+each neural model is loaded for its complete batch and released before the next.
 
 Probability rules when any custom probability is supplied:
   1. Explicit values are fixed.
@@ -100,6 +102,7 @@ DEFAULTS: dict[str, Any] = {
     "source": None,
     "target": None,
     "layout": "preserve",             # preserve | flat
+    "assignment_mode": "balanced",    # balanced | independent
     "recursive": True,
     "extensions": [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"],
     "seed": 12345,
@@ -137,6 +140,8 @@ DEFAULTS: dict[str, Any] = {
     },
     "inference": {
         # 0 = full image. On CUDA OOM, automatically retry with oom_tile_size.
+        # A successful fallback tile is reused for the rest of that model's batch.
+        # If CUDA still OOMs at the minimum tile size, the batch continues on CPU.
         "tile_size": 0,
         "tile_overlap": 32,
         "oom_tile_size": 512,
@@ -288,6 +293,41 @@ def weighted_choice(rng: random.Random, probs: dict[str, float]) -> str:
         if r < acc:
             return name
     return ALL_CHOICES[-1]  # floating-point guard
+
+
+def assign_algorithms(
+    total: int,
+    probs: dict[str, float],
+    seed: int,
+    mode: str,
+) -> list[str]:
+    """Return seeded algorithm assignments, optionally with balanced group sizes."""
+    rng = random.Random(seed)
+    if mode == "independent":
+        return [weighted_choice(rng, probs) for _ in range(total)]
+    if mode != "balanced":
+        raise ValueError("assignment_mode must be 'balanced' or 'independent'.")
+
+    # Hamilton/largest-remainder allocation gives the closest whole-image group
+    # sizes. Seeded tie breakers avoid systematically favoring the first method.
+    exact = {name: total * probs[name] for name in ALL_CHOICES}
+    counts = {name: math.floor(exact[name]) for name in ALL_CHOICES}
+    remaining = total - sum(counts.values())
+    tie_breakers = {name: rng.random() for name in ALL_CHOICES}
+    remainder_order = sorted(
+        ALL_CHOICES,
+        key=lambda name: (-(exact[name] - counts[name]), tie_breakers[name]),
+    )
+    for name in remainder_order[:remaining]:
+        counts[name] += 1
+
+    assignments = [
+        name
+        for name in ALL_CHOICES
+        for _ in range(counts[name])
+    ]
+    rng.shuffle(assignments)
+    return assignments
 
 
 def install_dependencies() -> None:
@@ -472,6 +512,8 @@ def plan_output_path(
 def validate_config(cfg: dict[str, Any]) -> None:
     if cfg["layout"] not in ("preserve", "flat"):
         raise ValueError("layout must be 'preserve' or 'flat'.")
+    if cfg["assignment_mode"] not in ("balanced", "independent"):
+        raise ValueError("assignment_mode must be 'balanced' or 'independent'.")
 
     g = cfg["gaussian"]
     if float(g["sigma"]) < 0:
@@ -633,6 +675,8 @@ class ModelManager:
         self.precision = precision
         self.inference_cfg = inference_cfg
         self.cache: dict[str, Any] = {}
+        self.adaptive_tiles: dict[str, tuple[int, int]] = {}
+        self.cpu_fallback_models: set[str] = set()
         self.warned_drunet_fp16 = False
 
         if self.device.type == "cuda":
@@ -681,56 +725,94 @@ class ModelManager:
         cached = self.cache.pop(name, None)
         if cached is None:
             return
+        location = "CPU" if name in self.cpu_fallback_models else self.device.type.upper()
+        self.adaptive_tiles.pop(name, None)
+        self.cpu_fallback_models.discard(name)
         del cached
         gc.collect()
         if self.device.type == "cuda":
             self.torch.cuda.empty_cache()
-        print(f"Released {name} model from {self.device.type.upper()} memory.")
+        print(f"Released {name} model from {location} memory.")
 
-    def _with_oom_fallback(self, x, fn: Callable):
+    def _move_model_to_cpu(self, name: str) -> None:
+        """Move the active model to fp32 CPU inference after CUDA is exhausted."""
+        desc, _dtype = self.cache[name]
+        desc.to(self.torch.device("cpu"))
+        desc.model.to(dtype=self.torch.float32)
+        self.cache[name] = (desc, self.torch.float32)
+        self.cpu_fallback_models.add(name)
+        self.adaptive_tiles.pop(name, None)
+        gc.collect()
+        self.torch.cuda.empty_cache()
+        print(
+            f"CUDA OOM persisted at the minimum tile size; "
+            f"continuing the {name} batch on CPU."
+        )
+
+    def _with_oom_fallback(self, name: str, x, fn: Callable):
         torch = self.torch
-        tile = int(self.inference_cfg["tile_size"])
-        overlap = int(self.inference_cfg["tile_overlap"])
+        configured_tile = int(self.inference_cfg["tile_size"])
+        configured_overlap = int(self.inference_cfg["tile_overlap"])
         oom_tile = int(self.inference_cfg["oom_tile_size"])
 
-        attempt_tile = tile
+        if name in self.cpu_fallback_models:
+            attempt_tile = oom_tile or 512
+            overlap = configured_overlap
+            if overlap * 2 >= attempt_tile:
+                overlap = max(8, attempt_tile // 8)
+        elif name in self.adaptive_tiles:
+            attempt_tile, overlap = self.adaptive_tiles[name]
+        else:
+            attempt_tile = configured_tile
+            overlap = configured_overlap
+
         while True:
             try:
                 with torch.inference_mode():
                     return run_tiled(x, fn, attempt_tile, overlap)
             except RuntimeError as exc:
-                is_oom = self.device.type == "cuda" and "out of memory" in str(exc).lower()
+                is_oom = (
+                    self.device.type == "cuda"
+                    and name not in self.cpu_fallback_models
+                    and "out of memory" in str(exc).lower()
+                )
                 if not is_oom:
                     raise
                 torch.cuda.empty_cache()
                 if attempt_tile <= 0:
                     attempt_tile = oom_tile or 512
-                else:
+                elif attempt_tile > 128:
                     attempt_tile = max(128, attempt_tile // 2)
+                else:
+                    self._move_model_to_cpu(name)
+                    cpu_x = x.to(device=self.torch.device("cpu"), dtype=self.torch.float32)
+                    cpu_tile = oom_tile or 512
+                    cpu_overlap = configured_overlap
+                    if cpu_overlap * 2 >= cpu_tile:
+                        cpu_overlap = max(8, cpu_tile // 8)
+                    with torch.inference_mode():
+                        return run_tiled(cpu_x, fn, cpu_tile, cpu_overlap)
                 if overlap * 2 >= attempt_tile:
                     overlap = max(8, attempt_tile // 8)
+                self.adaptive_tiles[name] = (attempt_tile, overlap)
                 print(f"CUDA OOM: retrying with tile_size={attempt_tile}, overlap={overlap}")
-                if attempt_tile <= 128:
-                    # One final 128px attempt; if that also OOMs, propagate next time.
-                    try:
-                        with torch.inference_mode():
-                            return run_tiled(x, fn, attempt_tile, overlap)
-                    except RuntimeError:
-                        torch.cuda.empty_cache()
-                        raise
 
     def scunet(self, x, blend: float):
         desc, dtype = self.get("scunet")
-        work = x.to(self.device, dtype=dtype)
+        device = self.torch.device("cpu") if "scunet" in self.cpu_fallback_models else self.device
+        work = x.to(device, dtype=dtype)
         original = work
-        out = self._with_oom_fallback(work, lambda p: desc(p))
+        out = self._with_oom_fallback("scunet", work, lambda p: desc(p))
+        if original.device != out.device:
+            original = original.to(device=out.device, dtype=out.dtype)
         return blend_tensors(original, out, blend)
 
     def drunet(self, x, sigma: float, blend: float):
         import torch.nn.functional as F
 
         desc, dtype = self.get("drunet")
-        work = x.to(self.device, dtype=dtype)
+        device = self.torch.device("cpu") if "drunet" in self.cpu_fallback_models else self.device
+        work = x.to(device, dtype=dtype)
         original = work
 
         def infer(p):
@@ -753,12 +835,15 @@ class ModelManager:
             out = desc.model(self.torch.cat([pp, noise_map], dim=1))
             return out[:, :, :h, :w]
 
-        out = self._with_oom_fallback(work, infer)
+        out = self._with_oom_fallback("drunet", work, infer)
+        if original.device != out.device:
+            original = original.to(device=out.device, dtype=out.dtype)
         return blend_tensors(original, out, blend)
 
     def fbcnn(self, x, quality: str | int, blend: float):
         desc, dtype = self.get("fbcnn")
-        work = x.to(self.device, dtype=dtype)
+        device = self.torch.device("cpu") if "fbcnn" in self.cpu_fallback_models else self.device
+        work = x.to(device, dtype=dtype)
         original = work
 
         def infer(p):
@@ -775,7 +860,9 @@ class ModelManager:
             out, _pred = desc.model(p, qf_input)
             return out
 
-        out = self._with_oom_fallback(work, infer)
+        out = self._with_oom_fallback("fbcnn", work, infer)
+        if original.device != out.device:
+            original = original.to(device=out.device, dtype=out.dtype)
         return blend_tensors(original, out, blend)
 
 
@@ -927,6 +1014,7 @@ def apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[s
         "source": args.source,
         "target": args.target,
         "layout": args.layout,
+        "assignment_mode": args.assignment_mode,
         "seed": args.seed,
         "device": args.device,
         "models_dir": args.models_dir,
@@ -998,6 +1086,11 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--source", help="Source image folder.")
     p.add_argument("--target", help="Target image folder.")
     p.add_argument("--layout", choices=["preserve", "flat"], help="Preserve nested folders or flatten outputs.")
+    p.add_argument(
+        "--assignment-mode",
+        choices=["balanced", "independent"],
+        help="Balanced exact-size groups, or legacy independent random draws.",
+    )
     p.add_argument("--recursive", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--seed", type=int, help="Seed for reproducible algorithm selection.")
     p.add_argument("--device", help="torch device, e.g. cuda, cuda:0, cpu.")
@@ -1098,10 +1191,16 @@ def main() -> int:
         print("No matching images found.")
         return 0
 
-    rng = random.Random(int(cfg["seed"]))
-    assignments = [(p, weighted_choice(rng, probs)) for p in files]
+    assigned_algorithms = assign_algorithms(
+        total=len(files),
+        probs=probs,
+        seed=int(cfg["seed"]),
+        mode=str(cfg["assignment_mode"]),
+    )
+    assignments = list(zip(files, assigned_algorithms))
 
     print(f"Images found: {len(files)}")
+    print(f"Assignment mode: {cfg['assignment_mode']}")
     print("Resolved probabilities:")
     for name in ALL_CHOICES:
         print(f"  {name:8s}: {probs[name]:.6f}")
