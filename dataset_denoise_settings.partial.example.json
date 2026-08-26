@@ -1,0 +1,14 @@
+{
+  "source": "./source",
+  "target": "./cleaned",
+  "probabilities": {
+    "scunet": 0.5,
+    "blank": 0.1
+  },
+  "drunet": {
+    "sigma": 6.0
+  },
+  "output": {
+    "processed_format": "webp"
+  }
+}

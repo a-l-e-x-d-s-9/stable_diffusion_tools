@@ -1,0 +1,60 @@
+{
+  "source": "./source",
+  "target": "./cleaned",
+  "layout": "preserve",
+  "recursive": true,
+  "extensions": [
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".bmp",
+    ".tif",
+    ".tiff"
+  ],
+  "seed": 12345,
+  "device": "cuda",
+  "models_dir": "./denoise_models",
+  "probabilities": {
+    "gaussian": 0.25,
+    "scunet": 0.25,
+    "drunet": 0.25,
+    "fbcnn": 0.25,
+    "blank": 0.0
+  },
+  "gaussian": {
+    "sigma": 0.35,
+    "downsample_factor": 1.0,
+    "blend": 1.0
+  },
+  "scunet": {
+    "blend": 0.75
+  },
+  "drunet": {
+    "sigma": 7.5,
+    "blend": 1.0
+  },
+  "fbcnn": {
+    "quality": "auto",
+    "blend": 0.85
+  },
+  "inference": {
+    "tile_size": 0,
+    "tile_overlap": 32,
+    "oom_tile_size": 512,
+    "precision": "fp32"
+  },
+  "output": {
+    "processed_format": "png",
+    "png_compress_level": 4,
+    "jpeg_quality": 98,
+    "webp_quality": 100,
+    "overwrite": false,
+    "preserve_icc": true
+  },
+  "manifest": {
+    "enabled": true,
+    "filename": "denoise_manifest.csv"
+  },
+  "fail_fast": false
+}
