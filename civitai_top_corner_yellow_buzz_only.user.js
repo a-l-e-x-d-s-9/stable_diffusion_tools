@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai - Show Yellow + Green Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.7.1
+// @version      1.7.2
 // @description  Shows combined Yellow and Green Buzz with configurable sales counts and a clickable sold-model list in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
@@ -71,7 +71,7 @@
     updatePending: false,
   };
 
-  console.info('[Civitai Buzz] Script v1.7.1 loaded');
+  console.info('[Civitai Buzz] Script v1.7.2 loaded');
 
   function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
     let start = new Date(Date.UTC(
@@ -1152,6 +1152,36 @@
     button.style.setProperty('color', primary ? '#1a1b1e' : 'inherit');
   }
 
+  function positionSalesSettingsPanel(panel, badge) {
+    if (!panel?.isConnected) return;
+
+    const panelRect = panel.getBoundingClientRect();
+    let left;
+    let top;
+
+    if (badge?.isConnected) {
+      const badgeRect = badge.getBoundingClientRect();
+      left = Math.max(
+        8,
+        Math.min(
+          window.innerWidth - panelRect.width - 8,
+          badgeRect.right - panelRect.width
+        )
+      );
+      top = badgeRect.bottom + 8;
+
+      if (top + panelRect.height > window.innerHeight - 8) {
+        top = Math.max(8, badgeRect.top - panelRect.height - 8);
+      }
+    } else {
+      left = Math.max(8, (window.innerWidth - panelRect.width) / 2);
+      top = Math.max(8, (window.innerHeight - panelRect.height) / 3);
+    }
+
+    panel.style.setProperty('left', `${left}px`);
+    panel.style.setProperty('top', `${top}px`);
+  }
+
   function openSalesSettingsPanel(badge) {
     closeSalesTooltip();
 
@@ -1393,32 +1423,7 @@
     panel.addEventListener('click', (event) => event.stopPropagation());
     document.body.appendChild(panel);
     state.salesSettingsPanel = panel;
-
-    const panelRect = panel.getBoundingClientRect();
-    let left;
-    let top;
-
-    if (badge?.isConnected) {
-      const badgeRect = badge.getBoundingClientRect();
-      left = Math.max(
-        8,
-        Math.min(
-          window.innerWidth - panelRect.width - 8,
-          badgeRect.right - panelRect.width
-        )
-      );
-      top = badgeRect.bottom + 8;
-
-      if (top + panelRect.height > window.innerHeight - 8) {
-        top = Math.max(8, badgeRect.top - panelRect.height - 8);
-      }
-    } else {
-      left = Math.max(8, (window.innerWidth - panelRect.width) / 2);
-      top = Math.max(8, (window.innerHeight - panelRect.height) / 3);
-    }
-
-    panel.style.setProperty('left', `${left}px`);
-    panel.style.setProperty('top', `${top}px`);
+    positionSalesSettingsPanel(panel, badge);
   }
 
   function clearSalesTooltipCloseTimer() {
@@ -1446,6 +1451,27 @@
       state.salesTooltipCloseTimer = null;
       closeSalesTooltip();
     }, 180);
+  }
+
+  function positionSalesTooltip(tooltip, badge) {
+    if (!tooltip?.isConnected || !badge?.isConnected) return;
+
+    const badgeRect = badge.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const left = Math.max(
+      8,
+      Math.min(
+        window.innerWidth - tooltipRect.width - 8,
+        badgeRect.right - tooltipRect.width
+      )
+    );
+    let top = badgeRect.bottom + 7;
+    if (top + tooltipRect.height > window.innerHeight - 8) {
+      top = Math.max(8, badgeRect.top - tooltipRect.height - 7);
+    }
+
+    tooltip.style.setProperty('left', `${left}px`);
+    tooltip.style.setProperty('top', `${top}px`);
   }
 
   function openSalesTooltip(badge) {
@@ -1558,23 +1584,7 @@
     document.body.appendChild(tooltip);
     state.salesTooltip = tooltip;
     badge.setAttribute('aria-controls', tooltip.id);
-
-    const badgeRect = badge.getBoundingClientRect();
-    const tooltipRect = tooltip.getBoundingClientRect();
-    const left = Math.max(
-      8,
-      Math.min(
-        window.innerWidth - tooltipRect.width - 8,
-        badgeRect.right - tooltipRect.width
-      )
-    );
-    let top = badgeRect.bottom + 7;
-    if (top + tooltipRect.height > window.innerHeight - 8) {
-      top = Math.max(8, badgeRect.top - tooltipRect.height - 7);
-    }
-
-    tooltip.style.setProperty('left', `${left}px`);
-    tooltip.style.setProperty('top', `${top}px`);
+    positionSalesTooltip(tooltip, badge);
   }
 
   function updateSalesBadge(root) {
@@ -1981,8 +1991,13 @@
     });
 
     window.addEventListener('resize', () => {
-      closeSalesTooltip();
-      closeSalesSettingsPanel();
+      // Model detail pages may dispatch resize events while their media layout
+      // settles. Keep open overlays alive and merely update their position.
+      const badge = document.querySelector(
+        '[data-tm-sales-badge="true"]'
+      );
+      positionSalesTooltip(state.salesTooltip, badge);
+      positionSalesSettingsPanel(state.salesSettingsPanel, badge);
     });
 
     document.addEventListener('visibilitychange', () => {
