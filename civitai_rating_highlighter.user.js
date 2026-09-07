@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Rating Highlighter
 // @namespace    https://civitai.com/
-// @version      1.1.1
+// @version      1.1.2
 // @description  Highlight and navigate unrated images/videos, with optional blinking, shortcuts, and traffic-light rating colors. Disabled by default.
 // @match        https://civitai.com/*
 // @match        https://civitai.red/*
@@ -26,9 +26,9 @@
     const MEDIA = 'img, video, [class*="EdgeImage"], [class*="EdgeVideo"]';
     const PALETTE = {
         PG: ['#00e676', '#071c10'],
-        'PG-13': ['#c6ff00', '#182000'],
-        R: ['#ffeb00', '#211d00'],
-        X: ['#ff9100', '#291500'],
+        'PG-13': ['#a1fd7c', '#182000'],
+        R: ['#ffee00', '#211d00'],
+        X: ['#ff641c', '#291500'],
         XXX: ['#ff1744', '#ffffff'],
     };
     const defaults = {
