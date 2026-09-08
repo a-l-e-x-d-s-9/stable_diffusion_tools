@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai - Show Yellow + Green Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.7.2
+// @version      1.7.3
 // @description  Shows combined Yellow and Green Buzz with configurable sales counts and a clickable sold-model list in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
@@ -71,7 +71,7 @@
     updatePending: false,
   };
 
-  console.info('[Civitai Buzz] Script v1.7.2 loaded');
+  console.info('[Civitai Buzz] Script v1.7.3 loaded');
 
   function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
     let start = new Date(Date.UTC(
@@ -839,9 +839,9 @@
   function formatBuzzBalance(value) {
     if (!Number.isFinite(value)) return null;
 
-    // Keep a decimal dot and exactly one decimal place for million values.
+    // Keep a decimal dot and exactly three decimal places for million values.
     if (Math.abs(value) >= 1e6 && Math.abs(value) < 1e9) {
-      return `${(value / 1e6).toFixed(1)}M`;
+      return `${(value / 1e6).toFixed(3)}M`;
     }
 
     return valueToCompactNumber(value);
@@ -1850,6 +1850,7 @@
     }
 
     top.text.title =
+      `Combined Buzz: ${state.exactCombinedValue.toLocaleString('en-US')}\n` +
       `Yellow Buzz: ${state.exactYellowValue.toLocaleString('en-US')}\n` +
       `Green Buzz: ${state.exactGreenValue.toLocaleString('en-US')}`;
     (buzzLink || top.text).setAttribute(
