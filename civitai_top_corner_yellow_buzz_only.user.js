@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai - Show Yellow + Green Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.7.3
+// @version      1.7.4
 // @description  Shows combined Yellow and Green Buzz with configurable sales counts and a clickable sold-model list in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
@@ -71,7 +71,7 @@
     updatePending: false,
   };
 
-  console.info('[Civitai Buzz] Script v1.7.3 loaded');
+  console.info('[Civitai Buzz] Script v1.7.4 loaded');
 
   function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
     let start = new Date(Date.UTC(
@@ -841,7 +841,7 @@
 
     // Keep a decimal dot and exactly three decimal places for million values.
     if (Math.abs(value) >= 1e6 && Math.abs(value) < 1e9) {
-      return `${(value / 1e6).toFixed(3)}M`;
+      return `${(value / 1e6).toFixed(3)}m`;
     }
 
     return valueToCompactNumber(value);
@@ -987,8 +987,8 @@
     const units = [
       [1e12, 'T'],
       [1e9, 'B'],
-      [1e6, 'M'],
-      [1e3, 'K'],
+      [1e6, 'm'],
+      [1e3, 'k'],
     ];
 
     for (const [divisor, suffix] of units) {
@@ -1103,6 +1103,7 @@
     setImportantStyle(root, '--buzz-gradient', YELLOW_HEX);
     setImportantStyle(root, 'color', YELLOW_HEX);
     setImportantStyle(root, '-webkit-text-fill-color', YELLOW_HEX);
+    setImportantStyle(root, 'padding-right', '4px');
 
     setImportantStyle(text, '--buzz-gradient', gradient);
     setImportantStyle(text, 'background-image', gradient);
@@ -1110,6 +1111,7 @@
     setImportantStyle(text, '-webkit-background-clip', 'text');
     setImportantStyle(text, 'color', 'transparent');
     setImportantStyle(text, 'font-size', '0.9em');
+    setImportantStyle(text, 'text-transform', 'none');
     setImportantStyle(text, '-webkit-text-fill-color', 'transparent');
     setImportantStyle(text, 'cursor', 'pointer');
 
@@ -1845,7 +1847,7 @@
     forceCombinedBuzzAppearance(top.root, top.text);
     const buzzLink = enableCombinedBuzzLink(top.text);
 
-    if (top.text.textContent.trim().toUpperCase() !== combinedText) {
+    if (top.text.textContent.trim() !== combinedText) {
       top.text.textContent = combinedText;
     }
 
