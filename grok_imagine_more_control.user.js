@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Prompt Manager Panel
 // @namespace    alexds9.scripts
-// @version      1.5.6
+// @version      1.5.7
 // @description  Draggable prompt panel with persistent seconds, titled prompt history, wildcard replacement, optional prompt override for REST/WebSocket image/video generation, and backup/restore.
 // @match        https://grok.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
@@ -169,6 +169,22 @@
     const t = promptTitle(item, idx);
     if (t) return (idx + 1) + ". " + truncateOneLine(t, 72);
     return (idx + 1) + ". " + truncateOneLine(promptText(item), 72);
+  }
+
+  function uniquePromptTitle(title, prompts) {
+    const base = String(title || "").trim();
+    if (!base) return "";
+
+    const used = new Set((Array.isArray(prompts) ? prompts : [])
+      .map((item) => promptTitle(item).toLocaleLowerCase())
+      .filter(Boolean));
+    if (!used.has(base.toLocaleLowerCase())) return base;
+
+    const numbered = base.match(/^(.*) \((\d+)\)$/);
+    const root = numbered && numbered[1].trim() ? numbered[1].trim() : base;
+    let n = numbered ? Math.max(2, parseInt(numbered[2], 10) + 1) : 2;
+    while (used.has((root + " (" + n + ")").toLocaleLowerCase())) n++;
+    return root + " (" + n + ")";
   }
 
   function refreshSelect(selectEl, prompts, indices) {
@@ -1071,6 +1087,7 @@
     const actions = css(el("div"), "display: flex; gap: 6px; margin-top: 2px; flex-wrap: wrap;");
 
     const newBtn = css(el("button", { textContent: "New" }), "background: #222; border: 1px solid #444; color: #ddd; padding: 5px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;");
+    const saveNewBtn = css(el("button", { textContent: "Save New" }), "background: #1f2430; border: 1px solid #467; color: #e7f0ff; padding: 5px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;");
     const saveBtn = css(el("button", { textContent: "Save" }), "background: #1f2a1f; border: 1px solid #2b4; color: #e7ffe7; padding: 5px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;");
     const delBtn = css(el("button", { textContent: "Delete" }), "background: #2a1f1f; border: 1px solid #844; color: #ffe7e7; padding: 5px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;");
     const exportAllBtn = css(el("button", { textContent: "Export all" }), "background: #1f2430; border: 1px solid #467; color: #e7f0ff; padding: 5px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;");
@@ -1100,39 +1117,44 @@
       log("Cleared prompt editor.");
     };
 
-    saveBtn.onclick = () => {
+    function savePrompt(saveAsNew) {
       const text = String(promptArea.value || "").trim();
-      const pTitle = String(promptTitleInput.value || "").trim();
+      let pTitle = String(promptTitleInput.value || "").trim();
       if (!text) {
         log("Nothing to save (prompt is empty).");
         return;
       }
 
       let idx = parseInt(select.value, 10);
-      const item = makePromptItem(pTitle, text);
-      // Update existing selection
-      if (Number.isFinite(idx) && idx >= 0 && idx < prompts.length) {
-        prompts[idx] = item;
+      const hasSelection = Number.isFinite(idx) && idx >= 0 && idx < prompts.length;
+
+      if (saveAsNew) {
+        // A copied or otherwise reused title gets a predictable unique suffix.
+        // A genuinely new title is kept exactly as the user entered it.
+        pTitle = uniquePromptTitle(pTitle, prompts);
+        prompts.push(makePromptItem(pTitle, text));
+        idx = prompts.length - 1;
+        promptTitleInput.value = pTitle;
+        log("Saved as new prompt #" + (idx + 1) + (pTitle ? " (" + pTitle + ")" : "") + ".");
+      } else if (hasSelection) {
+        // Save changes the currently selected prompt, including its entered title.
+        prompts[idx] = makePromptItem(pTitle, text);
         log("Updated saved prompt #" + (idx + 1) + (pTitle ? " (" + pTitle + ")" : "") + ".");
       } else {
-        // Add new (avoid exact duplicates by prompt text)
-        const dup = prompts.findIndex((p) => promptText(p) === text);
-        if (dup >= 0) {
-          idx = dup;
-          prompts[idx] = item;
-          log("Already saved as #" + (dup + 1) + "; updated title/text and selected it.");
-        } else {
-          prompts.push(item);
-          idx = prompts.length - 1;
-          log("Saved new prompt #" + (idx + 1) + (pTitle ? " (" + pTitle + ")" : "") + ".");
-        }
+        // With no selected prompt, Save creates exactly what the user entered.
+        prompts.push(makePromptItem(pTitle, text));
+        idx = prompts.length - 1;
+        log("Saved new prompt #" + (idx + 1) + (pTitle ? " (" + pTitle + ")" : "") + ".");
       }
 
       savePromptsStore(prompts);
       applySearchFilter();
       select.value = String(idx);
       lsSet(K_SELECTED, String(idx));
-    };
+    }
+
+    saveNewBtn.onclick = () => savePrompt(true);
+    saveBtn.onclick = () => savePrompt(false);
 
     delBtn.onclick = () => {
       const idx = parseInt(select.value, 10);
@@ -1189,12 +1211,14 @@
 
 
     newBtn.style.flex = "0 0 auto";
+    saveNewBtn.style.flex = "0 0 auto";
     saveBtn.style.flex = "0 0 auto";
     delBtn.style.flex = "0 0 auto";
     exportAllBtn.style.flex = "0 0 auto";
     importAllBtn.style.flex = "0 0 auto";
 
     actions.appendChild(newBtn);
+    actions.appendChild(saveNewBtn);
     actions.appendChild(saveBtn);
     actions.appendChild(delBtn);
     actions.appendChild(exportAllBtn);
