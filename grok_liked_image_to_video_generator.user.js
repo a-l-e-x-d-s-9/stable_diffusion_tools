@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Grok Liked Images to Video (Post Navigation)
 // @namespace    https://grok.com/
-// @version      1.2.1
-// @description  Queue liked images bottom-to-top, visit each post, and choose Make Video > Quick Animate.
+// @version      1.3.0
+// @description  Queue liked images bottom-to-top, visit each post, and choose Make Video > Quick Animate with configurable concurrency.
 // @author       alexds9
 // @match        https://grok.com/*
 // @run-at       document-idle
@@ -21,24 +21,32 @@
     const POLL = 250;
     const LOAD_WAIT = 1400;
     const TIMEOUT = 30000;
+    const GENERATION_TIMEOUT = 12 * 60 * 1000;
     const EDGE_PASSES = 5;
     const blank = () => ({
         running: false, phase: 'idle', queue: [], index: 0, attempted: [], skipped: [],
-        delay: 15, limit: 0, skipVideos: true, picked: null, pickedPreview: '', scan: null,
+        pending: [], observedVideos: [], knownVideos: [], delay: 15, limit: 0, concurrency: 5, skipVideos: true,
+        picked: null, pickedPreview: '', scan: null,
         submittedAt: 0, status: 'Choose Start or Pick start.',
         navigation: null, backFor: null,
     });
     let state;
     try { state = { ...blank(), ...JSON.parse(sessionStorage.getItem(KEY) || 'null') }; }
     catch (_) { state = blank(); }
+    if (!Array.isArray(state.pending)) state.pending = [];
+    if (!Array.isArray(state.observedVideos)) state.observedVideos = [];
+    if (!Array.isArray(state.knownVideos)) state.knownVideos = [];
+    state.concurrency = Math.min(10, Math.max(1, Math.round(Number(state.concurrency) || 5)));
     let panel;
     let ui;
     let picking = false;
     let busy = false;
     let epoch = 0;
     let navigating = false;
+    let waitingForSlot = false;
     let expectedPath = null;
     let selectedMarker;
+    const pendingElements = new Map();
     let panelPrefs = {};
     try { panelPrefs = JSON.parse(localStorage.getItem(PANEL_KEY) || '{}') || {}; } catch (_) { /* defaults */ }
 
@@ -102,6 +110,100 @@
                 video: Boolean(card.querySelector('video')), link, card };
         }).filter(Boolean);
     }
+    function completedVideo(card) {
+        const video = card?.querySelector('video');
+        return Boolean(video && (video.currentSrc || video.src || video.querySelector('source[src]')));
+    }
+    function pendingCard(id) {
+        const remembered = pendingElements.get(id);
+        return remembered?.isConnected ? remembered : cards().find(item => item.id === id)?.card || null;
+    }
+    function cardIsGenerating(card) {
+        if (!card || completedVideo(card)) return false;
+        return [...card.querySelectorAll('[role="progressbar"], [aria-busy="true"]')].some(visible)
+            || [...card.querySelectorAll('button[aria-label="Make video"]')].some(button => !enabled(button))
+            || /(?:generating|creating|making|processing)\s+(?:the\s+)?video/i.test(card.textContent || '');
+    }
+    function settlePending() {
+        if (!state.pending.length || path() !== LIKED) return false;
+        const now = Date.now();
+        let changed = false;
+        const matchedCompletedCards = new Set();
+        state.pending = state.pending.filter(job => {
+            const card = pendingCard(job.id);
+            if (card && completedVideo(card)) {
+                matchedCompletedCards.add(card);
+                const resultId = postId(card.querySelector(LINK)?.href) || job.id;
+                if (!state.observedVideos.includes(resultId)) state.observedVideos.push(resultId);
+                pendingElements.delete(job.id);
+                changed = true;
+                return false;
+            }
+            const generating = cardIsGenerating(card);
+            if (generating && !job.sawBusy) { job.sawBusy = true; changed = true; }
+            const makeVideoReturned = card && job.sawBusy && now - job.submittedAt >= 2000
+                && [...card.querySelectorAll('button[aria-label]')].some(button =>
+                    /^make video$/i.test(button.getAttribute('aria-label')) && enabled(button));
+            if (!generating && makeVideoReturned) {
+                pendingElements.delete(job.id);
+                changed = true;
+                return false;
+            }
+            // A stale job must not block the queue forever if Grok removes or
+            // replaces its card without exposing a final video in this grid.
+            if (now - job.submittedAt >= GENERATION_TIMEOUT) {
+                pendingElements.delete(job.id);
+                changed = true;
+                return false;
+            }
+            return true;
+        });
+        // Depending on Grok's current UI, a finished animation either replaces
+        // its source card or appears as a new video card at the top. The latter
+        // has a new post ID, so use each newly observed result to settle the
+        // oldest request that could not be matched to its original card.
+        const knownVideos = new Set(state.knownVideos);
+        const observed = new Set(state.observedVideos);
+        for (const item of cards()) {
+            if (!state.pending.length) break;
+            if (matchedCompletedCards.has(item.card) || !completedVideo(item.card)
+                || knownVideos.has(item.id) || observed.has(item.id)) continue;
+            const job = state.pending.shift();
+            pendingElements.delete(job.id);
+            state.observedVideos.push(item.id);
+            observed.add(item.id);
+            changed = true;
+        }
+        if (changed) save();
+        return changed;
+    }
+    async function waitForGenerationSlot(token) {
+        if (path() === LIKED) settlePending();
+        if (state.pending.length < state.concurrency) return;
+        if (path() !== LIKED) throw new Error('Concurrency waiting requires the Liked grid. Return there and Resume.');
+        waitingForSlot = true;
+        try {
+            status(`At the ${state.concurrency}-video concurrency limit; watching the main grid…`);
+            scroller().scrollTo({ top: 0, behavior: 'instant' });
+            await sleep(LOAD_WAIT);
+            guard(token);
+            while (state.pending.length >= state.concurrency) {
+                if (path() !== LIKED) throw new Error('Left Liked while waiting for a video to finish.');
+                settlePending();
+                if (state.pending.length < state.concurrency) break;
+                const oldest = Math.min(...state.pending.map(job => job.submittedAt));
+                const minutes = Math.max(0, Math.floor((Date.now() - oldest) / 60000));
+                state.status = `Waiting in the main grid: ${state.pending.length}/${state.concurrency} videos active${minutes ? ` · oldest ${minutes}m` : ''}…`;
+                save();
+                await sleep(LOAD_WAIT);
+                guard(token);
+            }
+            status(`A generation slot is available (${state.pending.length}/${state.concurrency} active).`);
+        } finally {
+            waitingForSlot = false;
+            render();
+        }
+    }
     function ordered(entries) {
         // Group rows before sorting columns: a pairwise row tolerance is not a
         // transitive comparator and can scramble tightly spaced masonry cards.
@@ -155,6 +257,7 @@
             if (collect() !== count || scroller().scrollHeight !== height) state.scan.stable = 0;
         }
         let queue = ordered(state.scan.entries);
+        state.knownVideos = queue.filter(item => item.video).map(item => item.id);
         if (state.picked) {
             const start = queue.findIndex(item => item.id === state.picked);
             if (start < 0) throw new Error('Picked image was not found. Reset and pick it again.');
@@ -211,6 +314,9 @@
             }, token, 'the gallery link (no reload will be attempted)');
             guard(token);
             state.navigation = { target };
+            const id = postId(target);
+            const card = link.closest(CARD);
+            if (id && card) pendingElements.set(id, card);
             save();
             link.click();
         }
@@ -254,6 +360,7 @@
         guard(token);
         if (path() !== postPath(id)) throw new Error('Post changed before generation.');
         if (state.skipVideos && postHasVideo()) {
+            pendingElements.delete(id);
             state.skipped.push(id);
             state.phase = 'return';
             status('Skipped a post displaying a video.');
@@ -282,6 +389,7 @@
         // deliberately not retried automatically: it might already have charged.
         state.attempted.push(id);
         state.submittedAt = Date.now();
+        state.pending.push({ id, submittedAt: state.submittedAt, sawBusy: false });
         state.phase = 'submitted';
         status(`Quick Animate submitted for post ${state.index + 1}; waiting ${state.delay}s…`);
         item.click();
@@ -296,6 +404,8 @@
             }
             const error = errors()[0];
             if (error) {
+                state.pending = state.pending.filter(job => job.id !== current().id);
+                pendingElements.delete(current().id);
                 state.phase = 'return';
                 throw new Error(`Grok reports: ${error}. Submission was recorded and will not be retried.`);
             }
@@ -381,6 +491,7 @@
                     if (state.skipVideos && current().video) {
                         state.skipped.push(current().id); state.index += 1; save(); continue;
                     }
+                    await waitForGenerationSlot(token);
                     status(`Visiting post ${state.index + 1} of ${state.queue.length}…`);
                     await navigate(postPath(current().id), token);
                     if (navigating) break;
@@ -408,8 +519,9 @@
         if (busy || state.running) return;
         if (state.phase === 'idle' || state.phase === 'done') {
             if (path() !== LIKED) { status('Open /imagine/saved/liked before starting a new run.'); return; }
-            const { delay, limit, skipVideos, picked, pickedPreview } = state;
-            state = { ...blank(), delay, limit, skipVideos, picked, pickedPreview, phase: 'scan' };
+            const { delay, limit, concurrency, skipVideos, picked, pickedPreview } = state;
+            state = { ...blank(), delay, limit, concurrency, skipVideos, picked, pickedPreview, phase: 'scan' };
+            pendingElements.clear();
         }
         state.running = true;
         epoch += 1;
@@ -419,8 +531,9 @@
     }
     function resetCompletedRun() {
         if (state.phase !== 'done') return;
-        const { delay, limit, skipVideos } = state;
-        state = { ...blank(), delay, limit, skipVideos };
+        const { delay, limit, concurrency, skipVideos } = state;
+        state = { ...blank(), delay, limit, concurrency, skipVideos };
+        pendingElements.clear();
     }
     function pick(event) {
         if (!picking || panel.contains(event.target)) return;
@@ -508,13 +621,15 @@
         panel.hidden = !path().startsWith('/imagine') && !state.running;
         panel.dataset.state = state.running ? 'running' : state.phase === 'done' ? 'finished' : 'idle';
         const phaseNames = { scan: 'Collecting', open: 'Opening post', submitted: 'Submitted', return: 'Going back' };
-        ui.heading.textContent = picking ? 'Pick a start image' : state.running ? phaseNames[state.phase] || 'Starting'
+        ui.heading.textContent = picking ? 'Pick a start image' : waitingForSlot ? 'Waiting for a video'
+            : state.running ? phaseNames[state.phase] || 'Starting'
             : state.phase === 'done' ? 'Finished' : state.phase === 'idle' ? 'Ready' : 'Paused';
         ui.status.textContent = state.running && state.phase === 'submitted'
             ? isLastSubmission() ? 'Final submission · staying on this post'
                 : `Back in ${Math.max(0, Math.ceil(state.delay - (Date.now() - state.submittedAt) / 1000))}s`
             : state.status;
         ui.submitted.textContent = state.attempted.length;
+        ui.active.textContent = state.pending.length;
         ui.skipped.textContent = state.skipped.length;
         ui.queued.textContent = Math.max(0, state.queue.length - state.index);
         ui.start.textContent = state.phase === 'done' ? 'Finished' : state.phase === 'idle' ? 'Start' : 'Resume';
@@ -524,7 +639,7 @@
         ui.pick.disabled = !canPick || path() !== LIKED;
         ui.clear.disabled = !canPick || (!state.picked && !picking);
         ui.reset.disabled = state.running || busy;
-        for (const key of ['delay', 'limit', 'skipVideos']) ui[key].disabled = state.running || busy;
+        for (const key of ['delay', 'limit', 'concurrency', 'skipVideos']) ui[key].disabled = state.running || busy;
         ui.pick.textContent = picking ? 'Cancel pick' : 'Pick start';
         ui.mode.textContent = state.picked ? 'Picked image' : 'Automatic bottom';
         ui.preview.hidden = !state.pickedPreview;
@@ -559,7 +674,7 @@
                 label { color:#cbd5e1; } input[type=number] { width:65px; border:1px solid #94a3b861; border-radius:8px; padding:6px 7px; color:#fff; background:#0f172a; font:600 12px system-ui; }
                 input[type=checkbox] { accent-color:#8b5cf6; } .mode { display:flex; align-items:center; gap:10px; margin:9px 0; color:#94a3b8; font-size:11px; }
                 #mode { display:block; color:#e2e8f0; } #preview { width:42px; height:42px; object-fit:cover; border:2px solid #8b5cf6; border-radius:6px; }
-                .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; }
+                .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:5px; }
                 .stat { text-align:center; border-radius:8px; background:#1e293bd1; padding:7px 3px; }
                 .stat b { display:block; font-size:14px; } .stat span { color:#94a3b8; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }
                 #reset { padding:0; border:0; background:none; color:#94a3b8; font-size:11px; } .footer { text-align:right; margin-top:9px; }
@@ -571,16 +686,18 @@
                     <div class="buttons"><button id="start">Start</button><button id="pause">Pause</button><button id="pick">Pick start</button><button id="clear">Clear pick</button></div>
                     <div class="control"><label for="delay">Back after (seconds)</label><input id="delay" type="number" min="3" max="600" title="Wait after Quick Animate before clicking Back"></div>
                     <div class="control"><label for="limit">Limit · 0 = all</label><input id="limit" type="number" min="0" max="100000"></div>
+                    <div class="control"><label for="concurrency">Videos at once</label><input id="concurrency" type="number" min="1" max="10" title="Wait in the Liked grid when this many videos are still generating"></div>
                     <div class="control"><label for="skipVideos">Skip existing videos</label><input id="skipVideos" type="checkbox"></div>
                     <div class="mode"><img id="preview" alt="Selected start image" hidden><div>Bottom → Top<b id="mode"></b></div></div>
-                    <div class="stats"><div class="stat" title="Submission attempts, not completed videos"><b id="submitted">0</b><span>Submitted</span></div><div class="stat"><b id="skipped">0</b><span>Skipped</span></div><div class="stat"><b id="queued">0</b><span>Queued</span></div></div>
+                    <div class="stats"><div class="stat" title="Submission attempts, not completed videos"><b id="submitted">0</b><span>Submitted</span></div><div class="stat" title="Submitted videos not yet observed as complete"><b id="active">0</b><span>Active</span></div><div class="stat"><b id="skipped">0</b><span>Skipped</span></div><div class="stat"><b id="queued">0</b><span>Queued</span></div></div>
                     <div class="footer"><button id="reset" title="Clear queue and submission history">Reset queue</button></div>
                 </div>
             </div>`;
-        ui = Object.fromEntries(['delay', 'limit', 'skipVideos', 'start', 'pause', 'pick', 'clear', 'reset', 'heading', 'status',
-            'head', 'minimize', 'preview', 'mode', 'submitted', 'skipped', 'queued'].map(id => [id, root.getElementById(id)]));
+        ui = Object.fromEntries(['delay', 'limit', 'concurrency', 'skipVideos', 'start', 'pause', 'pick', 'clear', 'reset', 'heading', 'status',
+            'head', 'minimize', 'preview', 'mode', 'submitted', 'active', 'skipped', 'queued'].map(id => [id, root.getElementById(id)]));
         ui.delay.value = state.delay;
         ui.limit.value = state.limit;
+        ui.concurrency.value = state.concurrency;
         ui.skipVideos.checked = state.skipVideos;
         ui.start.onclick = start;
         ui.pause.onclick = pause;
@@ -591,12 +708,13 @@
             status('Automatic start from the bottom.');
         };
         ui.reset.onclick = () => {
-            const { delay, limit, skipVideos } = state;
+            const { delay, limit, concurrency, skipVideos } = state;
             epoch += 1; picking = false;
-            state = { ...blank(), delay, limit, skipVideos };
+            state = { ...blank(), delay, limit, concurrency, skipVideos };
+            pendingElements.clear();
             save();
         };
-        for (const [key, min, max] of [['delay', 3, 600], ['limit', 0, 100000]]) {
+        for (const [key, min, max] of [['delay', 3, 600], ['limit', 0, 100000], ['concurrency', 1, 10]]) {
             ui[key].onchange = () => {
                 state[key] = Math.min(max, Math.max(min, Math.round(Number(ui[key].value) || min)));
                 ui[key].value = state[key]; save();
@@ -626,6 +744,10 @@
             // Read the latest checkpoint rather than using that document's queue.
             try { state = { ...blank(), ...JSON.parse(sessionStorage.getItem(KEY) || 'null') }; }
             catch (_) { state = blank(); }
+            if (!Array.isArray(state.pending)) state.pending = [];
+            if (!Array.isArray(state.observedVideos)) state.observedVideos = [];
+            if (!Array.isArray(state.knownVideos)) state.knownVideos = [];
+            state.concurrency = Math.min(10, Math.max(1, Math.round(Number(state.concurrency) || 5)));
             navigating = false;
             epoch += 1;
         }
