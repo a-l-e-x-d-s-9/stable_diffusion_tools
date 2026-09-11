@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Liked Images to Video (Post Navigation)
 // @namespace    https://grok.com/
-// @version      1.3.1
+// @version      1.3.2
 // @description  Queue liked images bottom-to-top, visit each post, and choose Make Video > Quick Animate with configurable concurrency.
 // @author       alexds9
 // @match        https://grok.com/*
@@ -22,6 +22,8 @@
     const LOAD_WAIT = 1400;
     const TIMEOUT = 30000;
     const GENERATION_TIMEOUT = 12 * 60 * 1000;
+    const FAILED_CARD_SETTLE = 5000;
+    const ACCEPTANCE_SETTLE = 15000;
     const EDGE_PASSES = 5;
     const blank = () => ({
         running: false, phase: 'idle', queue: [], index: 0, attempted: [], skipped: [],
@@ -127,6 +129,9 @@
         if (!card || completedVideo(card)) return false;
         return [...card.querySelectorAll('[role="progressbar"], [aria-busy="true"]')].some(visible)
             || [...card.querySelectorAll('button[aria-label="Make video"]')].some(button => !enabled(button))
+            || [...card.querySelectorAll('span')].some(span =>
+                visible(span) && /^(?:100|[1-9]?\d)\s*%$/.test(span.textContent.trim()))
+            || /(?:^|\s)(?:100|[1-9]?\d)\s*%(?:\s|$)/.test(card.textContent || '')
             || /(?:generating|creating|making|processing)\s+(?:the\s+)?video/i.test(card.textContent || '');
     }
     function settlePending() {
@@ -145,14 +150,20 @@
                 return false;
             }
             const generating = cardIsGenerating(card);
-            if (generating && !job.sawBusy) { job.sawBusy = true; changed = true; }
-            const makeVideoReturned = card && job.sawBusy && now - job.submittedAt >= 2000
-                && [...card.querySelectorAll('button[aria-label]')].some(button =>
-                    /^make video$/i.test(button.getAttribute('aria-label')) && enabled(button));
-            if (!generating && makeVideoReturned) {
-                pendingElements.delete(job.id);
-                changed = true;
-                return false;
+            if (generating) {
+                if (!job.sawBusy) { job.sawBusy = true; changed = true; }
+                if (job.idleSince) { delete job.idleSince; changed = true; }
+            } else if (card && visible(card) && card.querySelector('img')) {
+                // A failed Grok job drops its percentage and returns to an
+                // ordinary image card. Allow a short transition window because
+                // successful cards briefly swap DOM before showing duration.
+                if (!job.idleSince) { job.idleSince = now; changed = true; }
+                const settleTime = job.sawBusy ? FAILED_CARD_SETTLE : ACCEPTANCE_SETTLE;
+                if (now - job.idleSince >= settleTime) {
+                    pendingElements.delete(job.id);
+                    changed = true;
+                    return false;
+                }
             }
             // A stale job must not block the queue forever if Grok removes or
             // replaces its card without exposing a final video in this grid.
