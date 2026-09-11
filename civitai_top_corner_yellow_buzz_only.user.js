@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai - Show Yellow + Green Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.7.4
+// @version      1.7.5
 // @description  Shows combined Yellow and Green Buzz with configurable sales counts and a clickable sold-model list in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
@@ -20,6 +20,7 @@
   const BUZZ_ACCOUNT_PATH = '/api/trpc/buzz.getBuzzAccount';
   const EXACT_BUZZ_CACHE_KEY = 'civitai-yellow-green-buzz-exact-v1';
   const EXACT_BUZZ_REFRESH_MS = 60 * 1000;
+  const INITIAL_REFRESH_DELAY_MS = 2 * 1000;
   const UI_REPAIR_MS = 60 * 1000;
   const SALES_CACHE_KEY = 'civitai-yellow-green-buzz-sales-v1';
   const SALES_MODEL_METADATA_CACHE_KEY =
@@ -71,7 +72,7 @@
     updatePending: false,
   };
 
-  console.info('[Civitai Buzz] Script v1.7.4 loaded');
+  console.info('[Civitai Buzz] Script v1.7.5 loaded');
 
   function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
     let start = new Date(Date.UTC(
@@ -784,12 +785,27 @@
       cursor = nextCursor;
     } while (cursor);
 
+    const modelGroups = [...salesByModel.values()];
+
     return {
       byColor: {
         yellow: saleIds.yellow.size,
         green: saleIds.green.size,
       },
-      models: await hydrateSaleModels([...salesByModel.values()]),
+      // Publish the count as soon as the transaction pages are available.
+      // Resolving canonical model links can require many additional requests,
+      // so it is completed after the badge has already been updated.
+      models: modelGroups.map((group) => ({
+        modelVersionId: group.modelVersionId,
+        name: group.name,
+        href: '/models?query=' + encodeURIComponent(group.name),
+        count: group.count,
+        firstSoldAt: group.firstSoldAt,
+      })).sort((left, right) =>
+        right.firstSoldAt - left.firstSoldAt ||
+        left.name.localeCompare(right.name)
+      ),
+      modelGroups,
     };
   }
 
@@ -820,6 +836,12 @@
     try {
       const sales = await fetchSales(bounds);
       saveSalesCache(bounds.period, bounds.periodKey, sales);
+
+      const models = await hydrateSaleModels(sales.modelGroups);
+      saveSalesCache(bounds.period, bounds.periodKey, {
+        byColor: sales.byColor,
+        models,
+      });
     } catch (error) {
       if (bounds.period === state.salesPeriod) {
         state.salesError = error?.message || String(error);
@@ -1881,6 +1903,15 @@
     }
   }
 
+  function scheduleInitialRefresh() {
+    setTimeout(() => {
+      // Always check the server shortly after startup. Without force=true, a
+      // recently cached value could postpone this check for up to two minutes.
+      refreshExactBuzzIfNeeded(true);
+      refreshSalesIfNeeded(true);
+    }, INITIAL_REFRESH_DELAY_MS);
+  }
+
   function showSalesSettingsFromMenu() {
     if (state.salesSettingsPanel) return;
 
@@ -1912,6 +1943,12 @@
   function start() {
     state.salesPeriod = loadSalesPeriod();
     applyExactBuzzCache(loadExactBuzzCache());
+
+    const initialSalesBounds = getUtcSalesBounds();
+    applySalesCache(loadSalesCache(
+      initialSalesBounds.period,
+      initialSalesBounds.periodKey
+    ));
     registerUserscriptMenu();
 
     const observer = new MutationObserver(queueUpdate);
@@ -2022,8 +2059,7 @@
     setInterval(refreshSalesIfNeeded, 30 * 1000);
 
     runSeveralTimes();
-    refreshExactBuzzIfNeeded();
-    refreshSalesIfNeeded();
+    scheduleInitialRefresh();
   }
 
   if (document.documentElement) {
