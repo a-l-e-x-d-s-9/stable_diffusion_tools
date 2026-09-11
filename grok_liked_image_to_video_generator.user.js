@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Liked Images to Video (Post Navigation)
 // @namespace    https://grok.com/
-// @version      1.3.0
+// @version      1.3.1
 // @description  Queue liked images bottom-to-top, visit each post, and choose Make Video > Quick Animate with configurable concurrency.
 // @author       alexds9
 // @match        https://grok.com/*
@@ -107,12 +107,17 @@
             if (!id || !card?.querySelector('img, video') || !visible(card)) return null;
             const rect = card.getBoundingClientRect();
             return { id, x: rect.left + scroll.scrollLeft, y: rect.top + scroll.scrollTop,
-                video: Boolean(card.querySelector('video')), link, card };
+                video: completedVideo(card), link, card };
         }).filter(Boolean);
     }
     function completedVideo(card) {
         const video = card?.querySelector('video');
-        return Boolean(video && (video.currentSrc || video.src || video.querySelector('source[src]')));
+        if (video && (video.currentSrc || video.src || video.querySelector('source[src]'))) return true;
+        // Grok initially renders completed grid videos as preview images. The
+        // duration pill replaces generation progress before a <video> element
+        // is mounted (often only after hover/click), so recognize it directly.
+        return [...(card?.querySelectorAll('span') || [])].some(span =>
+            visible(span) && /^\d{1,2}:\d{2}(?::\d{2})?$/.test(span.textContent.trim()));
     }
     function pendingCard(id) {
         const remembered = pendingElements.get(id);
