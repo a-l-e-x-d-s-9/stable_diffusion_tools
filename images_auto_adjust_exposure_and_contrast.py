@@ -9,6 +9,53 @@ from tqdm import tqdm
 import argparse
 from threading import Lock
 
+
+def adjust_bgr_image(img, gamma, alpha):
+    """Return a contrast/exposure adjusted BGR image without changing the input.
+
+    This is shared by batch processing and the dataset preparation preview.
+    ``gamma`` below 1 brightens; ``alpha`` above 1 increases contrast.
+    """
+    if img is None:
+        raise ValueError("Could not read image")
+    if gamma <= 0 or alpha <= 0:
+        raise ValueError("Gamma and contrast must be positive")
+    img_yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YUV).astype(float) / 255
+    y = img_yuv[:, :, 0]
+    y -= 0.5
+    y *= alpha
+    y += 0.5
+    np.clip(y, 0, 1, out=y)
+    np.power(y, gamma, out=y)
+    np.clip(y, 0, 1, out=y)
+    return cv2.cvtColor((img_yuv * 255).astype(np.uint8), cv2.COLOR_YUV2BGR)
+
+
+def make_preview_rgb_images(image_path, gamma, alpha, max_dimension=900):
+    """Load a small preview and return original and adjusted RGB arrays.
+
+    The UI can display these directly without repeating OpenCV color conversion
+    or the exposure/contrast calculation.
+    """
+    source = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if source is None:
+        raise ValueError(f"Could not read image: {image_path}")
+    if max_dimension < 1:
+        raise ValueError("Preview maximum dimension must be positive")
+    height, width = source.shape[:2]
+    scale = min(1, max_dimension / max(width, height))
+    if scale < 1:
+        source = cv2.resize(
+            source,
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    adjusted = adjust_bgr_image(source, gamma, alpha)
+    return (
+        cv2.cvtColor(source, cv2.COLOR_BGR2RGB),
+        cv2.cvtColor(adjusted, cv2.COLOR_BGR2RGB),
+    )
+
 def process_images(dir_path, output_path, min_exp, max_exp, min_cont, max_cont, n_copies, threads):
     try:
         # Scan for images
@@ -43,52 +90,9 @@ def adjust_image(image_path, dir_path, min_exp, max_exp, min_cont, max_cont, out
         # Load image
         img = cv2.imread(image_path, cv2.IMREAD_COLOR)
 
-        # Convert image to YUV color space
-        img_yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YUV).astype(float) / 255
-
-
-        # Adjust contrast
         alpha = random.uniform(min_cont, max_cont)  # Contrast control
-        #img_yuv[:, :, 0] = alpha * (img_yuv[:, :, 0] - 0.5) + 0.5
-        #img_yuv[:, :, 0] = np.clip(img_yuv[:, :, 0], 0, 1)  # Clip values to range [0,1]
-
-
-        # Adjust exposure
         gamma = random.uniform(min_exp, max_exp)  # Exposure control
-        #img_yuv[:, :, 0] = np.power(img_yuv[:, :, 0], gamma)
-        # img_yuv[:, :, 0] = np.clip(img_yuv[:, :, 0], 0, 1)  # Clip values to range [0,1]
-
-
-        # img_yuv[:, :, 0] = np.power(alpha * (img_yuv[:, :, 0] - 0.5) + 0.5, gamma)
-        # img_yuv[:, :, 0] = np.maximum(0, np.minimum(1, img_yuv[:, :, 0]))  # Clip values to range [0,1]
-
-        y = img_yuv[:, :, 0]
-        y -= 0.5
-        y *= alpha
-        y += 0.5
-
-        np.maximum(0, y, out=y)
-        np.minimum(1, y, out=y)
-
-        np.power(y, gamma, out=y)
-
-        np.maximum(0, y, out=y)
-        np.minimum(1, y, out=y)
-
-        # Equalize the histogram of the Y channel
-        # y_uint8 = (y * 255).astype(np.uint8)
-        # y_uint8 = cv2.equalizeHist(y_uint8)
-        # img_yuv[:, :, 0] = y_uint8.astype(float) / 255
-
-        # Adjust brightness
-        # beta = random.uniform(min_exp, max_exp)  # Brightness control
-        # img_yuv[:, :, 0] += beta
-        # img_yuv[:, :, 0] = np.clip(img_yuv[:, :, 0], 0, 1)  # Clip values to range [0,1]
-
-
-        # Convert back to BGR color space
-        img_yuv = (img_yuv * 255).astype(np.uint8)
-        img_output = cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
+        img_output = adjust_bgr_image(img, gamma, alpha)
 
         # Create output directory if it doesn't exist
         output_dir = os.path.join(output_path, os.path.dirname(os.path.relpath(image_path, dir_path)))
