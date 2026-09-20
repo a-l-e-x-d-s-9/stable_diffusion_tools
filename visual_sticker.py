@@ -6,8 +6,9 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLa
                              QScrollArea, QMessageBox, QSizePolicy, QAbstractItemView, QListView, QAbstractScrollArea,
                              QStyledItemDelegate, QCheckBox)
 from PyQt5.QtGui import QPixmap, QColor, QIcon, QPalette, QTransform, QImage, QTextCharFormat, QTextCursor, QDrag, \
+    QDesktopServices, \
     QBrush, QCursor, QPainter
-from PyQt5.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, QRect
+from PyQt5.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, QRect, QUrl
 from PyQt5.QtWidgets import QMainWindow, QAction, QMenu, QMenuBar, QDialog
 from PyQt5.QtWidgets import QListWidget, QListWidgetItem
 from PIL import Image, UnidentifiedImageError
@@ -98,13 +99,9 @@ class ImageLabel(QLabel):
 
 
     def mouseDoubleClickEvent(self, event):
-        if self.path:
-            if sys.platform.startswith('linux'):
-                os.system(f"xdg-open '{self.path}'")
-            elif sys.platform.startswith('win'):
-                os.system(f"start '{self.path}'")
-            elif sys.platform.startswith('darwin'):
-                os.system(f"open '{self.path}'")
+        real_path = os.path.realpath(self.path) if self.path else None
+        if real_path and os.path.isfile(real_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(real_path))
 
 
 class OverlayLabel(QLabel):
