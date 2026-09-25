@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Civitai Rating Highlighter
 // @namespace    https://civitai.com/
-// @version      1.1.2
+// @version      1.2.0
 // @description  Highlight and navigate unrated images/videos, with optional blinking, shortcuts, and traffic-light rating colors. Disabled by default.
 // @match        https://civitai.com/*
 // @match        https://civitai.red/*
+// @match        https://civitai.green/*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_getValue
@@ -16,6 +17,8 @@
     'use strict';
 
     const KEY = 'civitai-rating-highlighter-v1';
+    const SESSION_CACHE_MS = 60_000;
+    const MAX_OWNERSHIP_REQUESTS = 4;
     const PANEL_HIDDEN_KEY = `${KEY}-panel-hidden`;
     const FRAME = 'data-civitai-rating-unrated';
     const COLOR = 'data-civitai-rating-color';
@@ -48,6 +51,13 @@
     let currentCard = null;
     let currentHref = null;
     let currentPage = location.href;
+    let sessionValue = null;
+    let sessionUpdated = 0;
+    let sessionPromise = null;
+    let sessionError = '';
+    const ownershipCache = new Map();
+    const ownershipQueue = [];
+    let activeOwnershipRequests = 0;
 
     const style = document.createElement('style');
     style.textContent = `
@@ -109,10 +119,10 @@
                 <label><input id="enabled" type="checkbox">Enable rating highlighter</label>
                 <label><input id="markUnrated" type="checkbox">Red frame for unrated media</label>
                 <label><input id="blinkUnrated" type="checkbox">Slow blinking red frame</label>
-                <label><input id="colorRatings" type="checkbox">Color rating badges and filters</label>
+                <label><input id="colorRatings" type="checkbox">Color your rating badges and filters</label>
                 <div class="legend">${Object.entries(PALETTE).map(([rating, [bg, fg]]) =>
                     `<span style="background:${bg};color:${fg}">${rating}</span>`).join('')}</div>
-                <p>Unrated means no rating badge is present on the card. Hidden site ratings cannot be verified.</p>
+                <p>Only your media cards are marked. Unrated means no rating badge is present on the card. Hidden site ratings cannot be verified.</p>
                 <p id="status" role="status"></p>
                 <div class="navigation">
                     <button id="previous" type="button">← Previous</button>
@@ -153,6 +163,90 @@
         return cards;
     }
 
+    function startSessionLookup() {
+        if (sessionPromise) return;
+        sessionPromise = fetch('/api/auth/session', {
+            credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' },
+        }).then(async response => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const session = await response.json();
+            const user = session?.user;
+            sessionValue = user?.id != null && Number.isSafeInteger(Number(user.id)) && Number(user.id) > 0 ? {
+                id: String(user.id),
+                username: typeof user.username === 'string' ? user.username.trim().toLowerCase() : '',
+                browsingLevel: Number(user.browsingLevel) || 0,
+            } : null;
+            sessionError = '';
+        }).catch(error => {
+            sessionValue = null;
+            sessionError = 'Could not check the signed-in user.';
+            console.warn('Civitai Rating Highlighter: session lookup failed:', error);
+        }).finally(() => {
+            sessionUpdated = Date.now();
+            sessionPromise = null;
+            scheduleScan();
+        });
+    }
+
+    function cardOwner(card) {
+        // The media frame can sit below the creator link, so inspect its single-media ancestors.
+        for (let node = card, depth = 0; node && node !== document.body && depth < 3; node = node.parentElement, depth++) {
+            if (node !== card && mediaLinks(node).length > 1) break;
+            const names = new Set();
+            for (const link of node.querySelectorAll('a[href*="/user/"]')) {
+                try {
+                    const url = new URL(link.getAttribute('href'), location.origin);
+                    if (!/^civitai\.(com|red|green)$/i.test(url.hostname)) continue;
+                    const match = url.pathname.match(/^\/user\/([^/]+)\/?$/);
+                    if (match) names.add(decodeURIComponent(match[1]).toLowerCase());
+                } catch { /* Ignore malformed creator links. */ }
+            }
+            if (names.size) return names.size === 1 ? [...names][0] : null;
+        }
+        return null;
+    }
+
+    function pumpOwnershipQueue() {
+        while (settings.enabled && activeOwnershipRequests < MAX_OWNERSHIP_REQUESTS && ownershipQueue.length) {
+            const { key, imageId, user } = ownershipQueue.shift();
+            activeOwnershipRequests++;
+            const url = new URL('/api/v1/images', location.origin);
+            url.searchParams.set('imageId', imageId);
+            url.searchParams.set('userId', user.id);
+            url.searchParams.set('browsingLevel', String(user.browsingLevel));
+            url.searchParams.set('limit', '1');
+            fetch(url, {
+                credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' },
+            }).then(async response => {
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                return Array.isArray(data.items) && data.items.some(item => String(item.id) === imageId
+                    && (!user.username || item.username?.toLowerCase() === user.username));
+            }).then(owned => { ownershipCache.set(key, owned); }).catch(error => {
+                ownershipCache.set(key, false);
+                console.warn(`Civitai Rating Highlighter: ownership lookup failed for image ${imageId}:`, error);
+            }).finally(() => {
+                activeOwnershipRequests--;
+                scheduleScan();
+                pumpOwnershipQueue();
+            });
+        }
+    }
+
+    function ownsCard(card, link, user) {
+        const owner = cardOwner(card);
+        if (owner) return !!user.username && owner === user.username;
+        const match = new URL(link.href).pathname.match(/^\/images\/(\d+)\/?$/);
+        if (!match) return false; // A post ID cannot be checked with the image API.
+        const imageId = match[1];
+        const key = `${user.id}:${imageId}`;
+        if (ownershipCache.has(key)) return ownershipCache.get(key) === true;
+        ownershipCache.set(key, null);
+        ownershipQueue.push({ key, imageId, user });
+        pumpOwnershipQueue();
+        return false;
+    }
+
     function syncMarks(nextFrames, nextColors) {
         for (const card of framed) if (!nextFrames.has(card)) card.removeAttribute(FRAME);
         for (const badge of colored) if (!nextColors.has(badge)) badge.removeAttribute(COLOR);
@@ -175,28 +269,46 @@
             currentPage = location.href;
             currentCard = null;
         }
-        const cards = findCards();
         const nextFrames = new Set();
         const nextColors = new Map();
-        let missing = 0;
         unrated = [];
-        for (const card of cards) {
-            const badges = [...card.querySelectorAll(BADGE)];
-            if (!badges.some(badge => readRating(badge))) {
-                missing++;
-                unrated.push(card);
-                if (settings.markUnrated) nextFrames.add(card);
+        const status = ui.getElementById('status');
+        if (!sessionUpdated || Date.now() - sessionUpdated >= SESSION_CACHE_MS) {
+            startSessionLookup();
+            syncMarks(nextFrames, nextColors);
+            status.textContent = 'Checking the signed-in user…';
+            for (const id of ['previous', 'next']) ui.getElementById(id).disabled = true;
+            return;
+        }
+        const user = sessionValue;
+        let ownedCount = 0;
+        if (user) {
+            for (const card of findCards()) {
+                const link = mediaLinks(card)[0];
+                if (!link || !ownsCard(card, link, user)) continue;
+                ownedCount++;
+                const badges = [...card.querySelectorAll(BADGE)];
+                if (!badges.some(badge => readRating(badge))) {
+                    unrated.push(card);
+                    if (settings.markUnrated) nextFrames.add(card);
+                }
+                if (settings.colorRatings) {
+                    for (const badge of badges) {
+                        const rating = readRating(badge);
+                        if (rating) nextColors.set(badge, rating);
+                    }
+                }
             }
         }
         if (settings.colorRatings) {
-            for (const badge of document.querySelectorAll(`${BADGE}, ${CHIP}`)) {
-                const rating = readRating(badge);
-                if (rating) nextColors.set(badge, rating);
+            for (const chip of document.querySelectorAll(CHIP)) {
+                const rating = readRating(chip);
+                if (rating) nextColors.set(chip, rating);
             }
         }
         syncMarks(nextFrames, nextColors);
-        const status = ui.getElementById('status');
-        const message = `${missing} without a rating badge / ${cards.size} loaded media cards`;
+        const message = sessionError || (!user ? 'Sign in to highlight your media.'
+            : `${unrated.length} without a rating badge / ${ownedCount} loaded media cards of yours`);
         if (status.textContent !== message) status.textContent = message;
         for (const id of ['previous', 'next']) ui.getElementById(id).disabled = unrated.length === 0;
     }
@@ -278,6 +390,7 @@
         document.head.appendChild(style);
         ui.getElementById('navigationStatus').textContent = 'Jump between loaded unrated images and videos.';
         scan();
+        pumpOwnershipQueue();
         if (settings.shortcutsEnabled) window.addEventListener('keydown', onShortcut, true);
         observer ??= new MutationObserver(mutations => {
             if (mutations.some(m => m.target !== host && !host.contains(m.target) && m.target !== style)) {
