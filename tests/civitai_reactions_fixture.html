@@ -1,0 +1,234 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  #gallery { display: flex; gap: 20px; }
+  .card { width: 280px; border: 1px solid; }
+  .header { height: 40px; }
+  .carousel { position: relative; }
+  .viewport { overflow: hidden; width: 280px; }
+  .strip { display: flex; transition: transform 220ms linear; }
+  .transform-3d { flex: 0 0 100%; min-width: 0; }
+  .image { position: relative; }
+  a.media { display: block; height: 180px; }
+  img, video { display: block; width: 100%; height: 180px; }
+  .reactions { display: flex; min-height: 28px; }
+  button { min-height: 25px; }
+  button.next { position: absolute; right: 0; top: 60px; }
+  .indicators { display: flex; }
+  .indicators button { flex: 1; }
+  .model .viewport { width: 560px; }
+  .model .transform-3d { flex-basis: 50%; }
+  #comments img { width: 30px; height: 30px; }
+  [role=dialog] { position: fixed; inset: 0; background: white; }
+  .viewer { display: flex; }
+  .viewer .carousel { width: 560px; }
+  .viewer .viewport { width: 560px; }
+  .viewer .sidebar { width: 250px; }
+  .hidden { display: none; }
+  .scroll-page { height: 300px; overflow-y: auto; }
+  [data-reference-root] .flex { display: flex; }
+  [data-reference-root] .flex-col { flex-direction: column; }
+  [data-reference-root] .overflow-hidden { overflow: hidden; }
+  [data-reference-root] img { flex-shrink: 0; }
+  [data-reference-root=viewer] { width: 560px; }
+  [data-reference-root=viewer] .min-h-0 { height: 180px; }
+  [data-reference-root=viewer] .touch-pan-y { width: 560px; }
+  [data-reference-root=viewer] .touch-pan-y > div { transition: transform 220ms linear; }
+  [data-reference-root=viewer] .mantine-Popover-dropdown { position: absolute; inset: auto; top: 240px; left: 300px; width: 140px; height: 35px; }
+</style>
+<main id="app"></main>
+<script>
+  const app = document.querySelector('#app');
+  const hits = [];
+  const arrows = [];
+  const active = new Set();
+  let openAdds = 0;
+  const imageSource = id => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><text y="50">${id}</text></svg>`)}`;
+  const media = (id, video = false) => `<a class="media" href="/images/${id}">${video
+    ? `<video poster="${imageSource(id)}"><source src="/video-${id}.mp4"></video>`
+    : `<img src="${imageSource(id)}">`}</a>`;
+  function reactionButton(id, type) {
+    const selected = active.has(`${id}:${type}`);
+    return `<button aria-label="${type} reaction" data-id="${id}" data-type="${type}"
+      data-variant="${selected ? 'light' : 'subtle'}"
+      class="Reactions-module__fixture__reactionBadge ${selected ? 'Reactions-module__fixture__hasReacted' : ''}">
+      ${type === 'Like' ? '👍' : '❤️'}<span>0</span></button>`;
+  }
+  function reactions(id, missing = false, kind = 'ImagesAsPostsCard') {
+    return `<div class="reactions ${kind}-module__fixture__reactions" data-group="${id}">
+      <button aria-label="Add reaction" data-add="${id}">+</button>
+      ${missing ? '' : reactionButton(id, 'Like') + reactionButton(id, 'Heart')}</div>`;
+  }
+  // The gallery fixture follows the supplied ImagesAsPostsCard sample: its
+  // header and indicator strip sit outside the viewport containing the arrow.
+  function galleryCard(name, ids, { missing = false, loop = false, delayed = false, start = 0, arrow = true } = {}) {
+    const card = document.createElement('div');
+    card.className = 'card'; card.dataset.card = name;
+    let index = start;
+    function draw() {
+      const id = ids[index];
+      card.innerHTML = `<div class="header">${name}</div><div class="carousel">
+        <div class="viewport"><div class="image">${media(id, name === 'video')}${reactions(id, missing && !openAdds)}</div></div>
+        ${arrow ? `<button class="next" data-disabled="${!loop && index === ids.length - 1}"><svg class="tabler-icon tabler-icon-chevron-right"></svg>Next</button>` : ''}
+      </div><div class="indicators">${ids.map((_, i) => `<button aria-hidden="true" ${i === index ? 'data-active="true"' : ''}></button>`).join('')}</div>`;
+      card.querySelector('.next')?.addEventListener('click', () => {
+        arrows.push(name);
+        if (!loop && index === ids.length - 1) return;
+        index = (index + 1) % ids.length;
+        // Preserve the carousel root while replacing just its image and arrow.
+        const update = () => {
+          card.querySelector('.image').innerHTML = media(ids[index], name === 'video') + reactions(ids[index], missing && !openAdds);
+          card.querySelector('.next').dataset.disabled = String(!loop && index === ids.length - 1);
+          [...card.querySelectorAll('.indicators button')].forEach((button, i) => {
+            if (i === index) button.dataset.active = 'true'; else button.removeAttribute('data-active');
+          });
+        };
+        if (delayed) setTimeout(update, 800); else update();
+      });
+    }
+    draw(); return card;
+  }
+  function modelCarousel() {
+    const root = document.createElement('section');
+    root.className = 'model carousel';
+    const ids = [101, 102, 103, 104];
+    root.innerHTML = `<div class="viewport"><div class="strip">${ids.map(id =>
+      `<div class="transform-3d"><div class="image">${media(id)}${reactions(id, false, 'ModelCarousel')}</div></div>`).join('')}</div></div>
+      <button class="next" aria-label="Next image" data-disabled="false">Next</button>`;
+    let index = 0;
+    root.querySelector('.next').onclick = () => {
+      arrows.push('model');
+      index = (index + 1) % 3;
+      root.querySelector('.strip').style.transform = `translate3d(${-index * 280}px,0,0)`;
+    };
+    return root;
+  }
+  function viewer({ embla = false, query = false, modal = true } = {}) {
+    const shell = document.createElement('div');
+    if (modal) shell.setAttribute('role', 'dialog');
+    const ids = [201, 202, 203];
+    let index = 0;
+    shell.innerHTML = `<div class="viewer"><section class="viewer-main">
+      <div class="carousel"><div class="viewport">${embla ? `<div class="strip">${ids.map(id =>
+        `<div class="transform-3d">${media(id)}</div>`).join('')}</div>` : `<div class="image">${media(ids[0])}</div>`}</div>
+      <button class="next"><svg class="tabler-icon tabler-icon-chevron-right"></svg>Next</button></div>
+      <div class="footer">${reactions(ids[0], false, 'Viewer')}</div></section>
+      <aside class="sidebar"><div class="Comment-module__fixture__root"><img src="${imageSource('avatar')}">${reactions(900)}</div></aside></div>`;
+    shell.querySelector('.next').onclick = () => {
+      arrows.push('viewer');
+      index = (index + 1) % ids.length;
+      if (embla) shell.querySelector('.strip').style.transform = `translate3d(${-index * 560}px,0,0)`;
+      else shell.querySelector('.image').innerHTML = media(ids[index]);
+      shell.querySelector('.footer').innerHTML = reactions(ids[index], false, 'Viewer');
+      setTimeout(() => history.replaceState({}, '', query ? `/models/1?imageId=${ids[index]}` : `/images/${ids[index]}`), 300);
+    };
+    return shell;
+  }
+  app.addEventListener('click', event => {
+    const button = event.target.closest('button');
+    if (button?.dataset.add) {
+      openAdds++;
+      const group = button.parentElement;
+      const id = Number(button.dataset.add);
+      setTimeout(() => {
+        for (const type of ['Like', 'Heart']) if (!group.querySelector(`[data-type="${type}"]`)) {
+          group.insertAdjacentHTML('beforeend', reactionButton(id, type));
+        }
+      }, 70);
+    }
+    if (!button?.dataset.type) return;
+    const key = `${button.dataset.id}:${button.dataset.type}`;
+    hits.push(key);
+    if (active.has(key)) active.delete(key); else active.add(key);
+    // Replace the clicked button to exercise re-querying after React updates.
+    button.outerHTML = reactionButton(Number(button.dataset.id), button.dataset.type);
+  });
+  function setup(scenario) {
+    history.replaceState({}, '', '/models/1');
+    if (scenario === 'post-reference' || scenario === 'viewer-reference') {
+      const post = scenario === 'post-reference';
+      const ids = [144664787, 144664795, 144664796, 144664802];
+      history.replaceState({}, '', post ? '/posts/31423983' : '/images/144664787');
+      fetch(`/references/${post ? 'post' : 'viewer'}.html`).then(response => response.text()).then(html => {
+        app.innerHTML = post ? `<div class="scroll-page">${html}</div>` : html;
+        const root = app.querySelector('[data-reference-root]');
+        const annotate = (row, id) => {
+          row.dataset.group = id;
+          for (const button of row.querySelectorAll('button')) {
+            const type = button.getAttribute('aria-label')?.replace(' reaction', '');
+            if (['Like', 'Heart'].includes(type)) {
+              button.dataset.id = id; button.dataset.type = type;
+              if (button.className.includes('__hasReacted')) active.add(`${id}:${type}`);
+            }
+          }
+        };
+        const rows = [...root.querySelectorAll('button[aria-label="Like reaction"]')].map(button => button.parentElement);
+        if (post) {
+          rows.forEach((row, i) => annotate(row, ids[i]));
+          root.querySelectorAll('a[href*="/images/"] img').forEach((image, i) => { image.src = imageSource(ids[i]); });
+        } else {
+          const slides = [...root.querySelectorAll('.transform-3d')];
+          const strip = slides[0].parentElement;
+          slides.forEach((slide, i) => { const image = slide.querySelector('img'); if (image) image.src = imageSource(ids[i]); });
+          const indicators = [...root.querySelectorAll('button[aria-hidden="true"]')];
+          const footer = rows[0];
+          const footerHTML = footer.innerHTML;
+          let index = 0;
+          annotate(footer, ids[index]);
+          root.querySelector('[aria-label="Next image"]').onclick = () => {
+            arrows.push('viewer'); index = (index + 1) % ids.length;
+            // The sample has an unmounted third slide and a footer outside the
+            // Embla strip, plus a sticker hint with role=dialog inside it.
+            if (!slides[index].querySelector('img')) slides[index].innerHTML = `<img src="${imageSource(ids[index])}">`;
+            strip.style.transform = `translate3d(${-index * 560}px,0,0)`;
+            footer.innerHTML = footerHTML; annotate(footer, ids[index]);
+            indicators.forEach((button, i) => {
+              if (index === i) button.dataset.active = 'true'; else button.removeAttribute('data-active');
+            });
+            setTimeout(() => history.replaceState({}, '', `/images/${ids[index]}`), 300);
+          };
+        }
+      });
+      return;
+    }
+    if (scenario === 'model') {
+      active.add('101:Like');
+      app.append(modelCarousel(), galleryCard('unrelated', [301, 302]));
+    } else if (scenario.startsWith('viewer')) {
+      app.append(galleryCard('background', [301, 302]));
+      history.replaceState({}, '', scenario === 'viewer-query' ? '/models/1?imageId=201' : '/images/201');
+      if (scenario !== 'viewer-loading') app.append(viewer({ embla: scenario === 'viewer-embla', query: scenario === 'viewer-query', modal: scenario !== 'viewer-page' }));
+    } else if (scenario === 'post' || scenario === 'post-scroll') {
+      history.replaceState({}, '', '/posts/31448292');
+      app.innerHTML = `<section>${[401, 402, 403].map(id => `<article style="margin-top: 400px">${media(id)}${reactions(id, true, 'Post')}</article>`).join('')}</section>
+        <div id="comments">${media(900)}${reactions(900)}</div><div class="hidden">${media(901)}${reactions(901)}</div>`;
+      if (scenario === 'post-scroll') {
+        app.querySelector('section').className = 'scroll-page';
+        // Same source, distinct image IDs: offscreen identity must use links.
+        app.querySelectorAll('section img').forEach(image => { image.src = imageSource('shared'); });
+      }
+    } else {
+      const gallery = document.createElement('div'); gallery.id = 'gallery';
+      gallery.append(galleryCard(scenario === 'video' ? 'video' : 'selected', [11, 12, 13], {
+        missing: scenario === 'missing', delayed: scenario === 'delayed', loop: scenario === 'loop',
+        start: scenario === 'middle' ? 1 : 0, arrow: scenario !== 'single',
+      }), galleryCard('unrelated', [21, 22]));
+      app.append(gallery);
+      app.insertAdjacentHTML('beforeend', '<input id="editor"><div contenteditable="true" id="editable">Edit</div>');
+      if (scenario === 'custom-style') {
+        for (const button of gallery.querySelectorAll('[data-type]')) {
+          button.dataset.variant = 'filled'; button.style.background = 'pink';
+        }
+      }
+      if (scenario === 'stalled') {
+        const old = gallery.querySelector('.next');
+        const clone = old.cloneNode(true);
+        old.replaceWith(clone);
+        clone.onclick = () => arrows.push('stalled');
+      }
+    }
+  }
+  setup(new URL(location.href).searchParams.get('case'));
+</script>
+<script src="/userscript.js"></script>

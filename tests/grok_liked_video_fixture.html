@@ -1,0 +1,140 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  #gallery {height:250px; overflow:auto; width:240px; display:grid; grid-template-columns:100px 100px; gap:10px;}
+  .card {height:100px; position:relative; background:#555;}
+  .card img {width:100%; height:100%;} .card a {position:absolute; inset:0;}
+</style>
+<main></main><pre id="result">RUNNING</pre>
+<script>
+  const scenario = new URLSearchParams(location.search).get('case') || sessionStorage.scenario || 'normal';
+  sessionStorage.scenario = scenario;
+  sessionStorage.loads = Number(sessionStorage.loads || 0) + 1;
+  const hits = () => JSON.parse(sessionStorage.hits || '[]');
+  let ids = JSON.parse(sessionStorage.ids || '[1,2,3,4,5,6,7,8]');
+  const main = document.querySelector('main');
+  function card(id) {
+    return `<div class="card group/compact-card"><img alt="" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="><a aria-label="Open post" href="/imagine/post/${id}"></a></div>`;
+  }
+  function draw() {
+    document.querySelectorAll('[role="menu"], [role="alert"]').forEach(el => el.remove());
+    main.innerHTML = '';
+    setTimeout(() => {
+      if (location.pathname.startsWith('/imagine/saved')) {
+        main.innerHTML = '<a href="/imagine/saved/liked">Liked</a><div id="gallery"></div>';
+        const gallery = document.querySelector('#gallery');
+        // Grow the first gallery asynchronously to exercise infinite scrolling.
+        let loaded = scenario !== 'lazy-return' && sessionStorage.loaded ? 8 : 6;
+        gallery.innerHTML = ids.slice(0, loaded).map(card).join('');
+        gallery.onscroll = () => {
+          if (loaded < 8 && gallery.scrollTop + gallery.clientHeight >= gallery.scrollHeight - 5) {
+            loaded = 8;
+            setTimeout(() => { gallery.innerHTML = ids.map(card).join(''); sessionStorage.loaded = 'yes'; }, 40);
+          }
+        };
+      } else {
+        const id = Number(location.pathname.split('/').pop());
+        main.innerHTML = '<a aria-label="Back" href="/imagine/saved">Back</a>';
+        if (scenario === 'hidden-back') main.insertAdjacentHTML('afterbegin', '<a aria-label="Back" href="/imagine/saved" hidden>Hidden back</a>');
+        if (id === 4) { main.insertAdjacentHTML('beforeend', '<video src="data:video/mp4;base64,AAAA" style="width:100px;height:100px"></video>'); return; }
+        main.insertAdjacentHTML('beforeend', '<button id="radix-dynamic-' + id + '" aria-label="Make Video" aria-expanded="false">Video</button>');
+        const button = main.querySelector('button');
+        button.onpointerdown = () => {
+          button.setAttribute('aria-expanded', 'true');
+          document.body.insertAdjacentHTML('beforeend', `<div role="menu" data-state="open" aria-labelledby="unrelated"><div role="menuitem">Quick Animate</div></div>
+            <div role="menu" data-state="open" aria-labelledby="${button.id}"><div role="menuitem">Add Prompt</div><div role="menuitem" ${scenario === 'disabled' ? 'data-disabled=""' : ''}>Quick Animate</div></div>`);
+          const menu = document.querySelector(`[aria-labelledby="${button.id}"]`);
+          menu.lastElementChild.onclick = () => {
+            if (scenario === 'disabled') throw new Error('Clicked disabled item');
+            const submissions = hits(); submissions.push(id); sessionStorage.hits = JSON.stringify(submissions);
+            ids = [id, ...ids.filter(value => value !== id)]; sessionStorage.ids = JSON.stringify(ids);
+            if (scenario !== 'lingering-menu') menu.remove();
+            else menu.setAttribute('data-state', 'closed');
+            if (scenario === 'route-change') history.replaceState({}, '', '/imagine/post/generated-' + id);
+            if (scenario === 'delayed-back') {
+              const back = main.querySelector('a[aria-label="Back"]'); back.remove();
+              setTimeout(() => main.prepend(back), 350);
+            }
+            if (scenario === 'quota') main.insertAdjacentHTML('beforeend', '<div role="alert">Video quota limit reached</div>');
+            if (scenario === 'status-progress') main.insertAdjacentHTML('beforeend', '<div role="status">1 out of 2 videos generated</div>');
+            if (scenario === 'reload' && !sessionStorage.reloaded) { sessionStorage.reloaded = 'yes'; location.reload(); }
+            if (scenario === 'pause' && submissions.length === 1) {
+              const root = document.querySelector('#grok-liked-video-panel').shadowRoot;
+              root.getElementById('pause').click();
+              setTimeout(() => {
+                if (hits().length !== 1) finish(false, 'Submitted while paused');
+                root.getElementById('start').click();
+              }, 140);
+            }
+          };
+        };
+      }
+    }, 10);
+  }
+  document.addEventListener('click', event => {
+    const link = event.target.closest('a');
+    if (!link) return;
+    if (link.getAttribute('aria-label') === 'Back') sessionStorage.backs = Number(sessionStorage.backs || 0) + 1;
+    if (scenario === 'full-navigation') return;
+    if (link.getAttribute('aria-label') === 'Back' && scenario === 'stalled-back') { event.preventDefault(); return; }
+    const target = scenario === 'redirect-back' && link.getAttribute('aria-label') === 'Back'
+      ? '/imagine/saved/liked' : link.getAttribute('href');
+    event.preventDefault();
+    if (scenario === 'slow-return' && link.getAttribute('aria-label') === 'Back') {
+      setTimeout(() => { history.pushState({}, '', target); setTimeout(draw, 200); }, 300);
+    } else { history.pushState({}, '', target); draw(); }
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    sessionStorage.escapes = Number(sessionStorage.escapes || 0) + 1;
+    // Grok may treat Escape as closing the post. A subsequent Back would leave Saved.
+    history.pushState({}, '', '/imagine'); draw();
+  });
+  draw();
+  function finish(ok, detail) {
+    document.querySelector('#result').textContent = JSON.stringify({ ok, scenario, hits: hits(), backs: Number(sessionStorage.backs || 0),
+      escapes: Number(sessionStorage.escapes || 0), loads: Number(sessionStorage.loads), path: location.pathname, detail });
+    window.testFinished = true;
+  }
+</script>
+<script src="/userscript.js"></script>
+<script>
+  const watch = setInterval(() => {
+    if (scenario === 'ui') return;
+    if (window.testFinished) { clearInterval(watch); return; }
+    const root = document.querySelector('#grok-liked-video-panel').shadowRoot;
+    let state = JSON.parse(sessionStorage.getItem('grok-liked-post-video-v1') || 'null');
+    if (scenario === 'stalled-back' && state?.running && sessionStorage.resumed) sessionStorage.resumedRunning = 'yes';
+    if (!state && document.querySelector('#gallery')) {
+      if (scenario === 'picked') {
+        sessionStorage.loaded = 'yes';
+        document.querySelector('#gallery').innerHTML = ids.map(card).join('');
+        document.querySelector('#gallery').scrollTop = 110;
+        root.getElementById('pick').click();
+        document.querySelector('a[href="/imagine/post/6"]').click();
+      }
+      if (['limit', 'two-final'].includes(scenario)) {
+        root.getElementById('limit').value = 2;
+        root.getElementById('limit').dispatchEvent(new Event('change'));
+      }
+      root.getElementById('start').click();
+      return;
+    }
+    if (state?.phase === 'idle' && !state.running) { root.getElementById('start').click(); return; }
+    if (state?.phase === 'done') {
+      const expected = scenario === 'picked' ? [6,5,3,2,1] : ['limit', 'two-final'].includes(scenario) ? [8,7] : [8,7,6,5,3,2,1];
+      finish(JSON.stringify(hits()) === JSON.stringify(expected), state.status);
+    } else if (state && !state.running && !['idle', 'done'].includes(state.phase) && scenario !== 'pause') {
+      if (scenario === 'stalled-back') {
+        if (!sessionStorage.resumed) {
+          sessionStorage.resumed = 'yes'; setTimeout(() => root.getElementById('start').click(), 100); return;
+        }
+        if (!sessionStorage.resumedRunning || !state.status.includes('Timed out')) return;
+        finish(hits().length === 1 && Number(sessionStorage.backs) === 1, state.status); return;
+      }
+      const ok = scenario === 'quota' ? hits().length === 1 && /quota/.test(state.status)
+        : scenario === 'disabled' ? hits().length === 0 && /Quick Animate/.test(state.status) : false;
+      finish(ok, state.status);
+    }
+  }, 10);
+</script>
