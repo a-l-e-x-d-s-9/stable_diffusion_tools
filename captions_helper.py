@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import subprocess
 from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLayout, QHBoxLayout,
                              QLineEdit, QPushButton, QSpinBox, QFrame, QTextEdit,
                              QScrollArea, QMessageBox, QSizePolicy, QAbstractItemView, QListView,
@@ -344,11 +345,11 @@ class ImageLabel(QLabel):
     def mouseDoubleClickEvent(self, event):
         if self.path:
             if sys.platform.startswith('linux'):
-                os.system(f"xdg-open '{self.path}'")
+                subprocess.run(["xdg-open", self.path])
             elif sys.platform.startswith('win'):
-                os.system(f"start '{self.path}'")
+                os.startfile(self.path)
             elif sys.platform.startswith('darwin'):
-                os.system(f"open '{self.path}'")
+                subprocess.run(["open", self.path])
 
 
 
