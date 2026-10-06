@@ -1,5 +1,73 @@
-/pattern_replacer_memory.json
+# Python environments and generated caches
 /venv/
-/downloads.db
-/.idea/*
+/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local editor and desktop state
+/.idea/
+/.vscode/
+.directory
+.DS_Store
+/.input_history
+
+# Downloaded model assets and third-party source archive
 /.models/
+/denoise_models/
+/downloads/
+/training-output/
+/data/
+/sd_dreambooth_extension-main.zip
+
+# Private runtime configuration; commit *.example.json templates instead
+/auto_upload_settings.json
+/download_config.json
+/git_patch_config.json
+/huggingface_upload_settings.json
+/caption_helper_settings*.json
+!/caption_helper_settings.example.json
+/configuration_settings.json
+/dataset_denoise_settings.json
+/dataset_denoise_settings.partial.json
+/pattern_replacer_memory.json
+*.local.json
+/.local/
+/private/
+/secrets/
+.env
+.env.*
+!.env.example
+credentials.json
+credentials_*.json
+*_credentials.json
+twitter_config*.json
+api_key*.json
+token*.txt
+hf_token*.txt
+cookies*.txt
+cookies*.json
+cookie_data*.txt
+*.pem
+*.key
+
+# Generated output and personal scraped pages (not the fixtures in tests/)
+/downloads.db
+/downloads.db-*
+/caption_output.txt
+/image_urls.txt
+/download_log.txt
+/hf_upload_manifest_*.json
+/test_links_extraction.html
+/test_links_extracted.html
+/test_links_extracted.txt
+
+# Personal batch script, superseded snapshot, and unfinished experiments
+/add_singer_tags.sh
+/grok_imagine_favorite_0.41.8.js
+/images_gathering/get/download_images_adapting_to_another_site_failed.py
+/twitter.py

@@ -1,0 +1,11 @@
+{
+  "urls": [
+    "https://civitai.com/api/download/models/MODEL_VERSION_ID"
+  ],
+  "output_directory": "./downloads",
+  "timeout": 20,
+  "retries": 5,
+  "min_file_size_gb": 1.5,
+  "max_workers": 4,
+  "log_file": "download_log.txt"
+}

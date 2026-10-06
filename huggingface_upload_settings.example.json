@@ -1,14 +1,14 @@
 {
   "_notes": [
-    "Example configuration for huggingface_upload.py (multi-destination, per-destination path_in_repository, archiving, sanitize_arcname).",
+    "Portable example configuration for huggingface_upload.py. Copy to huggingface_upload_settings.json and edit repository names and source paths.",
     "copy_duplicates defaults to true. It uploads each repeated raw file or zip_source archive to its first destination, then uses server-side copies for later destinations. Copy commits use the destination commit_message and do not name the source repository.",
     "This is JSON: no comments. Edit fields as needed.",
     "CLI: python3 huggingface_upload.py --configurations /path/to/this.json --dry_run --verbose"
   ],
   "repository": "owner/main-repo",
   "repo_type": "model",
-  "token_file": "/home/alex/.hf_token_main",
-  "token_env": null,
+  "token_file": null,
+  "token_env": "HF_TOKEN",
   "threads": 4,
   "copy_duplicates": true,
   "max_inflight_per_repo": 2,
@@ -31,12 +31,12 @@
     "level": 6,
     "sanitize_arcname": null
   },
-  "source_base": "/data",
+  "source_base": "./data",
   "sources": [
     {
       "_notes": [
         "Raw upload, preserve folder tree, multi-destination with different tokens.",
-        "Destination 2 overrides token_file and commit_message."
+        "Destination 2 overrides token_env and commit_message."
       ],
       "path_in_repository": "SetA",
       "include": [
@@ -55,10 +55,11 @@
         },
         {
           "repository": "partnerOrg/mirror-repo",
-          "token_file": "/home/alex/.hf_token_partner",
+          "token_file": null,
           "create_pr": false,
           "exists": "skip",
-          "commit_message": "mirror: {timestamp}"
+          "commit_message": "mirror: {timestamp}",
+          "token_env": "HF_TOKEN_MIRROR"
         }
       ]
     },
@@ -67,7 +68,7 @@
         "Raw upload, flat layout, includes an absolute path + a glob under a per-source base.",
         "This source overrides source_base only for itself."
       ],
-      "source_base": "/data/setB",
+      "source_base": "./data/setB",
       "path_in_repository": "FlatB",
       "include": [
         "/absolute/path/to/some/file.safetensors",
