@@ -5,8 +5,8 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QGridLayout, QVBoxLa
                              QLineEdit, QPushButton, QSpinBox, QFrame, QTextEdit,
                              QScrollArea, QMessageBox, QSizePolicy, QAbstractItemView, QListView,
                              QStyledItemDelegate, QCheckBox)
-from PyQt6.QtGui import QPixmap, QColor, QPalette, QAction, QImage, QTextCharFormat, QTextCursor, QDrag
-from PyQt6.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, pyqtSignal
+from PyQt6.QtGui import QPixmap, QColor, QPalette, QAction, QImage, QTextCharFormat, QTextCursor, QDrag, QDesktopServices
+from PyQt6.QtCore import Qt, QSize, QPoint, QTimer, QRegularExpression, pyqtSignal, QUrl
 from PyQt6.QtWidgets import QMainWindow, QMenu, QMenuBar, QDialog, QListWidget, QListWidgetItem
 from PIL import Image, UnidentifiedImageError, ImageOps, ImageFile
 import piexif
@@ -343,12 +343,9 @@ class ImageLabel(QLabel):
 
     def mouseDoubleClickEvent(self, event):
         if self.path:
-            if sys.platform.startswith('linux'):
-                os.system(f"xdg-open '{self.path}'")
-            elif sys.platform.startswith('win'):
-                os.system(f"start '{self.path}'")
-            elif sys.platform.startswith('darwin'):
-                os.system(f"open '{self.path}'")
+            path = os.path.abspath(self.path)
+            if os.path.isfile(path):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
 
