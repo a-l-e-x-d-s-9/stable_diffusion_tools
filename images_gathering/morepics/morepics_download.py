@@ -84,4 +84,4 @@ if __name__ == "__main__":
     main()
 
 
-# Usage example: python3 /home/alexds9/Documents/stable_diffusion/stable_diffusion_tools/images_gathering/morepics/morepics_download.py --data '/path/download_info.json'  --folder '/path/Dowloads' --additional-tags "text, English text, signature, watermark, site address"
+# Usage example: python3 images_gathering/morepics/morepics_download.py --data '/path/download_info.json' --folder '/path/Downloads' --additional-tags "text, English text, signature, watermark, site address"

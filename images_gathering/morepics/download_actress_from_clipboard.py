@@ -2,7 +2,9 @@ import json
 import os.path
 import subprocess
 import argparse
+import sys
 from collections import Counter
+from pathlib import Path
 
 def get_clipboard_content():
     return subprocess.check_output(['xclip', '-selection', 'clipboard', '-o']).decode('utf-8')
@@ -38,13 +40,13 @@ def run_bash_commands(base_folder, popular_name):
 
     os.makedirs(folder_path, exist_ok=True)
     # Removed: "text, English text, signature, watermark, site address"
-    commands = [
-        f'python3  images_gathering/morepics/morepics_download.py --folder "{folder_path}" --additional-tags "" --data "{json_path}"'
-    ]
+    downloader = Path(__file__).resolve().with_name("morepics_download.py")
     print(f"Downloading: {popular_name}")
 
-    for cmd in commands:
-        subprocess.run(cmd, shell=True)
+    subprocess.run([
+        sys.executable, str(downloader), "--folder", folder_path,
+        "--additional-tags", "", "--data", json_path,
+    ], check=True)
 
     print(f"Downloaded: {popular_name}")
 
