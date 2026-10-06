@@ -7,6 +7,7 @@ const http = require('node:http');
 const { spawn } = require('node:child_process');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(path.join(__dirname, '../civitai_add_reactions.user.js'));
+const settleDelay = Number(source.toString().match(/const SETTLE_DELAY = (\d+)/)[1]);
 const fixture = fs.readFileSync(path.join(__dirname, 'civitai_reactions_fixture.html'));
 const references = Object.fromEntries(['post', 'viewer'].map(name =>
   [`/references/${name}.html`, fs.readFileSync(path.join(__dirname, `fixtures/civitai/${name}.html`))]));
@@ -54,6 +55,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
       'no-hover', 'outside', 'typing', 'editable', 'overlap', 'scrolled', 'navigate',
       'custom-style', 'stalled', 'viewer-loading',
       'post-scroll', 'post-reference', 'viewer-reference',
+      'concurrent', 'concurrent-scroll', 'concurrent-restart', 'concurrent-missing', 'concurrent-navigate',
     ]) {
       const { browserContextId } = await cdp('Target.createBrowserContext');
       const { targetId } = await cdp('Target.createTarget', {
@@ -67,6 +69,74 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
       };
       await evaluate(`new Promise(resolve => { const poll = () => document.querySelector('#app button') ? resolve() : setTimeout(poll, 20); poll(); })`);
       await sleep(100);
+      if (scenario.startsWith('concurrent')) {
+        const shortcut = `new KeyboardEvent('keydown', {key:'S',ctrlKey:true,shiftKey:true,bubbles:true})`;
+        const hover = card => evaluate(`{
+          const rect = document.querySelector('[data-card="${card}"] img').getBoundingClientRect();
+          window.dispatchEvent(new PointerEvent('pointermove', {clientX:rect.left+20,clientY:rect.top+10}));
+        }`);
+        const until = async (expression, timeout = 10000) => {
+          const deadline = Date.now() + timeout;
+          while (Date.now() < deadline) {
+            if (await evaluate(expression)) return;
+            await sleep(30);
+          }
+          assert.fail(`${scenario}: timed out waiting for ${expression}; ${JSON.stringify(await evaluate('({hits,arrows})'))}`);
+        };
+        await hover('selected');
+        await evaluate(`window.dispatchEvent(${shortcut})`);
+        await until(`arrows.includes('selected')`);
+        assert.equal(await evaluate(`hits.includes('12:Like')`), false, 'First post must still be waiting');
+        // Root discovery may return a smaller scope when an arrow is hidden.
+        // Neither that change nor repeated keys may start overlapping workers.
+        await evaluate(`document.querySelector('[data-card="selected"] .next').style.display = 'none';
+          window.dispatchEvent(${shortcut}); window.dispatchEvent(${shortcut});
+          document.querySelector('[data-card="selected"] .next').style.display = ''`);
+        assert.equal(await evaluate(`hits.includes('12:Like')`), false, 'Nested scopes must share a lock');
+        if (scenario === 'concurrent-scroll') {
+          await evaluate(`document.querySelector('#gallery').scrollTop = document.querySelector('[data-card="unrelated"]').offsetTop`);
+        }
+        await hover('unrelated');
+        if (scenario === 'concurrent-navigate') {
+          await evaluate(`window.dispatchEvent(${shortcut}); history.pushState({}, '', '/models/2')`);
+          await sleep(200);
+          assert.deepEqual(await evaluate('hits'), ['11:Like', '11:Heart', '21:Like'], 'Navigation must stop both workers');
+          // Both locks must release on cancellation so a new request can start.
+          await hover('selected');
+          await evaluate(`window.dispatchEvent(${shortcut})`);
+          await hover('unrelated');
+          await evaluate(`window.dispatchEvent(${shortcut})`);
+        } else {
+          await evaluate(`window.dispatchEvent(${shortcut}); window.dispatchEvent(${shortcut})`);
+          await until(`hits.includes('21:Like')`, 750);
+          assert.equal(await evaluate(`hits.includes('13:Heart')`), false, 'Second post must start while the first is active');
+        }
+        if (scenario === 'concurrent-restart') {
+          await until(`hits.includes('22:Heart')`);
+          await sleep(150);
+          assert.equal(await evaluate(`hits.includes('13:Heart')`), false, 'First post must still be active when the second finishes');
+          await evaluate(`document.querySelector('[data-card="unrelated"] .indicators button').click();
+            window.dispatchEvent(${shortcut})`);
+          await until(`arrows.filter(card => card === 'unrelated').length === 2`, 750);
+        }
+        await until(`hits.includes('13:Heart') && hits.includes('22:Heart')`);
+        await sleep(settleDelay + 350);
+        const result = await evaluate('({hits,arrows,events,active:[...active]})');
+        const expected = [11, 12, 13, 21, 22].flatMap(id => [`${id}:Like`, `${id}:Heart`]);
+        assert.deepEqual([...result.hits].sort(), [...expected].sort(), `${scenario}: ${JSON.stringify(result)}`);
+        assert.equal(new Set(result.hits).size, result.hits.length, 'Concurrent or repeated requests must not toggle reactions off');
+        assert.equal(result.arrows.filter(card => card === 'selected').length, 2);
+        assert.equal(result.arrows.filter(card => card === 'unrelated').length, scenario === 'concurrent-restart' ? 2 : 1);
+        assert.equal(result.active.length, expected.length);
+        if (scenario !== 'concurrent-navigate') {
+          const arrow = result.events.find(event => event.type === 'arrow' && event.card === 'selected');
+          const reaction = result.events.find(event => event.key === '12:Like');
+          assert(reaction.time - arrow.time >= settleDelay, `Must preserve the configured ${settleDelay} ms viewing delay`);
+        }
+        console.log(`PASS ${scenario}: concurrent posts, independent locks, ${settleDelay} ms delay`);
+        await cdp('Target.disposeBrowserContext', { browserContextId });
+        continue;
+      }
       const selector = scenario === 'header' ? '.header' : scenario === 'indicator' ? '.indicators button' : scenario === 'model' ? '.model img' : '.card img, .card video';
       if (!['no-hover', 'post', 'post-scroll', 'post-reference', 'viewer-reference'].includes(scenario)) {
         await evaluate(`{
@@ -96,7 +166,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
         await sleep(100);
         result = await evaluate('({hits, arrows, active:[...active], openAdds})');
       } while (result.hits.length < expected.length && Date.now() < deadline);
-      await sleep(scenario === 'delayed' ? 1400 : scenario === 'stalled' ? 4500 : 900);
+      await sleep(scenario === 'stalled' ? 4500 : Math.max(900, settleDelay + 350));
       result = await evaluate('({hits, arrows, active:[...active], openAdds})');
       assert.deepEqual(result.hits, expected, `${scenario}: ${JSON.stringify(result)}`);
       assert.equal(result.arrows.length, scenario === 'navigate' ? 0 : expectedArrows, `${scenario}: ${JSON.stringify(result)}`);

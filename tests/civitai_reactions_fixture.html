@@ -42,6 +42,7 @@
   const app = document.querySelector('#app');
   const hits = [];
   const arrows = [];
+  const events = [];
   const active = new Set();
   let openAdds = 0;
   const imageSource = id => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><text y="50">${id}</text></svg>`)}`;
@@ -72,19 +73,22 @@
         <div class="viewport"><div class="image">${media(id, name === 'video')}${reactions(id, missing && !openAdds)}</div></div>
         ${arrow ? `<button class="next" data-disabled="${!loop && index === ids.length - 1}"><svg class="tabler-icon tabler-icon-chevron-right"></svg>Next</button>` : ''}
       </div><div class="indicators">${ids.map((_, i) => `<button aria-hidden="true" ${i === index ? 'data-active="true"' : ''}></button>`).join('')}</div>`;
+      const update = () => {
+        card.querySelector('.image').innerHTML = media(ids[index], name === 'video') + reactions(ids[index], missing && !openAdds);
+        if (arrow) card.querySelector('.next').dataset.disabled = String(!loop && index === ids.length - 1);
+        [...card.querySelectorAll('.indicators button')].forEach((button, i) => {
+          if (i === index) button.dataset.active = 'true'; else button.removeAttribute('data-active');
+        });
+      };
       card.querySelector('.next')?.addEventListener('click', () => {
         arrows.push(name);
         if (!loop && index === ids.length - 1) return;
         index = (index + 1) % ids.length;
         // Preserve the carousel root while replacing just its image and arrow.
-        const update = () => {
-          card.querySelector('.image').innerHTML = media(ids[index], name === 'video') + reactions(ids[index], missing && !openAdds);
-          card.querySelector('.next').dataset.disabled = String(!loop && index === ids.length - 1);
-          [...card.querySelectorAll('.indicators button')].forEach((button, i) => {
-            if (i === index) button.dataset.active = 'true'; else button.removeAttribute('data-active');
-          });
-        };
         if (delayed) setTimeout(update, 800); else update();
+      });
+      [...card.querySelectorAll('.indicators button')].forEach((button, i) => {
+        button.onclick = () => { index = i; update(); };
       });
     }
     draw(); return card;
@@ -126,6 +130,10 @@
     return shell;
   }
   app.addEventListener('click', event => {
+    const button = event.target.closest('button.next');
+    if (button) events.push({type:'arrow', card:button.closest('[data-card]')?.dataset.card, time:performance.now()});
+  }, true);
+  app.addEventListener('click', event => {
     const button = event.target.closest('button');
     if (button?.dataset.add) {
       openAdds++;
@@ -139,6 +147,7 @@
     }
     if (!button?.dataset.type) return;
     const key = `${button.dataset.id}:${button.dataset.type}`;
+    events.push({type:'reaction', key, time:performance.now()});
     hits.push(key);
     if (active.has(key)) active.delete(key); else active.add(key);
     // Replace the clicked button to exercise re-querying after React updates.
@@ -211,9 +220,14 @@
     } else {
       const gallery = document.createElement('div'); gallery.id = 'gallery';
       gallery.append(galleryCard(scenario === 'video' ? 'video' : 'selected', [11, 12, 13], {
-        missing: scenario === 'missing', delayed: scenario === 'delayed', loop: scenario === 'loop',
+        missing: scenario === 'missing' || scenario === 'concurrent-missing', delayed: scenario === 'delayed', loop: scenario === 'loop',
         start: scenario === 'middle' ? 1 : 0, arrow: scenario !== 'single',
-      }), galleryCard('unrelated', [21, 22]));
+      }), galleryCard('unrelated', [21, 22], {missing:scenario === 'concurrent-missing'}));
+      if (scenario.startsWith('concurrent')) gallery.append(galleryCard('untouched', [31, 32]));
+      if (scenario === 'concurrent-scroll') {
+        gallery.className = 'scroll-page';
+        gallery.style.cssText = 'display:block;width:280px;height:250px';
+      }
       app.append(gallery);
       app.insertAdjacentHTML('beforeend', '<input id="editor"><div contenteditable="true" id="editable">Edit</div>');
       if (scenario === 'custom-style') {

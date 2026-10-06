@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Add Reactions
 // @namespace    https://civitai.com/
-// @version      4.1
+// @version      4.2
 // @description  Ctrl+Shift+S (or X): add 👍❤️ to the hovered gallery post/model carousel, or images in an open post; advance right.
 // @author       You
 // @match        https://civitai.com/*
@@ -19,12 +19,13 @@
   ];
   const AFTER_REACT = 30;
   const POLL_DELAY = 20;
-  const SETTLE_DELAY = 80;
+  const SETTLE_DELAY = 1250;
   const CHANGE_TIMEOUT = 4000;
   const MAX_SLIDES = 200;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   let pointer = null;
-  let running = false;
+  // Separate gallery posts can run together; overlapping scopes share a lock.
+  const activeRoots = new Set();
 
   // Coordinates survive scrolling and DOM replacement; event.target does not.
   window.addEventListener('pointermove', event => {
@@ -78,22 +79,27 @@
 
   // Carousel slides must intersect their clipping viewport. Static post images
   // and the viewer's reaction footer only need to be rendered in the document.
-  function visibleRect(element, inViewport = false) {
+  function visibleRect(element, inViewport = false, clipRoot = null) {
     if (!element?.isConnected) return null;
     const rect = element.getBoundingClientRect();
     let left = rect.left, right = rect.right, top = rect.top, bottom = rect.bottom;
     if (right <= left || bottom <= top) return null;
+    let clipAncestors = true;
     for (let current = element; current; current = current.parentElement) {
       const style = getComputedStyle(current);
       if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return null;
-      if (current === element) continue;
-      const bounds = current.getBoundingClientRect();
-      if (/hidden|clip|auto|scroll/.test(style.overflowX)) {
-        left = Math.max(left, bounds.left); right = Math.min(right, bounds.right);
+      if (current !== element && clipAncestors) {
+        const bounds = current.getBoundingClientRect();
+        if (/hidden|clip|auto|scroll/.test(style.overflowX)) {
+          left = Math.max(left, bounds.left); right = Math.min(right, bounds.right);
+        }
+        if (/hidden|clip|auto|scroll/.test(style.overflowY)) {
+          top = Math.max(top, bounds.top); bottom = Math.min(bottom, bounds.bottom);
+        }
       }
-      if (/hidden|clip|auto|scroll/.test(style.overflowY)) {
-        top = Math.max(top, bounds.top); bottom = Math.min(bottom, bounds.bottom);
-      }
+      // Once selected, a post keeps running when the user scrolls elsewhere.
+      // Still clip its slides to its own carousel, and honor hidden ancestors.
+      if (current === clipRoot) clipAncestors = false;
     }
     if (inViewport) {
       left = Math.max(left, 0); right = Math.min(right, window.innerWidth);
@@ -102,9 +108,9 @@
     return right - left > 1 && bottom - top > 1 ? { left, right, top, bottom } : null;
   }
 
-  function nextButton(root) {
+  function nextButton(root, withinScope = false) {
     return [...root.querySelectorAll('button')].find(button => {
-      if (!visibleRect(button)) return false;
+      if (!visibleRect(button, false, withinScope ? root : null)) return false;
       const label = button.getAttribute('aria-label') || '';
       return /^(next( image| slide)?|right)$/i.test(label) || button.querySelector(
         'svg.tabler-icon-chevron-right, svg[class*="chevron-right"], svg[class*="ChevronRight"]'
@@ -175,7 +181,7 @@
     }
     if (postView) return roots.map(root => ({ root, inViewport: false, mode: 'post' }));
     const root = hoveredRoot(roots);
-    return root ? [{ root, inViewport: true }] : [];
+    return root ? [{ root, inViewport: false }] : [];
   }
 
   function isImageView(url) {
@@ -204,7 +210,7 @@
     for (const group of reactionGroups(root)) {
       const includeClipped = mode === 'post';
       const renderedRow = includeClipped || (mode === 'viewer' && !group.closest('.transform-3d'));
-      if (!valid() || !(renderedRow ? isRendered(group) : visibleRect(group, inViewport))) continue;
+      if (!valid() || !(renderedRow ? isRendered(group) : visibleRect(group, inViewport, root))) continue;
       const identity = groupIdentity(group, includeClipped);
       let buttons = [...group.querySelectorAll('button')];
       if (TARGETS.some(target => !buttons.some(button => matchesReaction(button, target)))) {
@@ -229,7 +235,7 @@
   }
 
   function mediaState(root, clip = true) {
-    const rendered = item => clip ? visibleRect(item) : isRendered(item);
+    const rendered = item => clip ? visibleRect(item, false, root) : isRendered(item);
     const media = [...root.querySelectorAll('img, video')].filter(rendered);
     const keys = media.map(item => {
       const source = item.getAttribute('src') || item.getAttribute('poster') ||
@@ -262,7 +268,7 @@
       const current = geometry(root) + mediaState(root);
       if (current !== previous) { previous = current; stableSince = Date.now(); }
       return Date.now() - stableSince >= SETTLE_DELAY && reactionGroups(root).some(isRendered);
-    });
+    }, CHANGE_TIMEOUT + SETTLE_DELAY);
   }
 
   async function reactCarousel(root, inViewport, pageUrl, mode) {
@@ -283,7 +289,7 @@
       if (seen.has(state)) break;
       seen.add(state);
       await reactIn(root, inViewport, valid, reacted, mode);
-      const next = nextButton(root);
+      const next = nextButton(root, true);
       if (!valid() || !next || isDisabled(next)) break;
       next.click();
       if (!await waitForSlide(root, state, valid)) break;
@@ -291,13 +297,17 @@
   }
 
   async function reactSelected() {
-    if (running) return;
-    const scopes = selectScopes();
-    if (!scopes.length) {
+    const selected = selectScopes();
+    if (!selected.length) {
       console.info('[Civitai Add Reactions] Hover a gallery post or model preview carousel first.');
       return;
     }
-    running = true;
+    const scopes = selected.filter(({ root }) => ![...activeRoots].some(active =>
+      active === root || active.contains(root) || root.contains(active)));
+    if (!scopes.length) return;
+    // Reserve all selected roots before the first await. Repeated hotkeys on
+    // an open post cannot start a second run on images queued later in it.
+    for (const { root } of scopes) activeRoots.add(root);
     const pageUrl = location.href;
     try {
       for (const { root, inViewport, mode } of scopes) {
@@ -307,7 +317,7 @@
     } catch (error) {
       console.error('[Civitai Add Reactions]', error);
     } finally {
-      running = false;
+      for (const { root } of scopes) activeRoots.delete(root);
     }
   }
 
@@ -319,5 +329,5 @@
     if (!event.repeat) void reactSelected();
   }, true);
 
-  console.log('Civitai Add Reactions 4.1 – Ctrl+Shift+S / Ctrl+Shift+X');
+  console.log('Civitai Add Reactions 4.2 – Ctrl+Shift+S / Ctrl+Shift+X');
 })();
