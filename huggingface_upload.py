@@ -10,7 +10,7 @@ import logging
 import hashlib
 import zipfile
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import List, Dict, Any, Optional, Tuple, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,6 +29,39 @@ def setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     fmt = "%(asctime)s | %(levelname)s | %(message)s"
     logging.basicConfig(level=level, format=fmt)
+
+def configure_http(force_ipv4: bool = False) -> None:
+    """Bound connection waits and optionally avoid unusable IPv6 routes."""
+    try:
+        import httpx
+        from huggingface_hub import set_client_factory
+        from huggingface_hub.utils._http import hf_request_event_hook
+    except ImportError:
+        if force_ipv4:
+            raise ConfigError("force_ipv4 requires huggingface_hub >= 1.0")
+        return
+
+    def request_hook(request):
+        hf_request_event_hook(request)
+        # Hub pagination explicitly passes timeout=None, overriding client defaults.
+        timeouts = request.extensions.setdefault("timeout", {})
+        if timeouts.get("connect") is None:
+            timeouts["connect"] = 10.0
+
+    def client_factory():
+        kwargs = {}
+        if force_ipv4:
+            kwargs["transport"] = httpx.HTTPTransport(local_address="0.0.0.0")
+        return httpx.Client(
+            follow_redirects=True,
+            timeout=httpx.Timeout(None, connect=10.0),
+            event_hooks={"request": [request_hook]},
+            **kwargs,
+        )
+
+    set_client_factory(client_factory)
+    if force_ipv4:
+        logging.info("Hugging Face HTTP connections: IPv4 (connect timeout: 10s)")
 
 # ------------- Utils -------------
 
@@ -66,7 +99,7 @@ def to_posix(*parts: str) -> str:
     return str(posix)
 
 def now_timestamp() -> str:
-    return datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
 def strip_components(path_str: str, n: int) -> str:
     """Strip first n components from a posix path string."""
@@ -403,7 +436,9 @@ class HFClient:
 
 def list_repo_paths(client: HFClient, repo_id: str, repo_type: str) -> Set[str]:
     try:
+        logging.info("Listing existing files in %s...", repo_id)
         files = client.api.list_repo_files(repo_id=repo_id, repo_type=repo_type, token=client.token)
+        logging.info("Repository listing complete: %s (%d files)", repo_id, len(files))
         return set(files)
     except Exception as e:
         logging.warning(f"list_repo_files failed for {repo_id}: {e}")
@@ -439,7 +474,7 @@ def build_repo_path(path_in_repository: str, preserve_tree: bool, source_base: s
         return to_posix(path_in_repository, local_file.name)
 
 def render_name_template(tpl: str, file: Optional[Path], source_base: Path, folder_name: Optional[str]) -> str:
-    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     d = {
         "timestamp": timestamp,
         "source_basename": source_base.name,
@@ -510,6 +545,7 @@ def build_zip_folders(folders, source_base, tmpdir, name_tpl, preserve_tree_insi
         name = render_name_template(name_tpl, None, source_base, folder_path.name)
         zpath = tmpdir / name
         zpath.parent.mkdir(parents=True, exist_ok=True)
+        logging.info("Creating archive: %s -> %s", folder_path, zpath)
         with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=level) as zf:
             for root, dirs, files in os.walk(folder_path):
                 for fn in files:
@@ -531,6 +567,7 @@ def build_zip_folders(folders, source_base, tmpdir, name_tpl, preserve_tree_insi
                     arc = strip_components(arc, strip_n) if strip_n else arc
                     arc = sanitize_arcname(arc, sanitize_cfg)
                     zf.write(fp, arcname=arc)
+        logging.info("Archive ready: %s (%s bytes)", zpath, format(zpath.stat().st_size, ","))
         out[str(folder_path)] = zpath
     return out
 
@@ -1200,6 +1237,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--dry_run", action="store_true", help="Do not perform network operations")
     ap.add_argument("--no_manifest", action="store_true", help="Do not write hf_upload_manifest_*.json report file")
     ap.add_argument("--verbose", action="store_true", help="Verbose logging")
+    ap.add_argument("--force_ipv4", action="store_true", help="Use IPv4 for Hugging Face HTTP connections")
 
     args = ap.parse_args(argv)
     setup_logging(args.verbose)
@@ -1227,6 +1265,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Normalize and validate
     try:
+        configure_http(args.force_ipv4 or bool(raw_cfg.get("force_ipv4", False)))
         cfg = normalize_config(raw_cfg)
     except ConfigError as e:
         logging.error(f"Config error: {e}")
@@ -1336,7 +1375,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if no_manifest:
         logging.info("Manifest/report file disabled; not writing hf_upload_manifest_*.json")
     else:
-        out_manifest = f"hf_upload_manifest_{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.json"
+        out_manifest = f"hf_upload_manifest_{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
         try:
             with open(out_manifest, "w", encoding="utf-8") as mf:
                 json.dump({"summary": summary, "plans": safe_plans}, mf, indent=2)

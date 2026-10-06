@@ -16,6 +16,7 @@ PyQt6
 PyQt6_sip
 scikit-image
 tiktoken
+emoji
 tqdm
 tweepy
 brotli

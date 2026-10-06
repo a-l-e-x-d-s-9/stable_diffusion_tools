@@ -9,6 +9,28 @@ pipreqs .
 pip install -r requirements.txt
 ```
 
+## Local settings and repository hygiene
+
+Runtime settings, credentials, downloaded models, and generated output stay local.
+Tracked `*.example.json` files provide portable configuration templates. Copy the
+template you need to its runtime filename, then edit that copy. For example:
+
+```bash
+cp -n huggingface_upload_settings.example.json huggingface_upload_settings.json
+cp -n download_config.example.json download_config.json
+```
+
+`cp -n` preserves an existing local file. The same convention applies to
+`auto_upload_settings`, `git_patch_config`, `caption_helper_settings`, and
+`configuration_settings`. GUI tools can also create their settings when saving.
+Keep token files in `private/` or outside the repository; the Hugging Face example
+uses the `HF_TOKEN`, `HF_TOKEN_MIRROR`, and `HF_TOKEN_SECONDARY` environment variables.
+Downloaded denoising weights belong in the ignored `denoise_models/` directory.
+
+See [the repository cleanup review](readme_files/repository_cleanup.md) for the
+file inventory, verification results, and remaining source changes to review.
+Ignore rules do not remove files from earlier Git commits.
+
 # My articles:
 * [Can we identify most Stable Diffusion Model issues with just a few circles?](https://www.reddit.com/r/StableDiffusion/comments/12u6c76/can_we_identify_most_stable_diffusion_model/?utm_source=share&utm_medium=web2x&context=3)
 * [Stable Diffusion 2.1 - What is a woman? NSFW Models comparison, no. 1.](https://www.reddit.com/r/unstable_diffusion/comments/zg27jv/stable_diffusion_21_what_is_a_woman_nsfw_models/?utm_source=share&utm_medium=web2x&context=3)
@@ -97,7 +119,7 @@ pip install -r requirements.txt
 ### TODO:
 1. Download by model URL or model name.
 ### Features:
-1. Download model from Civitai using list and configuration in the file: [download_config.json](download_config.json).
+1. Download models from Civitai using a local `download_config.json`, copied from [download_config.example.json](download_config.example.json).
 2. Can download multiple models at same time.
 
 ## [Exif Extract](exif_png_read.py)
@@ -137,6 +159,11 @@ pip install -r requirements.txt
 ## [Civitai Add Reactions (User Script)](civitai_add_reactions.user.js)
 ### Features:
 1. Add reactions to images on Civitai.
+
+## [Civitai Rating Highlighter (User Script)](civitai_rating_highlighter.user.js)
+
+Highlight rating badges and unrated media in your Civitai gallery. See the
+[installation and settings guide](readme_files/civitai_rating_highlighter.md).
 
 ## [Civitai Download Model Images](civitai_download_model_images.py)
 ### Features:
@@ -209,6 +236,43 @@ pip install -r requirements.txt
 ## [Grok Imagine Downloader](grok_imagine_downloader.js)
 ### Features:
 1. Download images from Grok.
+
+## [Grok Liked Images to Video](grok_liked_image_to_video_generator.user.js)
+
+Install this separate userscript in Tampermonkey, disable the older Image-to-Video
+Generator while using it, and open `https://grok.com/imagine/saved/liked`.
+Click **Start** to collect the gallery and process it from bottom to top,
+right to left within each row. **Pick start** lets you click a starting image;
+then **Start** includes that image and collects the posts above it.
+
+The script visits each queued post, opens **Make Video → Quick Animate**, waits
+15 seconds by default, clicks **Back once** for intermediate posts, and restores
+the **Liked** tab after the gallery loads. It leaves the final submitted post open
+(also when the submission limit is reached) while videos continue generating. The queue
+is collected before generation so cards moving to the top do not change the
+order. Collection waits for five stable passes at the gallery edge; if loading
+stalls longer than that, it may not include every post.
+
+Use the panel to adjust the wait or submission limit (0 means all), pause/resume,
+or reset. Progress survives reloads in the same tab. Attempts are recorded before
+clicking and are never retried automatically, including uncertain submissions.
+Reset clears that history. Counts represent submissions, not finished videos;
+increase the wait if Grok is busy. Visible quota/errors pause the run.
+
+The supplied compact cards use identical image markup for photos and videos.
+The script skips recognizable video elements in cards or the main post when
+**Skip posts displaying a video** is checked; thumbnail-only videos cannot be
+reliably identified. Drag the panel by its title bar; its position is remembered.
+Use the minus button to minimize it. A picked image has a purple **START** frame
+and a thumbnail in the panel; **Clear pick** restores automatic bottom selection.
+The **Back after** setting and countdown show the wait after submission.
+Generation changing the post URL or leaving a menu mounted does not interrupt
+the return to Liked. The script does not send Escape, use browser-history Back,
+or force a page reload. A stalled navigation pauses without repeating its click,
+including after Resume. Missing queued images are located by scrolling the gallery.
+
+Local browser checks: `node tests/test_grok_liked_video.cjs` (requires Chrome
+or Chromium; uses a simulated gallery, without contacting Grok).
 
 ## [HuggingFace Download](huggingface_download.py)
 ### Features:
@@ -367,6 +431,23 @@ pip install -r requirements.txt
 ## [Text Split](text_split.py)
 ### Features:
 1. Split text files.
+
+## [Count Text Tokens](gpt_count_tokens.py)
+
+Count tokens in a UTF-8 text file using a tiktoken encoding:
+
+```bash
+python3 gpt_count_tokens.py --file input.txt --encoding cl100k_base
+```
+
+## [Discord Emoji Converter](dicord_emoji_convert.py)
+
+Convert emoji shortcodes to Unicode, or use `--reverse` to convert them back.
+The existing script filename is `dicord_emoji_convert.py`.
+
+```bash
+printf ':smile:\n' | python3 dicord_emoji_convert.py
+```
 
 ## [Twitter Upload Images](twitter_upload_images.py)
 ### Features:
