@@ -440,13 +440,15 @@ Count tokens in a UTF-8 text file using a tiktoken encoding:
 python3 gpt_count_tokens.py --file input.txt --encoding cl100k_base
 ```
 
-## [Discord Emoji Converter](dicord_emoji_convert.py)
+## [Discord Emoji Converter](discord_emoji_convert.py)
 
 Convert emoji shortcodes to Unicode, or use `--reverse` to convert them back.
-The existing script filename is `dicord_emoji_convert.py`.
+Use `--custom map.json` for your own mappings, `--strict` to mark unknown
+shortcodes, and `--output output.txt` to save results from files, stdin, or an
+interactive session.
 
 ```bash
-printf ':smile:\n' | python3 dicord_emoji_convert.py
+printf ':smile:\n' | python3 discord_emoji_convert.py
 ```
 
 ## [Twitter Upload Images](twitter_upload_images.py)
