@@ -50,6 +50,11 @@ Ignore rules do not remove files from earlier Git commits.
 
 # Scripts:
 
+## [Face extraction](crop_to_face_improved.py)
+
+Extract faces with YuNet, automatic CUDA acceleration, and FaceMesh verification
+enabled by default. See [setup and accuracy/speed controls](readme_files/face_cropping.md).
+
 ##  [Caption Helper:](captions_helper.py)
 ### Features:
 1. Visual preview of images.

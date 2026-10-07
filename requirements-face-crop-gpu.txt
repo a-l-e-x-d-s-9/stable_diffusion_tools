@@ -1,0 +1,5 @@
+# Matches the existing PyTorch 2.5 / CUDA 12.4 / cuDNN 9 environment.
+# Importing torch lets ONNX Runtime reuse its CUDA libraries.
+# Install only ONE ONNX Runtime distribution in an environment.
+-r requirements-face-crop.txt
+onnxruntime-gpu==1.20.0

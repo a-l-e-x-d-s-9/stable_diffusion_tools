@@ -1,0 +1,5 @@
+# Minimal CPU setup; the main repository requirements cover other tools too.
+numpy>=1.26,<2
+opencv-python>=4.8,<5
+mediapipe==0.10.21
+tqdm>=4
