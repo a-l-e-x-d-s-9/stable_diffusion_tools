@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta Scan with Full Caption — FAST (hires DOM, minimal changes)
 // @namespace    http://tampermonkey.net/
-// @version      0.45
-// @description  Fast image downloads with captions and optional video downloads
+// @version      0.48
+// @description  Fast image downloads with captions
 // @author       You
 // @match        https://www.instagram.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=instagram.com
@@ -26,13 +26,11 @@
   'use strict';
 
   // ---- minimal config (keep it fast) ----
-  const DEBUG = false;
   const TARGET_SIZE = 1080;           // prefer >=1080 candidates
   const MIN_MEDIA_W = 140, MIN_MEDIA_H = 140;
 
   // ---- persistent state ----
   let downloadedImages = JSON.parse(GM_getValue('downloadedImages', '{}'));
-  let downloadedVideos = JSON.parse(GM_getValue('downloadedVideos', '{}'));
   let startSlideshow = false;
   let stopSlideshow  = false;
 
@@ -43,15 +41,81 @@
   let downloadStatus = 'idle';
   let statusBadge = null;
   let limitNotificationShown = false;
-  let unsupportedVideoNoticeShown = false;
 
   // caption .txt toggle (persistent; default ON)
   let SAVE_CAPTIONS = GM_getValue('save_captions', true);
-  // Video downloads are opt-in and persist across page loads.
-  let DOWNLOAD_VIDEOS = GM_getValue('download_videos', false);
+
+  // Optional direct folder writes in Chromium. Browser-default downloads remain the default.
+  let selectedDownloadFolder = null;
+  let folderWriteQueue = Promise.resolve();
+
+  function saveToSelectedFolder(blob, filename, directory = selectedDownloadFolder){
+    const save = async () => {
+      if ((await directory.queryPermission({mode: 'readwrite'})) !== 'granted'){
+        throw new Error('Folder permission expired. Choose the download folder again.');
+      }
+      // Match the browser's non-destructive naming behavior when a file already exists.
+      const dot = filename.lastIndexOf('.');
+      const stem = dot > 0 ? filename.slice(0, dot) : filename;
+      const ext = dot > 0 ? filename.slice(dot) : '';
+      let candidate = filename;
+      for (let suffix = 1; ; suffix++){
+        try { await directory.getFileHandle(candidate); }
+        catch (error) {
+          if (error.name === 'NotFoundError') break;
+          throw error;
+        }
+        candidate = `${stem} (${suffix})${ext}`;
+      }
+      const handle = await directory.getFileHandle(candidate, {create: true});
+      const writable = await handle.createWritable();
+      try { await writable.write(blob); await writable.close(); }
+      catch (error) { await writable.abort().catch(() => {}); throw error; }
+    };
+    const pending = folderWriteQueue.catch(() => {}).then(save);
+    folderWriteQueue = pending;
+    return pending;
+  }
+
+  function folderSaveError(error){
+    console.error('[InstaFast] Folder save failed', error);
+    stopDownloadMode('stopped');
+    GM_notification({title: 'InstaFast — folder save failed', text: error.message, timeout: 5000});
+  }
+
+  function showFolderPickerButton(){
+    if (typeof window.showDirectoryPicker !== 'function'){
+      window.alert('Direct folder selection requires a Chromium browser. You can change the default download folder in your browser settings.');
+      return;
+    }
+    stopDownloadMode('stopped');
+    document.getElementById('instafast-folder-picker')?.remove();
+    const box = document.createElement('div');
+    box.id = 'instafast-folder-picker';
+    Object.assign(box.style, {position: 'fixed', top: '75px', right: '16px', zIndex: '2147483647',
+      padding: '12px', background: '#202b38', borderRadius: '8px', color: '#fff', font: '14px system-ui'});
+    const choose = document.createElement('button');
+    choose.textContent = 'Choose image / caption folder…';
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    choose.onclick = async () => {
+      try {
+        // Invoke directly from a page button to preserve the required user gesture.
+        const directory = await window.showDirectoryPicker({id: 'instafast-downloads', mode: 'readwrite'});
+        await folderWriteQueue.catch(() => {});
+        selectedDownloadFolder = directory;
+        box.remove();
+        GM_notification({title: 'InstaFast', text: `Images and captions will save to ${directory.name} in this tab.`, timeout: 4000});
+      } catch (error) {
+        if (error.name !== 'AbortError') folderSaveError(error);
+      }
+    };
+    cancel.onclick = () => box.remove();
+    box.append(choose, cancel);
+    document.body.appendChild(box);
+  }
 
   // ====== helpers ======
-  const log = (...a)=> DEBUG && console.log('[InstaFast]', ...a);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   function ensureStatusBadge(){
@@ -83,7 +147,7 @@
       stopped: 'Stopped',
       limit: 'Limit reached'
     };
-    badge.textContent = `InstaFast — ${labels[status] || 'Ready'}: ${sessionDownloadCount.toLocaleString()} / ${MAXIMUM_DOWNLOADS.toLocaleString()} media (videos ${DOWNLOAD_VIDEOS ? 'ON' : 'OFF'})`;
+    badge.textContent = `InstaFast — ${labels[status] || 'Ready'}: ${sessionDownloadCount.toLocaleString()} / ${MAXIMUM_DOWNLOADS.toLocaleString()} images`;
     badge.style.border = status === 'running' ? '1px solid #42d392' :
                          status === 'limit' ? '1px solid #ffb020' : '1px solid #777';
   }
@@ -99,7 +163,7 @@
     if (limitNotificationShown) return;
     limitNotificationShown = true;
     GM_notification({
-      text: `Downloaded ${sessionDownloadCount.toLocaleString()} / ${MAXIMUM_DOWNLOADS.toLocaleString()} media files. Download mode stopped.`,
+      text: `Downloaded ${sessionDownloadCount.toLocaleString()} / ${MAXIMUM_DOWNLOADS.toLocaleString()} images. Download mode stopped.`,
       title: 'InstaFast — download limit reached',
       timeout: 4000
     });
@@ -154,178 +218,6 @@
     return true;
   }
 
-  function isLikelyVideo(video){
-    if (!isVisible(video)) return false;
-    const r = video.getBoundingClientRect();
-    return r.width >= MIN_MEDIA_W && r.height >= MIN_MEDIA_H;
-  }
-
-  function isDirectVideoUrl(raw){
-    try {
-      const u = new URL(raw);
-      return u.protocol === 'https:' &&
-        /(?:^|\.)(?:cdninstagram\.com|fbcdn\.net|instagram\.com)$/.test(u.hostname) &&
-        !/\.m3u8$/i.test(u.pathname);
-    } catch { return false; }
-  }
-
-  function videoUrl(video){
-    const candidates = [video.currentSrc, video.src,
-      ...[...video.querySelectorAll('source[src]')].map(source => source.src)];
-    return candidates.find(isDirectVideoUrl) || '';
-  }
-
-  function postInfo(container){
-    const links = [];
-    const timeLink = container.querySelector('time')?.closest('a');
-    if (timeLink) links.push(timeLink.href);
-    for (const a of container.querySelectorAll('a[href*="/p/"], a[href*="/reel/"], a[href*="/reels/"]')){
-      links.push(a.href);
-    }
-    links.push(location.href);
-    for (const raw of links){
-      try {
-        const u = new URL(raw, location.origin);
-        if (u.origin !== location.origin) continue;
-        const match = u.pathname.match(/^\/(p|reel|reels)\/([A-Za-z0-9_-]+)(?:\/|$)/);
-        if (match) return {
-          code: match[2],
-          url: location.origin + '/' + (match[1] === 'reels' ? 'reel' : match[1]) + '/' + match[2] + '/'
-        };
-      } catch {}
-    }
-    return null;
-  }
-
-  function videoEntry(media, index){
-    const variants = [];
-    if (Array.isArray(media.video_versions)){
-      for (const version of media.video_versions){
-        if (isDirectVideoUrl(version.url)){
-          variants.push({
-            url: version.url,
-            pixels: (Number(version.width) || 0) * (Number(version.height) || 0)
-          });
-        }
-      }
-    }
-    if (isDirectVideoUrl(media.video_url)) variants.push({url: media.video_url, pixels: 0});
-    if (!variants.length) return null;
-    variants.sort((a, b) => b.pixels - a.pixels);
-    const posters = [
-      media.display_url,
-      ...((media.image_versions2 && media.image_versions2.candidates) || []).map(c => c.url)
-    ].filter(Boolean);
-    return {url: variants[0].url, index, posters};
-  }
-
-  function postVideosFromData(root, code){
-    const stack = [root];
-    let scanned = 0;
-    while (stack.length && scanned++ < 100000){
-      const node = stack.pop();
-      if (typeof node === 'string'){
-        if (node.includes(code) && (node.includes('video_versions') || node.includes('video_url')) && /^[\s]*[\[{]/.test(node)){
-          try { stack.push(JSON.parse(node)); } catch {}
-        }
-        continue;
-      }
-      if (!node || typeof node !== 'object') continue;
-      if (node.code === code || node.shortcode === code){
-        const children = Array.isArray(node.carousel_media) ? node.carousel_media :
-          (node.edge_sidecar_to_children && node.edge_sidecar_to_children.edges || [])
-            .map(edge => edge.node).filter(Boolean);
-        if (children.length){
-          const entries = children.map((child, index) => videoEntry(child, index)).filter(Boolean);
-          if (entries.length) return entries;
-        }
-        const single = videoEntry(node, 0);
-        if (single) return [single];
-      }
-      if (Array.isArray(node)){
-        for (const child of node) stack.push(child);
-      } else {
-        for (const child of Object.values(node)) stack.push(child);
-      }
-    }
-    return [];
-  }
-
-  function postVideosFromScripts(scripts, code){
-    for (const script of scripts){
-      const source = script.textContent || '';
-      if (!source.includes(code) ||
-          (!source.includes('video_versions') && !source.includes('video_url'))) continue;
-      try {
-        const entries = postVideosFromData(JSON.parse(source), code);
-        if (entries.length) return entries;
-      } catch {}
-    }
-    return [];
-  }
-
-  const postVideoCache = new Map();
-  async function postVideos(info){
-    const cached = postVideoCache.get(info.code);
-    if (cached && cached.hasData && Date.now() - cached.time < 120000) return cached.promise;
-    const embedded = postVideosFromScripts(document.scripts, info.code);
-    if (embedded.length){
-      const promise = Promise.resolve(embedded);
-      postVideoCache.set(info.code, {time: Date.now(), promise, hasData: true});
-      return promise;
-    }
-    if (cached && Date.now() - cached.time < 120000) return cached.promise;
-    const promise = (async () => {
-      try {
-        const response = await fetch(info.url, {credentials: 'include'});
-        if (!response.ok) return [];
-        const page = new DOMParser().parseFromString(await response.text(), 'text/html');
-        return postVideosFromScripts(page.scripts, info.code);
-      } catch (error) {
-        log('Could not load post video data', error);
-        return [];
-      }
-    })();
-    postVideoCache.set(info.code, {time: Date.now(), promise});
-    return promise;
-  }
-
-  function mediaPath(raw){
-    try {
-      const u = new URL(raw);
-      return u.origin + u.pathname;
-    } catch { return ''; }
-  }
-
-  function videoEntryForElement(entries, video){
-    if (entries.length === 1) return entries[0];
-
-    const slide = typeof video.closest === 'function' ? video.closest('li') : null;
-    const poster = video.poster || (slide && slide.querySelector('img')?.currentSrc) || '';
-    const posterPath = mediaPath(poster);
-    if (posterPath){
-      const matches = entries.filter(entry => entry.posters.some(url => mediaPath(url) === posterPath));
-      if (matches.length === 1) return matches[0];
-    }
-
-    if (slide && slide.parentElement){
-      const siblings = [...slide.parentElement.children].filter(el => el.tagName === 'LI');
-      const index = siblings.indexOf(slide);
-      const match = entries.find(entry => entry.index === index);
-      if (match) return match;
-    }
-    return null;
-  }
-
-  async function resolveVideoUrl(video, container){
-    const direct = videoUrl(video);
-    if (direct) return direct;
-    const info = postInfo(container);
-    if (!info) return '';
-    const entries = await postVideos(info);
-    return videoEntryForElement(entries, video)?.url || '';
-  }
-
   function getCarouselNextButton(container){
     return (
       container.querySelector('button[aria-label="Next"]:not([disabled])') ||
@@ -336,10 +228,7 @@
   }
 
   function getActiveMediaKey(container){
-    const media = [
-      ...[...container.querySelectorAll('picture img, img')].filter(isLikelyMedia),
-      ...[...container.querySelectorAll('video')].filter(isLikelyVideo)
-    ];
+    const media = [...container.querySelectorAll('picture img, img')].filter(isLikelyMedia);
     if (!media.length) return '';
     const scope = container.getBoundingClientRect();
     const cx = scope.left + scope.width/2, cy = scope.top + scope.height/2;
@@ -351,9 +240,8 @@
       return distance(a) - distance(b);
     });
     const el = media[0];
-    const isVideo = el.tagName === 'VIDEO';
-    const url = isVideo ? (el.currentSrc || el.src || el.poster) : bestHiResFromImg(el);
-    return url ? `${isVideo ? 'video' : 'image'}:${keyFor(url)}` : '';
+    const url = bestHiResFromImg(el);
+    return url ? `image:${keyFor(url)}` : '';
   }
 
   function keyFor(url){
@@ -432,6 +320,7 @@
 
     // Helper: save a Blob without blocking the slideshow
     function saveBlob(blob, filename, revokeAfterMs = 60000){
+        if (selectedDownloadFolder) return saveToSelectedFolder(blob, filename);
         const objUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = objUrl;
@@ -446,6 +335,20 @@
     // Fast, non-blocking downloader with smart fallback.
     // Always resolves immediately (true) after *starting* a download.
     function downloadImage(url, filename){
+        if (selectedDownloadFolder){
+            const directory = selectedDownloadFolder;
+            return new Promise(resolve => {
+                try {
+                    GM_xmlhttpRequest({method: 'GET', url, responseType: 'blob', timeout: 30000,
+                        onload: async res => {
+                            if (!(res.status >= 200 && res.status < 300 && res.response)) return resolve(false);
+                            try { await saveToSelectedFolder(res.response, filename, directory); resolve(true); }
+                            catch (error) { folderSaveError(error); resolve(false); }
+                        },
+                        onerror: () => resolve(false), ontimeout: () => resolve(false)});
+                } catch (error) { folderSaveError(error); resolve(false); }
+            });
+        }
         const host = (() => { try { return new URL(url).hostname; } catch { return ''; } })();
 
         // fbcdn/cdninstagram frequently trigger GM_download "not_whitelisted".
@@ -513,44 +416,6 @@
     catch{ const p=url.split('/'); return (p[p.length-1]||'image').split('?')[0]; }
   }
 
-  function getVideoFileName(url){
-    const name = getFileName(url);
-    return /\.(?:mp4|webm|mov)$/i.test(name) ? name : `${name.replace(/\.[^/.]+$/, '') || 'video'}.mp4`;
-  }
-
-  function downloadVideo(url, filename){
-    return new Promise(resolve => {
-      if (typeof GM_xmlhttpRequest !== 'function') return resolve(false);
-      try {
-        GM_xmlhttpRequest({
-          method: 'GET',
-          url,
-          responseType: 'blob',
-          timeout: 180000,
-          onload: res => {
-            if (res.status >= 200 && res.status < 300 && res.response && res.response.size > 0){
-              try {
-                saveBlob(res.response, filename, 300000);
-                resolve(true);
-              } catch (e) {
-                console.warn('[InstaFast] Could not save video', e);
-                resolve(false);
-              }
-            } else {
-              console.warn('[InstaFast] Video XHR status', res.status, url);
-              resolve(false);
-            }
-          },
-          onerror: () => { console.warn('[InstaFast] Video XHR error', url); resolve(false); },
-          ontimeout: () => { console.warn('[InstaFast] Video XHR timeout', url); resolve(false); }
-        });
-      } catch (e) {
-        console.warn('[InstaFast] Video XHR threw', e);
-        resolve(false);
-      }
-    });
-  }
-
   // ====== core flow ======
     let isRunning = false;
     async function startAsyncSlideshow() {
@@ -573,7 +438,6 @@
         if (isRunning) return;
         sessionDownloadCount = 0;
         limitNotificationShown = false;
-        unsupportedVideoNoticeShown = false;
         startSlideshow = true;
         stopSlideshow = false;
         updateDownloadStatus('running');
@@ -617,20 +481,16 @@
 
         // Strict scan (fast path - current behavior)
         let imgs = [...container.querySelectorAll("picture img, img")].filter(isLikelyMedia);
-        let videos = DOWNLOAD_VIDEOS
-            ? [...container.querySelectorAll('video')].filter(isLikelyVideo)
-            : [];
 
         // If strict scan found nothing, try a tiny rescue (lazyload race / small thumbs)
-        if (imgs.length === 0 && videos.length === 0){
-            for (let tries = 0; tries < 3 && imgs.length === 0 && videos.length === 0; tries++){
+        if (imgs.length === 0){
+            for (let tries = 0; tries < 3 && imgs.length === 0; tries++){
                 await sleep(120);
                 imgs = [...container.querySelectorAll("picture img, img")].filter(isMaybeMedia);
-                if (DOWNLOAD_VIDEOS) videos = [...container.querySelectorAll('video')].filter(isLikelyVideo);
             }
         }
 
-        if (imgs.length === 0 && videos.length === 0) return;
+        if (imgs.length === 0) return;
 
         // De-dupe within post by normalized key
         const seenLocal = new Set();
@@ -689,56 +549,15 @@
                 console.warn('[InstaFast] Download failed, will retry if seen again:', url);
             }
         }
-
-        for (const video of videos){
-            if (!DOWNLOAD_VIDEOS || stopSlideshow) break;
-            if (sessionDownloadCount >= MAXIMUM_DOWNLOADS){
-                stopAtDownloadLimit();
-                break;
-            }
-            let url = await resolveVideoUrl(video, container);
-            for (let tries = 0; !url && tries < 3; tries++){
-                await sleep(150);
-                url = await resolveVideoUrl(video, container);
-            }
-            if (!url){
-                if (!unsupportedVideoNoticeShown){
-                    unsupportedVideoNoticeShown = true;
-                    GM_notification({
-                        text: 'Could not find a downloadable URL for this video in the post data.',
-                        title: 'InstaFast — video skipped',
-                        timeout: 4000
-                    });
-                }
-                continue;
-            }
-            const parsedUrl = new URL(url);
-            const key = 'video:' + parsedUrl.origin + parsedUrl.pathname;
-            if (seenLocal.has(key) || downloadedVideos[key] || downloadedVideos[url]) continue;
-            seenLocal.add(key);
-
-            const videoName = getVideoFileName(url);
-            const ok = await downloadVideo(url, videoName);
-            if (!ok) continue;
-            if (SAVE_CAPTIONS && !captionSaved && caption && caption !== "Caption not found"){
-                captionSaved = true;
-                downloadTextFile(videoName.replace(/\.[^/.]+$/, ".txt"), caption);
-            }
-            downloadedVideos[key] = true;
-            downloadedVideos[url] = true;
-            GM_setValue('downloadedVideos', JSON.stringify(downloadedVideos));
-            sessionDownloadCount++;
-            updateDownloadStatus(downloadStatus);
-            if (sessionDownloadCount >= MAXIMUM_DOWNLOADS){
-                stopAtDownloadLimit();
-                break;
-            }
-        }
     }
 
 
     function downloadTextFile(fileName, content) {
         const blob = new Blob([content], { type: 'text/plain' });
+        if (selectedDownloadFolder){
+            saveToSelectedFolder(blob, fileName).catch(folderSaveError);
+            return;
+        }
         const url  = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -755,11 +574,6 @@
     GM_setValue('downloadedImages', JSON.stringify(downloadedImages));
   }
 
-  function clearVideoList() {
-    downloadedVideos = {};
-    GM_setValue('downloadedVideos', JSON.stringify(downloadedVideos));
-  }
-
   // hotkeys
   window.addEventListener('keydown', (event) => {
     if (!event.ctrlKey || !event.shiftKey) return;
@@ -771,6 +585,12 @@
   });
 
   // menu
+  GM_registerMenuCommand('Choose image / caption download folder (this tab)', showFolderPickerButton);
+  GM_registerMenuCommand('Use browser default download folder', () => {
+    stopDownloadMode('stopped');
+    selectedDownloadFolder = null;
+    GM_notification({title: 'InstaFast', text: 'Using the browser default download folder.', timeout: 3000});
+  });
   GM_registerMenuCommand('Start Downloading [CTRL+SHIFT+S]', () => {
     startDownloadMode();
   });
@@ -778,7 +598,7 @@
     stopDownloadMode();
   });
   GM_registerMenuCommand(`Set maximum downloads (currently ${MAXIMUM_DOWNLOADS})`, () => {
-    const answer = window.prompt('Maximum media files to download per run:', String(MAXIMUM_DOWNLOADS));
+    const answer = window.prompt('Maximum images to download per run:', String(MAXIMUM_DOWNLOADS));
     if (answer === null) return;
     const parsed = Number(answer.trim());
     if (!Number.isInteger(parsed) || parsed < 1){
@@ -811,19 +631,5 @@
       });
     }
   );
-  GM_registerMenuCommand(
-    `Video downloads: ${DOWNLOAD_VIDEOS ? 'ON' : 'OFF'} (click to toggle)`,
-    () => {
-      DOWNLOAD_VIDEOS = !DOWNLOAD_VIDEOS;
-      GM_setValue('download_videos', DOWNLOAD_VIDEOS);
-      updateDownloadStatus(downloadStatus);
-      GM_notification({
-        text: `Video downloads ${DOWNLOAD_VIDEOS ? 'ENABLED' : 'DISABLED'} (refresh to update menu text)`,
-        title: 'InstaFast',
-        timeout: 2500
-      });
-    }
-  );
   GM_registerMenuCommand('Clear Image List', clearList);
-  GM_registerMenuCommand('Clear Video List', clearVideoList);
 })();
