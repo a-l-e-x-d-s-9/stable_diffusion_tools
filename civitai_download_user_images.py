@@ -18,6 +18,17 @@ class CivitaiError(Exception):
 
 
 def load_api_key(json_path):
+    # Prefer an environment variable so the key never has to be persisted in
+    # a plaintext file on disk.
+    env_api_key = os.environ.get("CIVITAI_API_KEY")
+    if env_api_key:
+        return env_api_key
+
+    if not json_path:
+        raise CivitaiError(
+            "No API key found. Set the CIVITAI_API_KEY environment variable or pass --api_key_json."
+        )
+
     if not os.path.exists(json_path):
         raise CivitaiError(f"File not found: {json_path}")
 
@@ -309,8 +320,11 @@ def build_parser():
     parser.add_argument(
         "--api_key_json",
         type=str,
-        required=True,
-        help="Path to the JSON file containing the API key under the key 'api_key'.",
+        required=False,
+        help=(
+            "Path to the JSON file containing the API key under the key 'api_key'. "
+            "Optional if the CIVITAI_API_KEY environment variable is set."
+        ),
     )
     parser.add_argument(
         "--mode",
