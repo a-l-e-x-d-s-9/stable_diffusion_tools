@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vast.ai Real Cost (1h / 2h / 4h / 8h + Bandwidth)
 // @namespace    https://cloud.vast.ai/
-// @version      1.8.2
-// @description  Show 1h / 2h / 4h / 8h + transfer costs in a compact 5-row column integrated into marketplace cards, with persistent settings.
+// @version      1.9.0
+// @description  Show 1h / 2h / 4h / 8h + transfer costs in a compact column, highlighting the three cheapest 2h and 4h options, with persistent settings.
 // @match        https://cloud.vast.ai/create/*
 // @match        https://cloud.vast.ai/create
 // @run-at       document-start
@@ -170,6 +170,13 @@
       text-align:left;
     }
     .results-table [data-aid="RowElement"] .vrc-data .vrc-value { font-size:13px; }
+    /* Paint only the number's existing box; do not change any layout metrics. */
+    .results-table [data-aid="RowElement"] .vrc-costs[data-vrc-rank-2="1"] .vrc-value[data-vrc-hours="2"] { background-color:rgba(255, 213, 0, .55); }
+    .results-table [data-aid="RowElement"] .vrc-costs[data-vrc-rank-2="2"] .vrc-value[data-vrc-hours="2"] { background-color:rgba(255, 213, 0, .35); }
+    .results-table [data-aid="RowElement"] .vrc-costs[data-vrc-rank-2="3"] .vrc-value[data-vrc-hours="2"] { background-color:rgba(255, 213, 0, .18); }
+    .results-table [data-aid="RowElement"] .vrc-costs[data-vrc-rank-4="1"] .vrc-value[data-vrc-hours="4"] { background-color:rgba(46, 204, 113, .55); }
+    .results-table [data-aid="RowElement"] .vrc-costs[data-vrc-rank-4="2"] .vrc-value[data-vrc-hours="4"] { background-color:rgba(46, 204, 113, .35); }
+    .results-table [data-aid="RowElement"] .vrc-costs[data-vrc-rank-4="3"] .vrc-value[data-vrc-hours="4"] { background-color:rgba(46, 204, 113, .18); }
     .results-table [data-aid="RowElement"] .vrc-costs.vrc-pending {
       color:inherit;
       opacity:.65;
@@ -190,7 +197,7 @@
     return null;
   }
 
-  function updateCard(card) {
+  function updateCard(card, candidates) {
     const idText = card.querySelector('[data-aid="instance_id"]')?.textContent || '';
     const id = Number(idText.match(/#\s*(\d+)/)?.[1]);
     const priceBox = findPriceContainer(card);
@@ -216,13 +223,16 @@
     if (!offer) {
       markup = '<span class="vrc-note">Bandwidth: loading…</span>';
       output.classList.add('vrc-pending');
+      output.removeAttribute('data-vrc-rank-2');
+      output.removeAttribute('data-vrc-rank-4');
     } else {
       output.classList.remove('vrc-pending');
       const traffic = settings.download * offer.down + settings.upload * offer.up;
       markup = [1, 2, 4, 8].map(h => `<div class="vrc-row"><span class="vrc-duration">${h}h total</span>` +
-        `<span class="vrc-value">${money(hourly * h + traffic)}</span></div>`).join('') +
+        `<span class="vrc-value" data-vrc-hours="${h}">${money(hourly * h + traffic)}</span></div>`).join('') +
         `<div class="vrc-row vrc-data"><span class="vrc-duration">Data (once)</span>` +
         `<span class="vrc-value">${money(traffic)}</span></div>`;
+      candidates.push({ output, hourly, traffic });
       output.title = `${settings.download} GB download × $${(offer.down*1000).toFixed(3)}/TB + ` +
         `${settings.upload} GB upload × $${(offer.up*1000).toFixed(3)}/TB = ${money(traffic)} transfer. ` +
         'Totals = advertised hourly price × hours + one-time transfer.';
@@ -291,10 +301,31 @@
 
   }
 
+  function highlightCheapest(candidates) {
+    // Rank only offers currently displayed, using unrounded totals including
+    // bandwidth. Equal costs keep page order, so at most three offers win.
+    const displayed = candidates.filter(({ output }) =>
+      output.getClientRects().length && getComputedStyle(output).visibility !== 'hidden');
+    for (const hours of [2, 4]) {
+      const cheapest = [...displayed].sort((a, b) =>
+        (a.hourly * hours + a.traffic) - (b.hourly * hours + b.traffic)).slice(0, 3);
+      for (const { output } of candidates) {
+        const index = cheapest.findIndex(candidate => candidate.output === output);
+        const attribute = `data-vrc-rank-${hours}`;
+        // Keep ranks on the outer column so the price markup stays stable.
+        if (index >= 0) output.setAttribute(attribute, String(index + 1));
+        else output.removeAttribute(attribute);
+      }
+    }
+  }
+
   function render() {
     if (!document.body) return;
     ensureStyles();
-    document.querySelectorAll('.results-table [data-aid="RowElement"]').forEach(updateCard);
+    const candidates = [];
+    document.querySelectorAll('.results-table [data-aid="RowElement"]')
+      .forEach(card => updateCard(card, candidates));
+    highlightCheapest(candidates);
   }
   function scheduleRender() {
     if (scheduled) return;
@@ -364,10 +395,12 @@
     observer = new MutationObserver((mutations) => {
       // Avoid looping on DOM changes made by our own price elements.
       const relevant = mutations.some(m => {
-        if (m.type === 'characterData') return !m.target.parentElement?.closest('.vrc-costs');
-        return Array.from(m.addedNodes).some(n => n.nodeType === 1 &&
-          !n.matches?.('.vrc-costs, #vrc-dialog, #vrc-style') &&
-          !n.closest?.('.vrc-costs, #vrc-dialog'));
+        const target = m.target.nodeType === Node.ELEMENT_NODE ? m.target : m.target.parentElement;
+        if (target?.closest('.vrc-costs, #vrc-dialog, #vrc-style')) return false;
+        if (m.type === 'characterData') return true;
+        return [...m.addedNodes, ...m.removedNodes].some(n =>
+          n.nodeType === Node.TEXT_NODE || (n.nodeType === Node.ELEMENT_NODE &&
+          !n.matches?.('.vrc-costs, #vrc-dialog, #vrc-style')));
       });
       if (relevant) scheduleRender();
     });
