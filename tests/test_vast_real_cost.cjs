@@ -162,6 +162,62 @@ const server = http.createServer((req, res) => {
       await until(`document.querySelectorAll('.vrc-hide-machine').length === 5`);
       assert.equal(await evaluate(`document.querySelectorAll('.vrc-machine-collapsed').length`), 0);
       assert.deepEqual(await evaluate(`JSON.parse(localStorage.getItem('${stored}'))`), ['300001']);
+      if (mode === 'gm') {
+        assert.equal(await evaluate(`document.querySelector('.vrc-refresh-enabled').checked`), true);
+        assert.equal(await evaluate(`document.querySelector('.vrc-refresh-seconds').value`), '15');
+        assert.deepEqual(await evaluate(`[...autoRefreshTimers.values()].map(timer => timer.delay)`), [15000]);
+        await evaluate(`const interval = document.querySelector('.vrc-refresh-seconds');
+          interval.value = '17'; interval.dispatchEvent(new Event('change', {bubbles:true}));
+          document.querySelector('.vrc-hide-machine').click()`);
+        await until(`document.querySelectorAll('.vrc-machine-collapsed').length === 2`);
+        const previousTotal = await evaluate(`document.querySelectorAll('.vrc-costs')[2].textContent`);
+        assert.deepEqual(await evaluate(`[...autoRefreshTimers.values()].map(timer => timer.delay)`), [17000]);
+        await evaluate('fireAutoRefresh()');
+        await until(`refreshRequests === 1 && document.querySelector('.vrc-refresh-status').textContent.startsWith('Updated')`);
+        await until(`document.querySelectorAll('.vrc-machine-collapsed').length === 2`);
+        assert.notEqual(await evaluate(`document.querySelectorAll('.vrc-costs')[2].textContent`), previousTotal,
+          'Refreshing must update the native offers and cost calculations');
+        assert.equal(await evaluate(`[...document.querySelectorAll('.vrc-machine-collapsed')]
+          .some(row => row.querySelector('.vrc-costs')?.hasAttribute('data-vrc-rank-2'))`), false);
+        assert.deepEqual(await evaluate('lastRefreshFilter'), {queryKey:['bundles'], type:'active'});
+        assert.deepEqual(await evaluate('lastRefreshOptions'), {throwOnError:true});
+        // Manual refresh remains available when automatic refresh is disabled.
+        await evaluate(`document.querySelector('.vrc-refresh-enabled').click();
+          window.refreshHold = true; document.querySelector('.vrc-refresh-now').click()`);
+        await until(`refreshRequests === 2 && document.querySelector('.vrc-refresh-now').disabled`);
+        assert.equal(await evaluate('autoRefreshTimers.size'), 0);
+        await evaluate(`document.querySelector('.vrc-refresh-now').click()`);
+        assert.equal(await evaluate('refreshRequests'), 2, 'Prevent overlapping refreshes');
+        await evaluate(`window.refreshHold = false; releaseRefresh()`);
+        await until(`!document.querySelector('.vrc-refresh-now').disabled`);
+        // Failures must release the button and allow a successful retry.
+        await evaluate(`window.refreshFailure = true; document.querySelector('.vrc-refresh-now').click()`);
+        await until(`document.querySelector('.vrc-refresh-status').textContent === 'Refresh failed. Try again.'`);
+        assert.equal(await evaluate('refreshRequests'), 3);
+        await evaluate(`window.refreshFailure = false; document.querySelector('.vrc-refresh-now').click()`);
+        await until(`refreshRequests === 4 && document.querySelector('.vrc-refresh-status').textContent.startsWith('Updated')`);
+        await evaluate(`window.savedClient = window.__TANSTACK_QUERY_CLIENT__;
+          delete window.__TANSTACK_QUERY_CLIENT__;
+          document.querySelector('.vrc-refresh-now').click()`);
+        await until(`document.querySelector('.vrc-refresh-status').textContent === 'Search not ready. Try again.'`);
+        assert.equal(await evaluate('refreshRequests'), 4, 'Do not bypass Vast when its query is unavailable');
+        await evaluate(`window.__TANSTACK_QUERY_CLIENT__ = savedClient;
+          document.querySelector('.vrc-refresh-enabled').click();
+          Object.defineProperty(document, 'visibilityState', {configurable:true, value:'hidden'});
+          fireAutoRefresh()`);
+        assert.equal(await evaluate('refreshRequests'), 4, 'Skip background refreshes');
+        await evaluate(`delete document.visibilityState;
+          Object.defineProperty(navigator, 'onLine', {configurable:true, value:false}); fireAutoRefresh()`);
+        assert.equal(await evaluate('refreshRequests'), 4, 'Skip offline refreshes');
+        await evaluate(`delete navigator.onLine; fireAutoRefresh()`);
+        await until(`refreshRequests === 5 && document.querySelector('.vrc-refresh-status').textContent.startsWith('Updated')`);
+        await evaluate(`document.querySelector('.vrc-refresh-enabled').click()`);
+        await cdp('Page.reload', {}, sessionId);
+        await until(`document.querySelector('.vrc-refresh-seconds')?.value === '17'`);
+        assert.equal(await evaluate(`document.querySelector('.vrc-refresh-enabled').checked`), false);
+        assert.equal(await evaluate('autoRefreshTimers.size'), 0, 'Remember the disabled setting after reload');
+        console.log('PASS refresh: 15s default, saved interval/toggle, native data updates, hidden ranks, manual refresh, concurrency, errors, background/offline');
+      }
       await cdp('Target.disposeBrowserContext', { browserContextId });
       console.log(`PASS ${mode}: machine hiding, ranking, layout, rerenders, row reuse, persistence, unhide, stable DOM`);
     }

@@ -20,6 +20,42 @@
 </div>
 <div class="results-table"></div>
 <script>
+  // Control the userscript timer without waiting 15 seconds per assertion.
+  const nativeTimeout = window.setTimeout, nativeClearTimeout = window.clearTimeout;
+  window.autoRefreshTimers = new Map();
+  let timerId = -1;
+  window.setTimeout = (callback, delay, ...args) => {
+    if (delay >= 5000 && delay <= 3600000) {
+      autoRefreshTimers.set(timerId, {callback, delay});
+      return timerId--;
+    }
+    return nativeTimeout(callback, delay, ...args);
+  };
+  window.clearTimeout = id => {
+    if (!autoRefreshTimers.delete(id)) nativeClearTimeout(id);
+  };
+  window.fireAutoRefresh = () => {
+    const [id, timer] = [...autoRefreshTimers][0];
+    autoRefreshTimers.delete(id);
+    timer.callback();
+  };
+  window.priceDelta = 0;
+  window.refreshRequests = 0;
+  // Match Vast's exposed query client and its active marketplace query key.
+  const queryClient = {
+    getQueryCache: () => ({findAll: () => [{queryKey:['bundles', 0, '{}']}]}),
+    refetchQueries: async (filter, options) => {
+      window.lastRefreshFilter = filter;
+      window.lastRefreshOptions = options;
+      window.refreshRequests++;
+      if (window.refreshHold) await new Promise(resolve => { window.releaseRefresh = resolve; });
+      if (window.refreshFailure) throw new Error('Network unavailable');
+      window.priceDelta += 0.01;
+      await fetch('/api/v0/bundles/');
+      draw();
+    },
+  };
+  window.__TANSTACK_QUERY_CLIENT__ = queryClient;
   // Match the supplied machine 142650, including its separate Type/offer ID.
   window.draw = () => {
     document.querySelector('.results-table').innerHTML = [
@@ -42,7 +78,7 @@
           <div class="abspos" style="top:70px;left:531px;width:44px;font-size:11px">99.75%</div>
         </div>
         <div class="button-hover" style="left:100px;margin-left:100px">
-          <div class="abspos" style="left:708px;font-weight:600;display:flex;align-items:center;flex-direction:column">$${price}/hr<span>plus bandwidth</span></div>
+          <div class="abspos" style="left:708px;font-weight:600;display:flex;align-items:center;flex-direction:column">$${(Number(price) + priceDelta).toFixed(3)}/hr<span>plus bandwidth</span></div>
           <button data-aid="RowElement-ask" class="rent-button" style="width:100px;top:50px">Rent</button>
         </div>
       </div></div>

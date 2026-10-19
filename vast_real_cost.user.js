@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vast.ai Real Cost (1h / 2h / 4h / 8h + Bandwidth)
 // @namespace    https://cloud.vast.ai/
-// @version      1.10.2
-// @description  Show 1h / 2h / 4h / 8h + transfer costs, highlight the three cheapest 2h and 4h options, and remember hidden machines.
+// @version      1.11.1
+// @description  Show rental and transfer totals, highlight the cheapest offers, remember hidden machines, and refresh the marketplace automatically or manually.
 // @match        https://cloud.vast.ai/create/*
 // @match        https://cloud.vast.ai/create
 // @run-at       document-start
@@ -60,6 +60,24 @@
   if (Array.isArray(savedHidden)) saveHiddenMachines(hiddenMachines);
   let showHidden = false;
 
+  const REFRESH_KEY = 'vast-real-cost-refresh-v1';
+  let savedRefresh;
+  try { savedRefresh = JSON.parse(localStorage.getItem(REFRESH_KEY) || 'null'); }
+  catch { /* try userscript storage independently */ }
+  if (!savedRefresh || typeof savedRefresh !== 'object') {
+    try {
+      if (typeof GM_getValue === 'function') savedRefresh = GM_getValue(REFRESH_KEY, null);
+    } catch { /* use defaults */ }
+  }
+  let refreshSettings = {
+    enabled: typeof savedRefresh?.enabled === 'boolean' ? savedRefresh.enabled : true,
+    seconds: Number.isInteger(savedRefresh?.seconds) && savedRefresh.seconds >= 5 && savedRefresh.seconds <= 3600
+      ? savedRefresh.seconds : 15,
+  };
+  let refreshTimer;
+  let refreshing = false;
+  let refreshStatus = '';
+
   const offers = new Map();
   const API = /\/api\/v0\/bundles(?:\/|\?|$)/;
   const money = (n) => '$' + n.toFixed(3);
@@ -81,8 +99,8 @@
     scheduleRender();
   }
 
-  // Observe the same HTTP responses Vast itself uses. No extra network requests,
-  // no credential access, and no alteration to the site's HTTP responses.
+  // These passive observers read Vast's own HTTP responses without sending
+  // requests, accessing credentials, or altering the site's responses.
   const fetchOriginal = pageWindow.fetch;
   if (typeof fetchOriginal === 'function') {
     pageWindow.fetch = function(...args) {
@@ -129,12 +147,21 @@
       border-radius:4px; font-size:13px; }
     #vrc-dialog button { cursor:pointer; padding:6px 10px; margin-right:6px; }
     #vrc-dialog .vrc-help { color:#bac9d7; font-size:11px; line-height:1.45; margin-top:10px; }
-    .vrc-hide-machine, .vrc-hidden-toggle {
+    .vrc-hide-machine, .vrc-hidden-toggle, .vrc-refresh-now {
       cursor:pointer; color:inherit; background:transparent; border:1px solid #718096;
       border-radius:4px; font:11px Arial,sans-serif; line-height:16px;
       padding:2px 6px; box-sizing:border-box;
     }
     .vrc-hidden-toggle { flex-shrink:0; margin-left:8px; white-space:nowrap; }
+    .sort-info.vrc-menu { flex-wrap:nowrap; height:auto; }
+    .vrc-refresh-controls { display:inline-flex; align-items:center; gap:6px;
+      flex-shrink:0; margin-left:8px; white-space:nowrap; font:11px Arial,sans-serif; }
+    .vrc-refresh-controls label { display:inline-flex; align-items:center; gap:4px; margin:0; }
+    .vrc-refresh-controls input[type="number"] { width:54px; padding:2px 4px;
+      background:transparent; color:inherit; border:1px solid #718096; border-radius:4px; font:inherit; }
+    .vrc-refresh-controls input[type="checkbox"] { margin:0; }
+    .vrc-refresh-now:disabled { cursor:wait; opacity:.6; }
+    .vrc-refresh-status { opacity:.75; }
     /* The native Rent button can extend to the card's bottom. Keep this
        control in the empty space above it without moving any card details. */
     .results-table [data-aid="RowElement"] .vrc-hide-machine {
@@ -229,20 +256,114 @@
     return null;
   }
 
-  function saveHiddenMachines(ids) {
-    const values = [...ids];
+  function savePersistentValue(key, value) {
     let persisted = false;
     try {
-      localStorage.setItem(HIDDEN_KEY, JSON.stringify(values));
+      localStorage.setItem(key, JSON.stringify(value));
       persisted = true;
     } catch { /* userscript storage can still save the list */ }
     try {
       if (typeof GM_setValue === 'function') {
-        GM_setValue(HIDDEN_KEY, values);
+        GM_setValue(key, value);
         persisted = true;
       }
     } catch { /* the browser copy remains usable */ }
     return persisted;
+  }
+
+  function saveHiddenMachines(ids) {
+    return savePersistentValue(HIDDEN_KEY, [...ids]);
+  }
+
+  function resetRefreshTimer() {
+    clearTimeout(refreshTimer);
+    if (!refreshSettings.enabled) return;
+    refreshTimer = setTimeout(() => {
+      // Background tabs and offline periods should not generate requests.
+      if (document.visibilityState === 'hidden' || navigator.onLine === false ||
+          !document.querySelector('[data-aid="SearchPageGpuButtons"]')) {
+        resetRefreshTimer();
+        return;
+      }
+      refreshOffers();
+    }, refreshSettings.seconds * 1000);
+  }
+
+  function findMarketplaceClient() {
+    // Vast exposes the same query client used by its results components.
+    // Refetching that query updates the native list, including new/removed
+    // offers, without replaying API calls or copying authentication data.
+    const client = pageWindow.__TANSTACK_QUERY_CLIENT__;
+    return typeof client?.getQueryCache === 'function' && typeof client.refetchQueries === 'function' ? client : null;
+  }
+
+  async function refreshOffers() {
+    if (refreshing) return;
+    clearTimeout(refreshTimer);
+    const client = findMarketplaceClient();
+    if (!client || !client.getQueryCache().findAll({ queryKey:['bundles'], type:'active' }).length) {
+      refreshStatus = 'Search not ready. Try again.';
+      scheduleRender();
+      resetRefreshTimer();
+      return;
+    }
+    refreshing = true;
+    refreshStatus = 'Refreshing…';
+    scheduleRender();
+    try {
+      await client.refetchQueries({ queryKey:['bundles'], type:'active' }, { throwOnError:true });
+      refreshStatus = `Updated ${new Date().toLocaleTimeString()}`;
+    } catch {
+      refreshStatus = 'Refresh failed. Try again.';
+    } finally {
+      refreshing = false;
+      scheduleRender();
+      // Wait a full interval after completion; never overlap our requests.
+      resetRefreshTimer();
+    }
+  }
+
+  function updateRefreshControls() {
+    const menu = document.querySelector('[data-aid="SearchPageGpuButtons"]')?.closest('.sort-info');
+    if (!menu) return;
+    menu.classList.add('vrc-menu');
+    let controls = menu.querySelector('.vrc-refresh-controls');
+    if (!controls) {
+      controls = document.createElement('div');
+      controls.className = 'vrc-refresh-controls';
+      controls.innerHTML = `<label><input class="vrc-refresh-enabled" type="checkbox">Auto refresh</label>
+        <label><input class="vrc-refresh-seconds" type="number" min="5" max="3600" step="1" aria-label="Auto refresh interval in seconds">s</label>
+        <button type="button" class="vrc-refresh-now">Refresh</button>
+        <span class="vrc-refresh-status" role="status"></span>`;
+      controls.addEventListener('click', e => e.stopPropagation());
+      controls.querySelector('.vrc-refresh-now').addEventListener('click', refreshOffers);
+      controls.addEventListener('change', e => {
+        const enabled = controls.querySelector('.vrc-refresh-enabled');
+        const seconds = controls.querySelector('.vrc-refresh-seconds');
+        if (!seconds.value.trim() || !seconds.checkValidity()) {
+          seconds.reportValidity();
+          seconds.value = refreshSettings.seconds;
+          return;
+        }
+        const next = { enabled:enabled.checked, seconds:Number(seconds.value) };
+        if (savePersistentValue(REFRESH_KEY, next)) {
+          refreshSettings = next;
+          resetRefreshTimer();
+        } else refreshStatus = 'Could not save refresh settings.';
+        e.stopPropagation();
+        scheduleRender();
+      });
+      menu.append(controls);
+    }
+    const hiddenToggle = menu.querySelector('.vrc-hidden-toggle');
+    if (hiddenToggle && hiddenToggle.nextElementSibling !== controls) hiddenToggle.after(controls);
+    controls.querySelector('.vrc-refresh-enabled').checked = refreshSettings.enabled;
+    const seconds = controls.querySelector('.vrc-refresh-seconds');
+    if (document.activeElement !== seconds) seconds.value = refreshSettings.seconds;
+    const button = controls.querySelector('.vrc-refresh-now');
+    button.disabled = refreshing;
+    const status = controls.querySelector('.vrc-refresh-status');
+    if (status.textContent !== refreshStatus) status.textContent = refreshStatus;
   }
 
   function setMachineHidden(id, hidden) {
@@ -445,6 +566,7 @@
     if (!document.body) return;
     ensureStyles();
     updateHiddenToggle();
+    updateRefreshControls();
     const candidates = [];
     document.querySelectorAll('.results-table [data-aid="RowElement"]')
       .forEach(card => updateCard(card, candidates, updateMachineControl(card)));
@@ -515,18 +637,19 @@
   function start() {
     ensureStyles();
     scheduleRender();
+    resetRefreshTimer();
     observer = new MutationObserver((mutations) => {
       // Avoid looping on DOM changes made by our own UI. Removed controls
       // still trigger repair if Vast replaces or clears part of the page.
       const relevant = mutations.some(m => {
         const target = m.target.nodeType === Node.ELEMENT_NODE ? m.target : m.target.parentElement;
-        if (target?.closest('.vrc-costs, .vrc-hide-machine, .vrc-hidden-toggle, #vrc-dialog, #vrc-style')) return false;
+        if (target?.closest('.vrc-costs, .vrc-hide-machine, .vrc-hidden-toggle, .vrc-refresh-controls, #vrc-dialog, #vrc-style')) return false;
         if (m.type === 'characterData') return true;
         if ([...m.removedNodes].some(n => n.nodeType === Node.ELEMENT_NODE &&
-          n.matches?.('.vrc-hide-machine, .vrc-hidden-toggle'))) return true;
+          n.matches?.('.vrc-hide-machine, .vrc-hidden-toggle, .vrc-refresh-controls'))) return true;
         return [...m.addedNodes, ...m.removedNodes].some(n =>
           n.nodeType === Node.TEXT_NODE || (n.nodeType === Node.ELEMENT_NODE &&
-          !n.matches?.('.vrc-costs, .vrc-hide-machine, .vrc-hidden-toggle, #vrc-dialog, #vrc-style')));
+          !n.matches?.('.vrc-costs, .vrc-hide-machine, .vrc-hidden-toggle, .vrc-refresh-controls, #vrc-dialog, #vrc-style')));
       });
       if (relevant) scheduleRender();
     });
