@@ -49,9 +49,29 @@
     </div>`).join('');
   };
   window.GM_registerMenuCommand = () => {};
+  const hiddenKey = 'vast-real-cost-hidden-machines-v1';
   if (!location.search.includes('fallback')) {
-    window.GM_getValue = (key, fallback) => JSON.parse(localStorage.getItem('gm:' + key) || 'null') ?? fallback;
-    window.GM_setValue = (key, value) => localStorage.setItem('gm:' + key, JSON.stringify(value));
+    window.GM_getValue = (key, fallback) => {
+      if (key === hiddenKey && location.search.includes('gm-throws')) throw new Error('GM storage unavailable');
+      if (key === hiddenKey && location.search.includes('gm-volatile')) return fallback;
+      return JSON.parse(localStorage.getItem('gm:' + key) || 'null') ?? fallback;
+    };
+    window.GM_setValue = (key, value) => {
+      if (key === hiddenKey && location.search.includes('gm-throws')) throw new Error('GM storage unavailable');
+      if (key === hiddenKey && location.search.includes('gm-volatile')) return;
+      localStorage.setItem('gm:' + key, JSON.stringify(value));
+    };
+  }
+  if (location.search.includes('local-blocked')) {
+    const getItem = Storage.prototype.getItem, setItem = Storage.prototype.setItem;
+    Storage.prototype.getItem = function(key) {
+      if (key === hiddenKey) throw new Error('Browser storage unavailable');
+      return getItem.call(this, key);
+    };
+    Storage.prototype.setItem = function(key, value) {
+      if (key === hiddenKey) throw new Error('Browser storage unavailable');
+      return setItem.call(this, key, value);
+    };
   }
   window.fetch = async () => ({ ok:true, clone() { return this; }, json:async () => ({
     offers:[45610815,45610816,45610817,45610818,45610819].map(id => ({id,inet_down_cost:0.007813,inet_up_cost:0.007813})),

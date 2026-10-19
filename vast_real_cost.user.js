@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vast.ai Real Cost (1h / 2h / 4h / 8h + Bandwidth)
 // @namespace    https://cloud.vast.ai/
-// @version      1.10.1
+// @version      1.10.2
 // @description  Show 1h / 2h / 4h / 8h + transfer costs, highlight the three cheapest 2h and 4h options, and remember hidden machines.
 // @match        https://cloud.vast.ai/create/*
 // @match        https://cloud.vast.ai/create
@@ -44,12 +44,20 @@
 
   const HIDDEN_KEY = 'vast-real-cost-hidden-machines-v1';
   let savedHidden;
+  // Keep a browser copy even when userscript storage is available. In raw
+  // page context the GM APIs may be absent or unavailable on a later visit.
   try {
-    if (typeof GM_getValue === 'function') savedHidden = GM_getValue(HIDDEN_KEY, null);
-    if (savedHidden == null) savedHidden = JSON.parse(localStorage.getItem(HIDDEN_KEY) || '[]');
-  } catch { savedHidden = []; }
+    savedHidden = JSON.parse(localStorage.getItem(HIDDEN_KEY) || 'null');
+  } catch { /* try userscript storage independently */ }
+  if (!Array.isArray(savedHidden)) {
+    try {
+      if (typeof GM_getValue === 'function') savedHidden = GM_getValue(HIDDEN_KEY, null);
+    } catch { /* retain an empty list if neither store is readable */ }
+  }
   const hiddenMachines = new Set((Array.isArray(savedHidden) ? savedHidden : [])
     .map(String).filter(id => /^\d+$/.test(id)));
+  // Migrate existing saved IDs and repair the backup when possible.
+  if (Array.isArray(savedHidden)) saveHiddenMachines(hiddenMachines);
   let showHidden = false;
 
   const offers = new Map();
@@ -221,14 +229,27 @@
     return null;
   }
 
+  function saveHiddenMachines(ids) {
+    const values = [...ids];
+    let persisted = false;
+    try {
+      localStorage.setItem(HIDDEN_KEY, JSON.stringify(values));
+      persisted = true;
+    } catch { /* userscript storage can still save the list */ }
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(HIDDEN_KEY, values);
+        persisted = true;
+      }
+    } catch { /* the browser copy remains usable */ }
+    return persisted;
+  }
+
   function setMachineHidden(id, hidden) {
     const next = new Set(hiddenMachines);
     if (hidden) next.add(id);
     else next.delete(id);
-    try {
-      if (typeof GM_setValue === 'function') GM_setValue(HIDDEN_KEY, [...next]);
-      else localStorage.setItem(HIDDEN_KEY, JSON.stringify([...next]));
-    } catch {
+    if (!saveHiddenMachines(next)) {
       alert('Could not save hidden machines. Please try again.');
       return;
     }

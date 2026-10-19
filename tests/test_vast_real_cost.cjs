@@ -50,7 +50,7 @@ const server = http.createServer((req, res) => {
     });
   }
   try {
-    for (const mode of ['gm', 'fallback']) {
+    for (const mode of ['gm', 'fallback', 'gm-throws', 'gm-volatile', 'local-blocked']) {
       const { browserContextId } = await cdp('Target.createBrowserContext');
       const { targetId } = await cdp('Target.createTarget', {
         url:`http://127.0.0.1:${server.address().port}/?${mode}`, browserContextId,
@@ -132,8 +132,14 @@ const server = http.createServer((req, res) => {
       await until(`rows()[0].querySelector('.vrc-hide-machine').getAttribute('aria-label') === 'Hide machine 300001'`);
       await evaluate(`rows()[0].querySelector('.vrc-hide-machine').click()`);
       await until(`document.querySelector('.vrc-hidden-toggle').textContent === 'Hide hidden (2)'`);
-      const stored = mode === 'gm' ? 'gm:vast-real-cost-hidden-machines-v1' : 'vast-real-cost-hidden-machines-v1';
+      const stored = ['gm', 'local-blocked'].includes(mode) ? 'gm:vast-real-cost-hidden-machines-v1' : 'vast-real-cost-hidden-machines-v1';
       assert.deepEqual(await evaluate(`JSON.parse(localStorage.getItem('${stored}')).sort()`), ['142650', '300001']);
+      if (mode === 'gm') {
+        assert.deepEqual(await evaluate(`JSON.parse(localStorage.getItem('vast-real-cost-hidden-machines-v1')).sort()`),
+          ['142650', '300001'], 'Always keep the browser backup, even when GM storage works');
+        // Recover the existing userscript list if the browser backup is removed.
+        await evaluate(`localStorage.removeItem('vast-real-cost-hidden-machines-v1')`);
+      }
       await cdp('Page.reload', {}, sessionId);
       await until(`document.querySelector('.vrc-hidden-toggle')?.textContent === 'Show hidden (2)'`);
       await until(`document.querySelectorAll('.vrc-machine-collapsed').length === 2`);
@@ -150,6 +156,12 @@ const server = http.createServer((req, res) => {
         observer.observe(document.body, {childList:true, subtree:true, characterData:true});
         setTimeout(() => { observer.disconnect(); resolve(changes); }, 150);
       })`), 0);
+      // Unhiding must also survive a later visit, without reviving old saved IDs.
+      await cdp('Page.navigate', {url:`http://127.0.0.1:${server.address().port}/?${mode}&revisit`}, sessionId);
+      await until(`document.querySelector('.vrc-hidden-toggle')?.textContent === 'Show hidden (1)'`);
+      await until(`document.querySelectorAll('.vrc-hide-machine').length === 5`);
+      assert.equal(await evaluate(`document.querySelectorAll('.vrc-machine-collapsed').length`), 0);
+      assert.deepEqual(await evaluate(`JSON.parse(localStorage.getItem('${stored}'))`), ['300001']);
       await cdp('Target.disposeBrowserContext', { browserContextId });
       console.log(`PASS ${mode}: machine hiding, ranking, layout, rerenders, row reuse, persistence, unhide, stable DOM`);
     }
