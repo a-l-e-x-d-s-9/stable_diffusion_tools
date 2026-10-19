@@ -1,0 +1,49 @@
+<!doctype html>
+<style>
+  [class*="srOnly"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .counter-group { display: flex; align-items: center; gap: 4px; }
+</style>
+<button aria-label="Account menu"></button>
+<script>
+  window.balances = { yellow: 570026, green: 400487, blue: 388175 };
+  window.buzzRequests = 0;
+  window.apiFormat = 'superjson';
+  window.holdNextBuzzRequest = false;
+  window.fetch = async (url) => {
+    let data;
+    if (String(url).includes('buzz.getBuzzAccount')) {
+      buzzRequests++;
+      data = apiFormat === 'devalue'
+        ? JSON.stringify([{ yellow: 1, green: 2, blue: 3 }, balances.yellow, balances.green, balances.blue])
+        : apiFormat === 'plain' ? { ...balances } : { json: { ...balances } };
+      if (holdNextBuzzRequest) {
+        holdNextBuzzRequest = false;
+        await new Promise(resolve => { window.releaseBuzzRequest = resolve; });
+      }
+    } else {
+      data = { json: { transactions: [] } };
+    }
+    return { ok: true, json: async () => ({ result: { data } }) };
+  };
+  window.nativeNumber = () => new URLSearchParams(location.search).has('static')
+    ? '<span class="UserBuzz__buzzText" data-size="md">958.2k</span>'
+    : `<span class="UserBuzz__buzzText" data-size="md" style="line-height:0">
+        <span class="inline-flex"><span class="CustomNumberFlow__wrapper">
+          <span class="CustomNumberFlow__srOnly">958.2</span>
+          ${[9, 5, 8, '.', 2].map(d => d === '.' ? '.' : `<span class="CustomNumberFlow__digit" aria-hidden="true" data-digit="${d}"><span class="CustomNumberFlow__stack">0\n1\n2\n3\n4\n5\n6\n7\n8\n9</span></span>`).join('')}
+        </span><span class="UserBuzz__buzzText UserBuzz__withGradient">k</span></span>
+      </span>`;
+  window.renderHeader = () => {
+    document.querySelector('button').innerHTML = `<div class="UserBuzz__userBuzz" style="--buzz-gradient:blue">
+      <div class="counter-group"><svg width="20" height="20"><path d="M0 0L10 10"/></svg>${nativeNumber()}</div>
+    </div>`;
+  };
+  window.changeNativeBalance = (value) => {
+    const text = document.querySelector('.UserBuzz__buzzText');
+    const label = text.querySelector('[class*="srOnly"]');
+    if (label) label.firstChild.data = value;
+    else text.firstChild.data = value;
+  };
+  renderHeader();
+</script>
+<script src="/userscript.js"></script>

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai - Show Yellow + Green Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.7.5
+// @version      1.7.8
 // @description  Shows combined Yellow and Green Buzz with configurable sales counts and a clickable sold-model list in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
@@ -15,11 +15,11 @@
 
   const YELLOW_HEX = '#f59f00';
   const YELLOW_RGB = 'rgb(245, 159, 0)';
-  const GREEN_RGB = 'rgb(64, 192, 87)';
   const BUZZ_DASHBOARD_URL = 'https://civitai.red/user/buzz-dashboard';
   const BUZZ_ACCOUNT_PATH = '/api/trpc/buzz.getBuzzAccount';
   const EXACT_BUZZ_CACHE_KEY = 'civitai-yellow-green-buzz-exact-v1';
   const EXACT_BUZZ_REFRESH_MS = 60 * 1000;
+  const BUZZ_CHANGE_REFRESH_DELAY_MS = 300;
   const INITIAL_REFRESH_DELAY_MS = 2 * 1000;
   const UI_REPAIR_MS = 60 * 1000;
   const SALES_CACHE_KEY = 'civitai-yellow-green-buzz-sales-v1';
@@ -58,6 +58,12 @@
     exactCombinedValue: null,
     exactCombinedText: '',
     exactBuzzLoading: false,
+    exactBuzzRefreshPending: false,
+    buzzChangeRefreshTimer: null,
+    nativeBuzzObserver: null,
+    nativeBuzzRoot: null,
+    nativeBuzzText: null,
+    nativeBuzzSignature: null,
     salesCount: null,
     salesByColor: null,
     salesModels: null,
@@ -72,7 +78,7 @@
     updatePending: false,
   };
 
-  console.info('[Civitai Buzz] Script v1.7.5 loaded');
+  console.info('[Civitai Buzz] Script v1.7.8 loaded');
 
   function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
     let start = new Date(Date.UTC(
@@ -936,6 +942,7 @@
     const response = await fetch(
       `${BUZZ_ACCOUNT_PATH}?input=${input}`,
       {
+        cache: 'no-store',
         credentials: 'same-origin',
         headers: {
           'x-client': 'web',
@@ -953,8 +960,9 @@
       throw new Error(message);
     }
 
-    const yellow = body?.result?.data?.json?.yellow;
-    const green = body?.result?.data?.json?.green;
+    const data = deserializeTransactionData(body?.result?.data);
+    const yellow = data?.yellow;
+    const green = data?.green;
     if (
       !Number.isFinite(yellow) ||
       yellow < 0 ||
@@ -968,7 +976,11 @@
   }
 
   async function refreshExactBuzzIfNeeded(force = false) {
-    if (state.exactBuzzLoading) return;
+    if (state.exactBuzzLoading) {
+      // A spend can arrive while an earlier balance request is in flight.
+      if (force) state.exactBuzzRefreshPending = true;
+      return;
+    }
 
     const cached = loadExactBuzzCache();
     if (
@@ -1000,7 +1012,55 @@
       );
     } finally {
       state.exactBuzzLoading = false;
+      if (state.exactBuzzRefreshPending) {
+        state.exactBuzzRefreshPending = false;
+        refreshExactBuzzIfNeeded(true);
+      }
     }
+  }
+
+  function watchNativeBuzz(root, text) {
+    if (state.nativeBuzzRoot !== root || state.nativeBuzzText !== text) {
+      state.nativeBuzzObserver?.disconnect();
+      state.nativeBuzzRoot = root;
+      state.nativeBuzzText = text;
+      state.nativeBuzzObserver = new MutationObserver(queueUpdate);
+      // Spending can reset inline styles without replacing any DOM nodes.
+      // Watch only the native counter so our sales/counter styles cannot
+      // trigger a document-wide style-observer feedback loop.
+      state.nativeBuzzObserver.observe(root, {
+        attributes: true,
+        attributeFilter: ['style'],
+      });
+      state.nativeBuzzObserver.observe(text, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ['style', 'class', 'data-digit', 'aria-label'],
+      });
+    }
+
+    // Use the native value only as a change signal, never as a balance.
+    // Ignore animation styles: those can change every frame without a spend.
+    const signature = JSON.stringify([
+      text.textContent,
+      text.getAttribute('aria-label'),
+      [...text.querySelectorAll('[data-digit]')].map((digit) =>
+        digit.getAttribute('data-digit')
+      ),
+    ]);
+    if (signature === state.nativeBuzzSignature) return;
+
+    const hadPreviousValue = state.nativeBuzzSignature !== null;
+    state.nativeBuzzSignature = signature;
+    if (!hadPreviousValue) return;
+
+    clearTimeout(state.buzzChangeRefreshTimer);
+    state.buzzChangeRefreshTimer = setTimeout(() => {
+      state.buzzChangeRefreshTimer = null;
+      refreshExactBuzzIfNeeded(true);
+    }, BUZZ_CHANGE_REFRESH_DELAY_MS);
   }
 
   function valueToCompactNumber(value) {
@@ -1042,11 +1102,15 @@
       '[class*="buzzText"], span[data-size="md"]'
     );
 
-    if (preferred && isCompactBuzzText(preferred.textContent)) {
-      return preferred;
-    }
+    // Animated counters contain hidden labels, digit stacks, and a separate
+    // suffix. Their textContent is no longer a single compact number. Select
+    // the whole native number container so all of those parts can be hidden.
+    if (preferred) return preferred;
 
     return [...root.querySelectorAll('span')].find((element) =>
+      !element.closest(
+        '[data-tm-combined-buzz-link="true"], [data-tm-sales-badge="true"]'
+      ) &&
       isCompactBuzzText(element.textContent)
     ) || null;
   }
@@ -1100,20 +1164,7 @@
     element.setAttribute(attribute, value);
   }
 
-  function getCombinedBuzzGradient() {
-    const total = state.exactCombinedValue;
-    const yellowPercentage = total > 0
-      ? Math.max(0, Math.min(100, state.exactYellowValue / total * 100))
-      : 50;
-
-    return `linear-gradient(90deg, ${YELLOW_RGB} 0%, ` +
-      `${YELLOW_RGB} ${yellowPercentage}%, ` +
-      `${GREEN_RGB} ${yellowPercentage}%, ${GREEN_RGB} 100%)`;
-  }
-
   function forceCombinedBuzzAppearance(root, text) {
-    const gradient = getCombinedBuzzGradient();
-
     if (root.dataset.tmCombinedBuzz !== 'true') {
       root.dataset.tmCombinedBuzz = 'true';
     }
@@ -1121,20 +1172,18 @@
       text.dataset.tmCombinedBuzz = 'true';
     }
 
-    // Keep the icon solid Yellow; only the number represents both balances.
+    // Display both the icon and the combined API balance in solid Yellow.
     setImportantStyle(root, '--buzz-gradient', YELLOW_HEX);
     setImportantStyle(root, 'color', YELLOW_HEX);
     setImportantStyle(root, '-webkit-text-fill-color', YELLOW_HEX);
     setImportantStyle(root, 'padding-right', '4px');
 
-    setImportantStyle(text, '--buzz-gradient', gradient);
-    setImportantStyle(text, 'background-image', gradient);
-    setImportantStyle(text, 'background-clip', 'text');
-    setImportantStyle(text, '-webkit-background-clip', 'text');
-    setImportantStyle(text, 'color', 'transparent');
+    setImportantStyle(text, '--buzz-gradient', YELLOW_HEX);
+    setImportantStyle(text, 'background-image', 'none');
+    setImportantStyle(text, 'color', YELLOW_HEX);
     setImportantStyle(text, 'font-size', '0.9em');
     setImportantStyle(text, 'text-transform', 'none');
-    setImportantStyle(text, '-webkit-text-fill-color', 'transparent');
+    setImportantStyle(text, '-webkit-text-fill-color', YELLOW_HEX);
     setImportantStyle(text, 'cursor', 'pointer');
 
     for (const svg of root.querySelectorAll('svg')) {
@@ -1857,27 +1906,53 @@
     return link;
   }
 
+  function getCombinedBuzzText(root, nativeText) {
+    // Leave React's animated counter intact, but hide the entire number
+    // (including its suffix). Render the API balance in our own sibling node.
+    setImportantStyle(nativeText, 'display', 'none');
+    setAttributeIfChanged(nativeText, 'aria-hidden', 'true');
+
+    let text = root.querySelector('[data-tm-combined-buzz-value="true"]');
+    if (!text) {
+      text = document.createElement('span');
+      text.dataset.tmCombinedBuzzValue = 'true';
+      text.style.setProperty('font-weight', '600');
+    }
+
+    // React can replace just the number container on a balance/route update.
+    // Move our existing counter next to the new container when that happens.
+    const link = text.closest('a[data-tm-combined-buzz-link="true"]');
+    if ((link || text).parentNode !== nativeText.parentNode) {
+      nativeText.after(link || text);
+    }
+    return text;
+  }
+
   function update() {
     const top = findTopBuzz();
     if (!top) return;
 
+    watchNativeBuzz(top.root, top.text);
     updateSalesBadge(top.root);
 
     const combinedText = state.exactCombinedText;
     if (!combinedText) return;
 
-    forceCombinedBuzzAppearance(top.root, top.text);
-    const buzzLink = enableCombinedBuzzLink(top.text);
+    const text = getCombinedBuzzText(top.root, top.text);
+    forceCombinedBuzzAppearance(top.root, text);
+    const buzzLink = enableCombinedBuzzLink(text);
 
-    if (top.text.textContent.trim() !== combinedText) {
-      top.text.textContent = combinedText;
+    if (text.textContent.trim() !== combinedText) {
+      text.textContent = combinedText;
     }
 
-    top.text.title =
+    const title =
       `Combined Buzz: ${state.exactCombinedValue.toLocaleString('en-US')}\n` +
       `Yellow Buzz: ${state.exactYellowValue.toLocaleString('en-US')}\n` +
       `Green Buzz: ${state.exactGreenValue.toLocaleString('en-US')}`;
-    (buzzLink || top.text).setAttribute(
+    setAttributeIfChanged(text, 'title', title);
+    setAttributeIfChanged(
+      buzzLink || text,
       'aria-label',
       'Combined Yellow and Green Buzz: ' +
       state.exactCombinedValue.toLocaleString('en-US')
