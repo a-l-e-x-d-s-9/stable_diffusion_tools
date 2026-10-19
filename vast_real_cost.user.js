@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vast.ai Real Cost (1h / 2h / 4h / 8h + Bandwidth)
 // @namespace    https://cloud.vast.ai/
-// @version      1.9.0
-// @description  Show 1h / 2h / 4h / 8h + transfer costs in a compact column, highlighting the three cheapest 2h and 4h options, with persistent settings.
+// @version      1.10.1
+// @description  Show 1h / 2h / 4h / 8h + transfer costs, highlight the three cheapest 2h and 4h options, and remember hidden machines.
 // @match        https://cloud.vast.ai/create/*
 // @match        https://cloud.vast.ai/create
 // @run-at       document-start
@@ -41,6 +41,16 @@
     try { GM_setValue(KEY, settings); }
     catch { /* retain the existing local settings until the user saves */ }
   }
+
+  const HIDDEN_KEY = 'vast-real-cost-hidden-machines-v1';
+  let savedHidden;
+  try {
+    if (typeof GM_getValue === 'function') savedHidden = GM_getValue(HIDDEN_KEY, null);
+    if (savedHidden == null) savedHidden = JSON.parse(localStorage.getItem(HIDDEN_KEY) || '[]');
+  } catch { savedHidden = []; }
+  const hiddenMachines = new Set((Array.isArray(savedHidden) ? savedHidden : [])
+    .map(String).filter(id => /^\d+$/.test(id)));
+  let showHidden = false;
 
   const offers = new Map();
   const API = /\/api\/v0\/bundles(?:\/|\?|$)/;
@@ -111,6 +121,20 @@
       border-radius:4px; font-size:13px; }
     #vrc-dialog button { cursor:pointer; padding:6px 10px; margin-right:6px; }
     #vrc-dialog .vrc-help { color:#bac9d7; font-size:11px; line-height:1.45; margin-top:10px; }
+    .vrc-hide-machine, .vrc-hidden-toggle {
+      cursor:pointer; color:inherit; background:transparent; border:1px solid #718096;
+      border-radius:4px; font:11px Arial,sans-serif; line-height:16px;
+      padding:2px 6px; box-sizing:border-box;
+    }
+    .vrc-hidden-toggle { flex-shrink:0; margin-left:8px; white-space:nowrap; }
+    /* The native Rent button can extend to the card's bottom. Keep this
+       control in the empty space above it without moving any card details. */
+    .results-table [data-aid="RowElement"] .vrc-hide-machine {
+      position:absolute; right:12px; top:8px; bottom:auto; width:100px; height:22px;
+      padding:0 4px; font-size:10px; z-index:2;
+    }
+    .results-table [data-aid="RowElement"].vrc-machine-collapsed { display:none !important; }
+    .vrc-hide-machine[aria-pressed="true"] { color:#f0c987; border-color:#b18b50; }
     /* Keep the whole row compact, including on wide screens. Width comes from
        CSS rather than measurements of elements we have already moved. */
     /* The supplied layout needs 1075px for details, hourly price, totals and
@@ -197,7 +221,84 @@
     return null;
   }
 
-  function updateCard(card, candidates) {
+  function setMachineHidden(id, hidden) {
+    const next = new Set(hiddenMachines);
+    if (hidden) next.add(id);
+    else next.delete(id);
+    try {
+      if (typeof GM_setValue === 'function') GM_setValue(HIDDEN_KEY, [...next]);
+      else localStorage.setItem(HIDDEN_KEY, JSON.stringify([...next]));
+    } catch {
+      alert('Could not save hidden machines. Please try again.');
+      return;
+    }
+    hiddenMachines.clear();
+    for (const machineId of next) hiddenMachines.add(machineId);
+    scheduleRender();
+  }
+
+  function updateHiddenToggle() {
+    const menu = document.querySelector('[data-aid="SearchPageGpuButtons"]')?.closest('.sort-info');
+    if (!menu) return;
+    let toggle = menu.querySelector('.vrc-hidden-toggle');
+    if (!toggle) {
+      toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'vrc-hidden-toggle';
+      toggle.addEventListener('click', e => {
+        e.stopPropagation();
+        showHidden = !showHidden;
+        scheduleRender();
+      });
+      menu.append(toggle);
+    }
+    const label = `${showHidden ? 'Hide' : 'Show'} hidden (${hiddenMachines.size})`;
+    if (toggle.textContent !== label) toggle.textContent = label;
+    toggle.setAttribute('aria-pressed', String(showHidden));
+    toggle.title = 'Saved hidden machines across all searches. Hidden machines never receive best-price highlights.';
+  }
+
+  function updateMachineControl(card) {
+    // Machine IDs survive offer changes; "Type #..." is only an offer ID.
+    const id = card.querySelector('[data-testid="machine-id"]')?.textContent.match(/\bm:\s*(\d+)\b/)?.[1];
+    const hidden = !!id && hiddenMachines.has(id);
+    card.classList.toggle('vrc-machine-collapsed', hidden && !showHidden);
+    const panel = card.querySelector('.rentable-card');
+    let button = panel?.querySelector(':scope > .vrc-hide-machine');
+    if (!id || !panel) {
+      button?.remove();
+      return hidden;
+    }
+    if (!button) {
+      button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'vrc-hide-machine';
+      button.addEventListener('click', e => {
+        e.stopPropagation();
+        const machineId = button.dataset.machineId;
+        setMachineHidden(machineId, !hiddenMachines.has(machineId));
+      });
+      if (getComputedStyle(panel).position === 'static') panel.style.position = 'relative';
+      panel.append(button);
+    }
+    // Read the current ID on click because Vast can reuse an existing row.
+    button.dataset.machineId = id;
+    const label = hidden ? 'Unhide' : 'Hide';
+    if (button.textContent !== label) button.textContent = label;
+    button.setAttribute('aria-pressed', String(hidden));
+    button.setAttribute('aria-label', `${label} machine ${id}`);
+    button.title = `${label} all offers for machine ${id}`;
+    return hidden;
+  }
+
+  function updateCard(card, candidates, hidden) {
+    if (hidden && !showHidden) {
+      const output = card.querySelector('.vrc-costs');
+      output?.removeAttribute('data-vrc-rank-2');
+      output?.removeAttribute('data-vrc-rank-4');
+      // Measuring a collapsed card would overwrite its layout with zeroes.
+      return;
+    }
     const idText = card.querySelector('[data-aid="instance_id"]')?.textContent || '';
     const id = Number(idText.match(/#\s*(\d+)/)?.[1]);
     const priceBox = findPriceContainer(card);
@@ -232,7 +333,7 @@
         `<span class="vrc-value" data-vrc-hours="${h}">${money(hourly * h + traffic)}</span></div>`).join('') +
         `<div class="vrc-row vrc-data"><span class="vrc-duration">Data (once)</span>` +
         `<span class="vrc-value">${money(traffic)}</span></div>`;
-      candidates.push({ output, hourly, traffic });
+      candidates.push({ output, hourly, traffic, hidden });
       output.title = `${settings.download} GB download × $${(offer.down*1000).toFixed(3)}/TB + ` +
         `${settings.upload} GB upload × $${(offer.up*1000).toFixed(3)}/TB = ${money(traffic)} transfer. ` +
         'Totals = advertised hourly price × hours + one-time transfer.';
@@ -304,8 +405,8 @@
   function highlightCheapest(candidates) {
     // Rank only offers currently displayed, using unrounded totals including
     // bandwidth. Equal costs keep page order, so at most three offers win.
-    const displayed = candidates.filter(({ output }) =>
-      output.getClientRects().length && getComputedStyle(output).visibility !== 'hidden');
+    const displayed = candidates.filter(({ output, hidden }) =>
+      !hidden && output.getClientRects().length && getComputedStyle(output).visibility !== 'hidden');
     for (const hours of [2, 4]) {
       const cheapest = [...displayed].sort((a, b) =>
         (a.hourly * hours + a.traffic) - (b.hourly * hours + b.traffic)).slice(0, 3);
@@ -322,9 +423,10 @@
   function render() {
     if (!document.body) return;
     ensureStyles();
+    updateHiddenToggle();
     const candidates = [];
     document.querySelectorAll('.results-table [data-aid="RowElement"]')
-      .forEach(card => updateCard(card, candidates));
+      .forEach(card => updateCard(card, candidates, updateMachineControl(card)));
     highlightCheapest(candidates);
   }
   function scheduleRender() {
@@ -393,14 +495,17 @@
     ensureStyles();
     scheduleRender();
     observer = new MutationObserver((mutations) => {
-      // Avoid looping on DOM changes made by our own price elements.
+      // Avoid looping on DOM changes made by our own UI. Removed controls
+      // still trigger repair if Vast replaces or clears part of the page.
       const relevant = mutations.some(m => {
         const target = m.target.nodeType === Node.ELEMENT_NODE ? m.target : m.target.parentElement;
-        if (target?.closest('.vrc-costs, #vrc-dialog, #vrc-style')) return false;
+        if (target?.closest('.vrc-costs, .vrc-hide-machine, .vrc-hidden-toggle, #vrc-dialog, #vrc-style')) return false;
         if (m.type === 'characterData') return true;
+        if ([...m.removedNodes].some(n => n.nodeType === Node.ELEMENT_NODE &&
+          n.matches?.('.vrc-hide-machine, .vrc-hidden-toggle'))) return true;
         return [...m.addedNodes, ...m.removedNodes].some(n =>
           n.nodeType === Node.TEXT_NODE || (n.nodeType === Node.ELEMENT_NODE &&
-          !n.matches?.('.vrc-costs, #vrc-dialog, #vrc-style')));
+          !n.matches?.('.vrc-costs, .vrc-hide-machine, .vrc-hidden-toggle, #vrc-dialog, #vrc-style')));
       });
       if (relevant) scheduleRender();
     });

@@ -1,0 +1,62 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  body { background:#19232e; color:#eee; font:13px Arial,sans-serif; }
+  .sort-info { display:flex; align-items:center; height:32px; }
+  .results-table { width:1140px; }
+  .rentable-card, .machine-row { position:relative; height:100px; }
+  .leftcolumn { position:absolute; width:44px; }
+  .fixed-layout { position:absolute; left:225px; width:620px; height:92px; }
+  .abspos, [data-testid="machine-id"], [data-testid="host-id"] { position:absolute; }
+  [data-testid="machine-id"] { top:0; left:-10px; font-size:11px; }
+  [data-testid="host-id"] { top:0; left:176px; font-size:11px; }
+  .button-hover { position:relative; }
+  /* A taller native Rent button reproduces the reported bottom overlap. */
+  .rent-button { position:absolute; left:910px; height:40px; }
+</style>
+<div class="sort-info vast full row align-children">
+  <div data-aid="SearchPageGpuButtons"><strong>#GPUs:</strong><button>Any</button><button>1X</button></div>
+  <div data-aid="SearchPage-sort">Price (inc.)</div>
+</div>
+<div class="results-table"></div>
+<script>
+  // Match the supplied machine 142650, including its separate Type/offer ID.
+  window.draw = () => {
+    document.querySelector('.results-table').innerHTML = [
+      [45610815, '142650', '0.164'], [45610816, '142650', '0.174'],
+      [45610817, '200001', '0.200'], [45610818, '200002', '0.300'],
+      [45610819, '200003', '0.400'],
+    ].map(([offer, machine, price]) => `<div data-aid="RowElement">
+      <div class="rentable-card mui-panel popover-container"><div class="machine-row">
+        <div class="leftcolumn"><div class="abspos" data-aid="instance_id" style="top:88px;left:0;width:44px;font-size:6px">Type #${offer}</div></div>
+        <div class="fixed-layout">
+          <div class="abspos" style="top:0;left:90px;font-size:11px">Illinois, US</div>
+          <div class="abspos" style="top:16px;left:-10px;font-size:24px">1x RTX 3090</div>
+          <div data-testid="machine-id"><div><span> m:${machine} </span></div><div></div></div>
+          <div data-testid="host-id"><div><span>host:64907</span></div></div>
+          <div class="abspos" style="top:50px;left:96px;width:80px;font-size:11.5px">24 GB VRAM</div>
+          <div class="abspos" style="top:50px;left:176px;width:110px;font-size:13px">AMD Ryzen Threadripper</div>
+          <div class="abspos" style="top:50px;left:320px;width:110px;font-size:13px">KINGSTON SNV2S1000G</div>
+          <div class="abspos" style="top:46px;left:445px;width:80px;font-size:16px">44.4 DLPerf</div>
+          <div class="abspos" style="top:18px;left:532px;width:80px;font-size:9px">Max Duration</div>
+          <div class="abspos" style="top:70px;left:531px;width:44px;font-size:11px">99.75%</div>
+        </div>
+        <div class="button-hover" style="left:100px;margin-left:100px">
+          <div class="abspos" style="left:708px;font-weight:600;display:flex;align-items:center;flex-direction:column">$${price}/hr<span>plus bandwidth</span></div>
+          <button data-aid="RowElement-ask" class="rent-button" style="width:100px;top:50px">Rent</button>
+        </div>
+      </div></div>
+    </div>`).join('');
+  };
+  window.GM_registerMenuCommand = () => {};
+  if (!location.search.includes('fallback')) {
+    window.GM_getValue = (key, fallback) => JSON.parse(localStorage.getItem('gm:' + key) || 'null') ?? fallback;
+    window.GM_setValue = (key, value) => localStorage.setItem('gm:' + key, JSON.stringify(value));
+  }
+  window.fetch = async () => ({ ok:true, clone() { return this; }, json:async () => ({
+    offers:[45610815,45610816,45610817,45610818,45610819].map(id => ({id,inet_down_cost:0.007813,inet_up_cost:0.007813})),
+  }) });
+  draw();
+</script>
+<script src="/userscript.js"></script>
+<script>fetch('/api/v0/bundles/');</script>
