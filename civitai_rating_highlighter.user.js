@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Rating Highlighter
 // @namespace    https://civitai.com/
-// @version      1.2.0
+// @version      1.2.1
 // @description  Highlight and navigate unrated images/videos, with optional blinking, shortcuts, and traffic-light rating colors. Disabled by default.
 // @match        https://civitai.com/*
 // @match        https://civitai.red/*
@@ -22,9 +22,10 @@
     const PANEL_HIDDEN_KEY = `${KEY}-panel-hidden`;
     const FRAME = 'data-civitai-rating-unrated';
     const COLOR = 'data-civitai-rating-color';
-    // Use stable class names/prefixes, not Mantine's generated hashes.
-    const BADGE = '.mantine-Badge-root[class*="ImageGuard"]';
-    const CHIP = '[class*="BrowsingLevelsGrouped"] .mantine-Chip-label';
+    // Civitai's CSS module names are hashed now. Match stable Mantine classes,
+    // then validate the exact rating text with readRating (ignores Remix, OP, etc.).
+    const BADGE = '.mantine-Badge-root';
+    const CHIP = '.mantine-Chip-label';
     const LINK = 'a[href*="/images/"], a[href*="/posts/"]';
     const MEDIA = 'img, video, [class*="EdgeImage"], [class*="EdgeVideo"]';
     const PALETTE = {

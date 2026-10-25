@@ -47,8 +47,10 @@ different combination if the browser or operating system reserves your choice.
 The script handles newly loaded cards, changing rating badges, and gallery
 replacement during navigation without requiring a reload. It recognizes the
 gallery and post-detail card layouts in the supplied examples and also colors
-ImageGuard rating badges on cards confirmed as yours. Filter chips remain colored
-regardless of card ownership.
+rating badges on cards confirmed as yours, including the current carousel and
+gallery layouts with hashed CSS module names. Badges and filter chips are
+recognized by their stable Mantine classes and exact rating text. Filter chips
+remain colored regardless of card ownership.
 
 “Unrated” means the card has no PG, PG-13, R, X, or XXX badge in its HTML. This
 does not verify the rating in Civitai's database: if Civitai omits a badge, that
@@ -63,3 +65,7 @@ cards, gallery replacement, foreground border rendering, optional blinking,
 previous/next scrolling, custom shortcut capture, typing exclusions, saved
 settings, and disabling cleanup.
 Live authenticated galleries were not tested.
+
+Run `node tests/test_civitai_rating.cjs` for the headless Chrome regression test
+covering the supplied carousel/gallery structure, all five colors, filter chips,
+class changes, dynamic ratings, ownership filtering, and disabling cleanup.

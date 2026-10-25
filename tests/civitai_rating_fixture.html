@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  .relative { position: relative; }
+  .overflow-hidden { overflow: hidden; }
+  .card { width: 240px; height: 180px; }
+  video { width: 100%; height: 140px; }
+  .mantine-Badge-root { background: blue; color: white; }
+</style>
+<main id="cards">
+  <!-- Reduced from the supplied carousel: the rating is beside the media link. -->
+  <div id="carousel" class="relative w-full card" style="aspect-ratio:1024 / 1536">
+    <span aria-hidden="true" class="pointer-events-none absolute inset-0"></span>
+    <div class="Q7mtXa_root Q7mtXa_red absolute left-[max(0.5rem,var(--event-decoration-clear-left,0px))] top-2 z-10 m_347db0ec mantine-Badge-root" data-variant="light" style="--badge-bg: var(--mantine-color-blue-light); --badge-color: var(--mantine-color-blue-light-color)"><span class="m_5add502a mantine-Badge-label">R</span></div>
+    <button><div class="I_Zaha_label mantine-Badge-root"><span class="mantine-Badge-label">Remix</span></div></button>
+    <a href="/images/134573002"><div class="mantine-Indicator-root"><div class="relative overflow-hidden rounded-md"><div class="PrVpVa_iosScroll h-full relative flex flex-col items-center justify-center overflow-hidden"><video playsinline loop preload="none"></video></div></div></div></a>
+  </div>
+  <!-- Reduced gallery: the creator is above the inner media frame. -->
+  <div class="cDkATW_wrapper cDkATW_border w-full" style="--border: #e8590c; --borderWidth: 2px">
+    <div class="relative flex overflow-hidden rounded-md flex-col">
+      <div class="mantine-Paper-root"><a href="https://civitai.com/user/alexds9">alexds9</a><div class="mantine-Badge-root"><span class="mantine-Badge-label">OP</span></div></div>
+      <div id="gallery" class="relative flex-1 overflow-hidden card">
+        <div class="Q7mtXa_root Q7mtXa_red absolute left-[max(0.5rem,var(--event-decoration-clear-left,0px))] top-2 z-10 m_347db0ec mantine-Badge-root" data-variant="light" style="--badge-bg: var(--mantine-color-blue-light); --badge-color: var(--mantine-color-blue-light-color)"><span class="m_5add502a mantine-Badge-label">R</span></div>
+        <a class="mantine-Anchor-root" href="/images/134575077"><div class="PrVpVa_iosScroll h-full relative flex flex-col items-center justify-center overflow-hidden"><video playsinline loop preload="none"></video></div></a>
+      </div>
+    </div>
+  </div>
+</main>
+<div class="NewHash_root"><label class="mantine-Chip-label" data-checked>PG</label><label class="mantine-Chip-label">XXX</label><label class="mantine-Chip-label">Other filter</label></div>
+<script>
+  window.GM_getValue = (key, fallback) => key === 'civitai-rating-highlighter-v1' ? { enabled: true } : fallback;
+  window.GM_setValue = () => {};
+  window.GM_registerMenuCommand = () => {};
+  window.fetch = async input => {
+    const url = new URL(input, location.href);
+    if (url.pathname === '/api/auth/session') return { ok: true, json: async () => ({ user: { id: 7, username: 'alexds9', browsingLevel: 31 } }) };
+    if (url.pathname === '/api/v1/images' && url.searchParams.get('userId') === '7') {
+      return { ok: true, json: async () => ({ items: [{ id: url.searchParams.get('imageId'), username: 'alexds9' }] }) };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+</script>
+<script src="/userscript.js"></script>
