@@ -54,6 +54,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
       'model', 'post', 'viewer', 'viewer-embla', 'viewer-query', 'viewer-page',
       'no-hover', 'outside', 'typing', 'editable', 'overlap', 'scrolled', 'navigate',
       'custom-style', 'stalled', 'viewer-loading',
+      'hashed', 'hashed-custom', 'viewer-page-hashed', 'viewer-query-hashed', 'viewer-loading-hashed',
       'post-scroll', 'post-reference', 'viewer-reference',
       'concurrent', 'concurrent-scroll', 'concurrent-restart', 'concurrent-missing', 'concurrent-navigate',
     ]) {
@@ -150,7 +151,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
       await evaluate(`${scenario === 'typing' ? "document.querySelector('#editor')" : scenario === 'editable' ? "document.querySelector('#editable')" : 'window'}.dispatchEvent(${hotkey})`);
       if (scenario === 'overlap') await evaluate(`window.dispatchEvent(${hotkey}); window.dispatchEvent(new KeyboardEvent('keydown', {key:'S',ctrlKey:true,shiftKey:true,repeat:true}))`);
       if (scenario === 'navigate') await evaluate(`history.pushState({}, '', '/models/2')`);
-      const ignored = ['no-hover', 'outside', 'typing', 'editable', 'scrolled', 'viewer-loading'];
+      const ignored = ['no-hover', 'outside', 'typing', 'editable', 'scrolled', 'viewer-loading', 'viewer-loading-hashed'];
       let expected = ignored.includes(scenario) ? [] : scenario === 'model'
         ? ['101:Heart', '102:Like', '102:Heart', '103:Like', '103:Heart', '104:Like', '104:Heart']
         : ['post', 'post-scroll'].includes(scenario) ? [401, 402, 403].flatMap(id => [`${id}:Like`, `${id}:Heart`])

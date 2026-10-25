@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Add Reactions
 // @namespace    https://civitai.com/
-// @version      4.2
+// @version      4.3
 // @description  Ctrl+Shift+S (or X): add 👍❤️ to the hovered gallery post/model carousel, or images in an open post; advance right.
 // @author       You
 // @match        https://civitai.com/*
@@ -45,8 +45,8 @@
     }
     // Civitai's explicit marker also works with custom reaction colors.
     const classes = [...button.classList];
-    if (classes.some(name => name.includes('__hasReacted'))) return true;
-    if (classes.some(name => name.includes('__reactionBadge'))) return false;
+    if (classes.some(name => /(?:^|_)hasReacted$/.test(name))) return true;
+    if (classes.some(name => /(?:^|_)reactionBadge$/.test(name))) return false;
     const variant = button.getAttribute('data-variant');
     return variant === 'light' || variant === 'filled';
   }
@@ -174,8 +174,12 @@
       const visible = roots.filter(root => visibleRect(root, true));
       // Full-page viewers can coexist with mounted gallery content. Prefer
       // their own reaction row even when the cursor is over a gallery card.
-      const detail = visible.filter(root => reactionGroups(root).some(group =>
-        !/ImagesAsPostsCard|ModelCarousel/.test(group.className)));
+      const detail = visible.filter(root => reactionGroups(root).some(group => {
+        // Gallery/carousel rows sit beside a linked thumbnail. Viewer controls
+        // sit in a separate footer. Component class names no longer identify them.
+        return ![...group.parentElement.querySelectorAll('a[href*="/images/"], a[href*="/videos/"]')]
+          .some(link => link.querySelector('img, video'));
+      }));
       const root = detail.find(item => nextButton(item)) || detail[0];
       return root ? [{ root, inViewport: false, mode: 'viewer' }] : [];
     }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai - Premium Gallery Mock-up
 // @namespace    https://civitai.com/
-// @version      0.4.0
+// @version      0.4.1
 // @description  Turns a Civitai model page into an interactive Premium Gallery concept mock-up.
 // @match        https://civitai.com/models/*
 // @match        https://civitai.green/models/*
@@ -31,16 +31,12 @@
     feather: 8,
   });
   const MEDIA_SELECTOR = 'img, video';
-  const GALLERY_LINK_SELECTOR = [
-    'a[class*="ImagesAsPostsCard"][href^="/images/"]',
-    'a[class*="ImagesAsPostsCard"][href*="/images/"]',
-    '[data-testid*="gallery" i] a[href^="/images/"]',
-  ].join(', ');
+  const GALLERY_LINK_SELECTOR = 'a[href*="/images/"], a[href*="/videos/"]';
   const MAIN_GALLERY_LINK_SELECTOR = GALLERY_LINK_SELECTOR
     .split(', ')
     .map((selector) => `main ${selector}`)
     .join(', ');
-  const RENDER_HTML_SELECTOR = '[class*="RenderHtml"], [data-testid*="description" i]';
+  const RENDER_HTML_SELECTOR = '.mantine-TypographyStylesProvider-root, [class*="_htmlRenderer"], [class*="RenderHtml"], [data-testid*="description" i]';
 
   const state = {
     key: '',
@@ -1072,7 +1068,20 @@
       if (isPlausibleGalleryRoot(explicit)) return explicit;
     }
 
-    const firstGalleryLink = document.querySelector(MAIN_GALLERY_LINK_SELECTOR);
+    // Prefer a labelled gallery so model-preview thumbnails are kept separate.
+    const galleryLabel = [...findExactTextElements('Gallery'), ...findExactTextElements('Premium Gallery')]
+      .find(element => element.closest('main') && !element.closest('#cpgm-mode-switch'));
+    const controlled = galleryLabel?.closest('[aria-controls]')?.getAttribute('aria-controls');
+    const labelledRoot = (controlled && document.getElementById(controlled))
+      || galleryLabel?.closest('section, [role="tabpanel"], [data-testid*="gallery" i]');
+    if (labelledRoot && isPlausibleGalleryRoot(labelledRoot)) return labelledRoot;
+
+    const firstGalleryLink = [...document.querySelectorAll(MAIN_GALLERY_LINK_SELECTOR)]
+      .find(link => link.querySelector(MEDIA_SELECTOR) && (
+        link.parentElement.querySelector('[data-activity="remix:model-gallery"]')
+        || link.closest('[role="grid"], [data-testid*="gallery" i], [class*="MasonryContainer"]')
+        || /ImagesAsPostsCard/.test(link.className)
+      ));
     if (firstGalleryLink) {
       const grid = firstGalleryLink.closest(
         '[role="grid"], [data-testid*="gallery" i], [class*="MasonryContainer"]'
@@ -1080,11 +1089,10 @@
       if (grid) return grid;
 
       let mediaAncestor = firstGalleryLink.parentElement;
-      for (let depth = 0; mediaAncestor && depth < 7; depth += 1) {
+      for (let depth = 0; mediaAncestor && !mediaAncestor.matches('main, body') && depth < 7; depth += 1) {
         if (mediaAncestor.querySelectorAll(GALLERY_LINK_SELECTOR).length >= 2) {
           return mediaAncestor;
         }
-        if (mediaAncestor.matches('main, body')) break;
         mediaAncestor = mediaAncestor.parentElement;
       }
     }
@@ -1154,7 +1162,10 @@
   function getGalleryMediaElements() {
     const media = [];
     const seen = new Set();
-    for (const link of document.querySelectorAll(MAIN_GALLERY_LINK_SELECTOR)) {
+    const gallery = state.galleryRoot;
+    if (!gallery?.isConnected) return media;
+    for (const link of gallery.querySelectorAll(GALLERY_LINK_SELECTOR)) {
+      if (link.closest('#cpgm-preview, #comments, [data-testid*="comment" i]')) continue;
       const item = link.querySelector('video, img');
       if (item && !seen.has(item)) {
         seen.add(item);
@@ -1342,17 +1353,32 @@
 
     const mainSection = document.querySelector(
       'main [class*="ModelVersionDetails"][class*="mainSection"], main [class*="mainSection"]'
-    );
+    ) || document.querySelector('main');
     if (!mainSection) return null;
+
+    const isPreview = element => element && !state.galleryRoot?.contains(element)
+      && !element.closest('#cpgm-preview, #comments, [data-testid*="comment" i], a[href*="/user/"]');
+    const carousel = [...mainSection.querySelectorAll('[aria-roledescription="carousel"], .mantine-Carousel-root, [data-testid*="model-carousel" i]')]
+      .find(isPreview);
+    if (carousel) return carousel;
 
     const known = mainSection.querySelector(
       ':scope > [class*="Stack"] > .relative > .overflow-hidden, :scope > [class*="Stack"] > div > .overflow-hidden'
     );
-    if (known) return known.parentElement || known;
+    if (isPreview(known)) return known.parentElement || known;
 
-    const media = mainSection.querySelector('img, video');
+    const media = [...mainSection.querySelectorAll(MEDIA_SELECTOR)].find(isPreview);
     if (!media) return null;
-    return media.closest('.relative, [class*="carousel" i]') || media.parentElement;
+    const fallback = media.closest('a[href*="/images/"], a[href*="/videos/"]')?.parentElement
+      || media.parentElement;
+    // Find the preview's navigation container without swallowing descriptions
+    // or the separate gallery when both share a model-page ancestor.
+    for (let node = fallback; node && node !== mainSection; node = node.parentElement) {
+      if (node.contains(state.galleryRoot) || node.querySelector(RENDER_HTML_SELECTOR)
+        || node.querySelector('h1, h2')) break;
+      if (node.querySelector('button[aria-label^="Next" i], button svg.tabler-icon-chevron-right')) return node;
+    }
+    return fallback;
   }
 
   function renderPreview() {
@@ -1764,11 +1790,15 @@
     const mainSection = document.querySelector(
       'main [class*="ModelVersionDetails"][class*="mainSection"], main [class*="mainSection"]'
     );
-    const renderer = mainSection?.querySelector(RENDER_HTML_SELECTOR) ||
-      [...document.querySelectorAll(`main ${RENDER_HTML_SELECTOR}`)]
-        .find((node) => !node.closest('[class*="Accordion-item"]'));
+    const candidates = [...new Set([
+      ...mainSection?.querySelectorAll(RENDER_HTML_SELECTOR) || [],
+      ...document.querySelector('main')?.querySelectorAll(RENDER_HTML_SELECTOR) || [],
+    ])];
+    const renderer = candidates.find(node => !node.closest(
+      '.mantine-Accordion-item, [class*="Accordion-item"], #cpgm-description, #cpgm-preview, #comments, [data-testid*="comment" i]'
+    ) && !state.galleryRoot?.contains(node));
     if (!renderer) return null;
-    return renderer.closest('[class*="Spoiler-root"]') || renderer;
+    return renderer.closest('.mantine-Spoiler-root, [class*="Spoiler-root"]') || renderer;
   }
 
   function getDescriptionHtml(source) {

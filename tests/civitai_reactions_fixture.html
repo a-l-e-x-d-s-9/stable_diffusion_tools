@@ -44,6 +44,7 @@
   const arrows = [];
   const events = [];
   const active = new Set();
+  const hashed = new URLSearchParams(location.search).get('case').includes('hashed');
   let openAdds = 0;
   const imageSource = id => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><text y="50">${id}</text></svg>`)}`;
   const media = (id, video = false) => `<a class="media" href="/images/${id}">${video
@@ -53,11 +54,11 @@
     const selected = active.has(`${id}:${type}`);
     return `<button aria-label="${type} reaction" data-id="${id}" data-type="${type}"
       data-variant="${selected ? 'light' : 'subtle'}"
-      class="Reactions-module__fixture__reactionBadge ${selected ? 'Reactions-module__fixture__hasReacted' : ''}">
+      class="${hashed ? '_4O-l-G_reactionBadge' : 'Reactions-module__fixture__reactionBadge'} ${selected ? (hashed ? '_4O-l-G_hasReacted' : 'Reactions-module__fixture__hasReacted') : ''}">
       ${type === 'Like' ? '👍' : '❤️'}<span>0</span></button>`;
   }
   function reactions(id, missing = false, kind = 'ImagesAsPostsCard') {
-    return `<div class="reactions ${kind}-module__fixture__reactions" data-group="${id}">
+    return `<div class="reactions ${hashed ? '_9wUqOW_reactions' : `${kind}-module__fixture__reactions`}" data-group="${id}">
       <button aria-label="Add reaction" data-add="${id}">+</button>
       ${missing ? '' : reactionButton(id, 'Like') + reactionButton(id, 'Heart')}</div>`;
   }
@@ -206,8 +207,8 @@
       app.append(modelCarousel(), galleryCard('unrelated', [301, 302]));
     } else if (scenario.startsWith('viewer')) {
       app.append(galleryCard('background', [301, 302]));
-      history.replaceState({}, '', scenario === 'viewer-query' ? '/models/1?imageId=201' : '/images/201');
-      if (scenario !== 'viewer-loading') app.append(viewer({ embla: scenario === 'viewer-embla', query: scenario === 'viewer-query', modal: scenario !== 'viewer-page' }));
+      history.replaceState({}, '', scenario.startsWith('viewer-query') ? '/models/1?imageId=201' : '/images/201');
+      if (!scenario.startsWith('viewer-loading')) app.append(viewer({ embla: scenario === 'viewer-embla', query: scenario.startsWith('viewer-query'), modal: !scenario.startsWith('viewer-page') }));
     } else if (scenario === 'post' || scenario === 'post-scroll') {
       history.replaceState({}, '', '/posts/31448292');
       app.innerHTML = `<section>${[401, 402, 403].map(id => `<article style="margin-top: 400px">${media(id)}${reactions(id, true, 'Post')}</article>`).join('')}</section>
@@ -230,7 +231,7 @@
       }
       app.append(gallery);
       app.insertAdjacentHTML('beforeend', '<input id="editor"><div contenteditable="true" id="editable">Edit</div>');
-      if (scenario === 'custom-style') {
+      if (scenario === 'custom-style' || scenario === 'hashed-custom') {
         for (const button of gallery.querySelectorAll('[data-type]')) {
           button.dataset.variant = 'filled'; button.style.background = 'pink';
         }

@@ -1,0 +1,68 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  body { margin: 16px; font: 14px sans-serif; }
+  .relative { position: relative; }
+  .overflow-hidden { overflow: hidden; }
+  .media-link, .player { display: block; position: relative; width: 300px; height: 190px; padding: 20px; box-sizing: border-box; background: #ddd; }
+  .media-link video, .player video { width: 200px; height: 120px; }
+  .overlay { position: absolute; top: 35px; left: 35px; padding: 6px; background: #ccc; }
+  #gallery-grid { display: flex; gap: 20px; }
+  #gallery-grid img, #native-preview img { display: block; width: 200px; height: 150px; }
+  #avatar img, #comments img { width: 30px; height: 30px; }
+  .audio-players { display: flex; gap: 20px; }
+</style>
+<main></main>
+<script>
+  window.GM_registerMenuCommand = () => {};
+  window.GM_getValue = (key, fallback) => fallback;
+  window.GM_setValue = () => {};
+  window.GM_addValueChangeListener = () => {};
+  const testCase = new URLSearchParams(location.search).get('case');
+  const svg = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="200" height="150"><rect width="200" height="150" fill="gray"/></svg>');
+  const main = document.querySelector('main');
+  if (testCase === 'audio') {
+    main.innerHTML = `<button id="activate">Activate audio</button><div id="unrelated">Unrelated heading</div>
+      <div class="audio-players">
+        <a id="linked" class="media-link" href="/images/1"><div class="PrVpVa_iosScroll"><video id="video1" muted loop></video><span id="overlay1" class="overlay">Overlay</span></div></a>
+        <div id="unlinked" class="player"><video id="video2" muted loop></video><span id="overlay2" class="overlay">Overlay</span></div>
+        <div id="ambiguous" class="player"><span>Two videos</span><video muted></video><video muted></video></div>
+      </div>`;
+    Object.defineProperty(HTMLMediaElement.prototype, 'paused', { get: () => false });
+    Object.defineProperty(HTMLMediaElement.prototype, 'duration', { get: () => 1 });
+    HTMLMediaElement.prototype.play = function () { return Promise.resolve(); };
+    for (const video of document.querySelectorAll('video')) video.volume = 0;
+  } else {
+    main.innerHTML = `<h1>Example model</h1><a id="avatar" href="/user/alexds9"><img alt="Avatar" src="${svg}"></a>
+      <div class="Abc123_main">
+        <section id="native-preview" aria-roledescription="carousel"><a href="/images/100"><div class="relative w-full"><img src="${svg}" alt="Model preview"></div></a><button aria-label="Next image">Next</button></section>
+        <div class="mantine-Spoiler-root Xyz_content"><div class="mantine-TypographyStylesProvider-root Abc123_html"><p>Model description to preserve.</p></div></div>
+      </div>
+      <section id="gallery-section"><h2>Gallery</h2><div id="gallery-grid" class="Hashed_grid">
+        <div class="cDkATW_wrapper cDkATW_border"><div class="relative flex overflow-hidden rounded-md flex-col">
+          <div class="mantine-Paper-root"><a href="/user/alexds9">alexds9</a></div>
+          <div id="gallery-image" class="relative flex-1 overflow-hidden"><button data-activity="remix:model-gallery">Remix</button><a class="_9wUqOW_link mantine-Anchor-root" href="/images/200"><img src="${svg}#gallery" alt="Gallery image"></a><div class="_9wUqOW_reactions"><button aria-label="Like reaction">👍</button></div></div>
+        </div></div>
+        <div id="gallery-video" class="relative overflow-hidden"><button data-activity="remix:model-gallery">Remix</button><a class="_9wUqOW_link" href="/images/201"><div class="PrVpVa_iosScroll"><video width="200" height="150" preload="none"><source src="/test-video.mp4" type="video/mp4"></video></div></a></div>
+      </div></section>
+      <section id="comments"><a href="/images/999"><img src="${svg}" alt="Comment image"></a><div class="mantine-TypographyStylesProvider-root">Comment text</div></section>`;
+    if (testCase === 'legacy') {
+      document.querySelector('.Abc123_main').className = 'ModelVersionDetails_mainSection';
+      document.querySelector('.Abc123_html').className = 'RenderHtml_htmlRenderer__old';
+      document.querySelector('#gallery-image > a').className = 'ImagesAsPostsCard_link__old';
+    }
+    if (testCase === 'navigation-preview') document.querySelector('#native-preview').removeAttribute('aria-roledescription');
+    if (testCase === 'icon-preview') {
+      document.querySelector('#native-preview').removeAttribute('aria-roledescription');
+      const next = document.querySelector('#native-preview button');
+      next.removeAttribute('aria-label');
+      next.innerHTML = '<svg class="tabler-icon tabler-icon-chevron-right"></svg>';
+    }
+    if (testCase === 'renderer-only') document.querySelector('.Abc123_html').className = 'Xyz123_htmlRenderer';
+    if (testCase === 'unlabelled-gallery') document.querySelector('h2').remove();
+  }
+  const script = document.createElement('script');
+  script.src = testCase === 'audio' ? '/audio.js' : '/premium.js';
+  script.onload = () => { window.scriptReady = true; };
+  document.body.append(script);
+</script>

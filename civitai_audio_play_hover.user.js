@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Hover Video Audio - Synced Unlock Button
 // @namespace    https://civitai.com/
-// @version      1.5.1
+// @version      1.5.2
 // @description  Enable synced audio on hovered Civitai videos, with delayed switching, first-use unlock button, persistent M mute toggle.
 // @author       alexds9
 // @match        https://civitai.com/*
@@ -234,10 +234,15 @@
     const directVideo = target.closest("video");
     if (directVideo) return directVideo;
 
-    const edgeVideoBox = target.closest('[class*="EdgeVideo_"], [class*="EdgeVideo"]');
-    if (edgeVideoBox) {
-      const video = edgeVideoBox.querySelector("video");
-      if (video) return video;
+    // Resolve padding and overlays through the same media wrapper used for
+    // hover checks, without depending on Civitai's generated component names.
+    for (let node = target; node && !node.matches('body, html, main'); node = node.parentElement) {
+      const videos = node.querySelectorAll('video');
+      if (videos.length > 1) return null;
+      if (videos.length === 1) {
+        const video = videos[0];
+        return getVideoHoverWrapper(video)?.contains(target) ? video : null;
+      }
     }
 
     return null;
@@ -245,7 +250,10 @@
 
   function getVideoHoverWrapper(video) {
     if (!video) return null;
-    return video.closest('[class*="EdgeVideo_"], [class*="EdgeVideo"]');
+    const link = video.closest('a[href*="/images/"], a[href*="/videos/"]');
+    const wrapper = link || video.parentElement;
+    return wrapper && !wrapper.matches('body, html, main')
+      && wrapper.querySelectorAll('video').length === 1 ? wrapper : null;
   }
 
   function isPopupVisible() {
