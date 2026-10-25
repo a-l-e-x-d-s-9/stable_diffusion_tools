@@ -1,0 +1,62 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; }
+  .cards { display: flex; gap: 20px; }
+  .relative { position: relative; }
+  .card { width: 300px; height: 500px; }
+  .reactions { position: absolute; bottom: 0; display: flex; }
+  button { height: 28px; }
+</style>
+<main class="cards">
+  <!-- Relevant hierarchy from the supplied carousel and gallery HTML. -->
+  <div class="carousel-slide"><div id="carousel" class="relative w-full card" style="aspect-ratio:1024 / 1536">
+    <a href="/images/134573002"><div class="mantine-Indicator-root"><div class="relative overflow-hidden rounded-md"><div class="PrVpVa_iosScroll"><video preload="none"></video></div></div></div></a>
+    <div class="flex items-center justify-center gap-1 _6t5Via_reactions reactions">
+      <button aria-label="Add reaction">+</button>
+      <button class="_4O-l-G_reactionBadge mantine-Button-root" aria-label="Like reaction"><span class="mantine-Button-inner"><span class="mantine-Button-label">👍 4</span></span></button>
+      <button class="_4O-l-G_reactionBadge mantine-Button-root" aria-label="Heart reaction"><span>❤️ 6</span></button>
+      <button aria-label="Buzz">⚡</button>
+    </div>
+  </div></div>
+  <div class="cDkATW_wrapper cDkATW_border w-full">
+    <div class="relative flex overflow-hidden rounded-md flex-col">
+      <div class="mantine-Paper-root"><a href="https://civitai.com/user/alexds9">alexds9</a></div>
+      <div id="gallery" class="relative flex-1 overflow-hidden card">
+        <a href="/images/134575077"><div class="PrVpVa_iosScroll"><video preload="none"></video></div></a>
+        <div class="flex items-center justify-center gap-1 _9wUqOW_reactions reactions">
+          <button aria-label="Add reaction">+</button>
+          <button class="_4O-l-G_reactionBadge mantine-Button-root" aria-label="Like reaction"><span class="mantine-Button-label">👍 5</span></button>
+          <button class="_4O-l-G_reactionBadge mantine-Button-root" aria-label="Heart reaction"><span>❤️ 1</span></button>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+  window.requests = [];
+  window.ownershipRequests = [];
+  window.fetch = async input => {
+    const url = new URL(input, location.href);
+    if (url.pathname === '/api/auth/session') return { ok: true, json: async () => ({ user: { id: 7, username: 'alexds9', browsingLevel: 31 } }) };
+    if (url.pathname === '/api/v1/images' && url.searchParams.get('userId') === '7') {
+      ownershipRequests.push(url.searchParams.get('imageId'));
+      return { ok: true, json: async () => ({ items: [{ id: url.searchParams.get('imageId'), username: 'alexds9' }] }) };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  window.GM_xmlhttpRequest = options => {
+    const url = new URL(options.url);
+    const reaction = url.searchParams.get('reaction');
+    const after = url.searchParams.get('after');
+    requests.push({ imageId: url.pathname.split('/')[4], reaction, after });
+    const person = id => ({ userId: id, username: `person${id}`, follows: id === 1, reactedAt: '2026-10-01T12:00:00Z' });
+    const reactors = reaction === 'Heart' ? [person(1)]
+      : after ? [person(14)] : Array.from({ length: 13 }, (_, i) => person(i + 1));
+    setTimeout(() => options.onload({ status: 200, responseText: JSON.stringify({
+      reaction, reactors, next: reaction === 'Like' && !after ? 'page-2' : null,
+      counts: { Like: 14, Heart: 1, Laugh: 0, Cry: 0 },
+    }) }), 0);
+  };
+</script>
+<script src="/userscript.js"></script>

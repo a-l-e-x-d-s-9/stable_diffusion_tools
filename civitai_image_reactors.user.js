@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Image Reactors
 // @namespace    https://civitai.com/
-// @version      1.2.4
+// @version      1.2.5
 // @description  Show a paged list of people and their reactions on your own images.
 // @match        https://civitai.com/*
 // @match        https://civitai.red/*
@@ -79,7 +79,9 @@
         const button = target instanceof Element ? target.closest('button[aria-label$=" reaction"]') : null;
         const reaction = button?.getAttribute('aria-label')?.replace(/ reaction$/, '');
         if (!Object.hasOwn(REACTIONS, reaction)) return null;
-        const row = button.closest('div[class*="__reactions"]');
+        // Reaction buttons are direct children of the row in galleries and carousels.
+        // CSS module names change between builds, so use this structure instead.
+        const row = button.parentElement;
         return row ? { button, row } : null;
     }
 
