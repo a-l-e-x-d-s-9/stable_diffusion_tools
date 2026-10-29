@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Civitai - Show Yellow + Green Buzz and Sales
 // @namespace    https://civitai.com/
-// @version      1.7.8
-// @description  Shows combined Yellow and Green Buzz with configurable sales counts and a clickable sold-model list in Civitai's top-right account button.
+// @version      1.7.9
+// @description  Shows combined Yellow and Green Buzz with configurable sales counts and a clickable sold-model list, or only the avatar, in Civitai's top-right account button.
 // @match        https://civitai.com/*
 // @match        https://civitai.green/*
 // @match        https://civitai.red/*
@@ -28,6 +28,7 @@
   const SALES_MODEL_METADATA_CACHE_LIMIT = 2000;
   const SALES_LOCK_KEY = `${SALES_CACHE_KEY}-lock`;
   const SALES_PERIOD_KEY = 'civitai-yellow-buzz-sales-period-v1';
+  const AVATAR_ONLY_KEY = 'civitai-yellow-green-buzz-avatar-only-v1';
   const SALES_COLOR_SETTINGS_KEY =
     'civitai-yellow-buzz-sales-color-settings-v1';
   const SALES_REFRESH_MS = 2 * 60 * 1000;
@@ -53,6 +54,7 @@
   });
 
   const state = {
+    avatarOnly: false,
     exactYellowValue: null,
     exactGreenValue: null,
     exactCombinedValue: null,
@@ -78,7 +80,49 @@
     updatePending: false,
   };
 
-  console.info('[Civitai Buzz] Script v1.7.8 loaded');
+  console.info('[Civitai Buzz] Script v1.7.9 loaded');
+
+  function loadAvatarOnly() {
+    try {
+      return localStorage.getItem(AVATAR_ONLY_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  }
+
+  function applyAvatarOnly(enabled) {
+    state.avatarOnly = enabled;
+    setAttributeIfChanged(
+      document.documentElement,
+      'data-tm-buzz-avatar-only',
+      String(enabled)
+    );
+    if (enabled) closeSalesTooltip();
+    queueUpdate();
+  }
+
+  function saveAvatarOnly(enabled) {
+    try {
+      localStorage.setItem(AVATAR_ONLY_KEY, String(enabled));
+    } catch {
+      // The setting still applies until this page is closed.
+    }
+    applyAvatarOnly(enabled);
+  }
+
+  function installAvatarOnlyStyle() {
+    const style = document.createElement('style');
+    // Hide the whole Buzz section, including its icon and the sales badge.
+    // The account button and its avatar remain available to open the menu.
+    // CSS also covers replacement headers before the observer repairs them.
+    style.textContent = `
+      html[data-tm-buzz-avatar-only="true"] button[aria-label="Account menu"] [class*="userBuzz"],
+      html[data-tm-buzz-avatar-only="true"] button[aria-label="Account menu"] [style*="--buzz-gradient"] {
+        display: none !important;
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
 
   function getUtcSalesBounds(period = state.salesPeriod, now = new Date()) {
     let start = new Date(Date.UTC(
@@ -1304,6 +1348,23 @@
     help.style.setProperty('margin-bottom', '10px');
     panel.appendChild(help);
 
+    const avatarOnlyRow = document.createElement('label');
+    avatarOnlyRow.style.setProperty('display', 'flex');
+    avatarOnlyRow.style.setProperty('align-items', 'center');
+    avatarOnlyRow.style.setProperty('gap', '6px');
+    avatarOnlyRow.style.setProperty('margin-bottom', '10px');
+    avatarOnlyRow.style.setProperty('font-size', '12px');
+    avatarOnlyRow.title = 'Restore Buzz and sales here or with the userscript menu toggle.';
+
+    const avatarOnlyCheckbox = document.createElement('input');
+    avatarOnlyCheckbox.type = 'checkbox';
+    avatarOnlyCheckbox.checked = state.avatarOnly;
+    avatarOnlyRow.append(
+      avatarOnlyCheckbox,
+      'Avatar only (hide Buzz and sales)'
+    );
+    panel.appendChild(avatarOnlyRow);
+
     const periodRow = document.createElement('label');
     periodRow.style.setProperty('display', 'flex');
     periodRow.style.setProperty('align-items', 'center');
@@ -1449,6 +1510,7 @@
         DEFAULT_SALES_COLOR_SETTINGS
       );
       saveSalesPeriod(periodSelect.value);
+      saveAvatarOnly(false);
       closeSalesSettingsPanel();
     });
 
@@ -1488,6 +1550,7 @@
         }
       );
       saveSalesPeriod(periodSelect.value);
+      saveAvatarOnly(avatarOnlyCheckbox.checked);
       closeSalesSettingsPanel();
     });
 
@@ -1548,6 +1611,7 @@
   }
 
   function openSalesTooltip(badge) {
+    if (state.avatarOnly) return;
     clearSalesTooltipCloseTimer();
     if (state.salesSettingsPanel || !badge?.isConnected) return;
 
@@ -2013,9 +2077,18 @@
       'Show sales settings',
       showSalesSettingsFromMenu
     );
+    GM_registerMenuCommand(
+      'Toggle avatar only (hide Buzz and sales)',
+      () => {
+        closeSalesSettingsPanel();
+        saveAvatarOnly(!state.avatarOnly);
+      }
+    );
   }
 
   function start() {
+    installAvatarOnlyStyle();
+    applyAvatarOnly(loadAvatarOnly());
     state.salesPeriod = loadSalesPeriod();
     applyExactBuzzCache(loadExactBuzzCache());
 
@@ -2055,6 +2128,12 @@
     );
 
     window.addEventListener('storage', (event) => {
+      if (event.key === AVATAR_ONLY_KEY || event.key === null) {
+        applyAvatarOnly(loadAvatarOnly());
+        closeSalesSettingsPanel();
+        if (event.key !== null) return;
+      }
+
       if (event.key === EXACT_BUZZ_CACHE_KEY) {
         applyExactBuzzCache(loadExactBuzzCache());
         return;
