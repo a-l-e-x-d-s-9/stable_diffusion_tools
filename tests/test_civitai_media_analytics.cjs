@@ -106,7 +106,7 @@ const server = http.createServer((req, res) => {
     await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point }, sessionId);
     await until(`!ui('video').querySelector('.panel').hidden`);
     await until(`ui('video').querySelector('.chart svg')`);
-    assert.equal(await evaluate(`ui('video').querySelector('.total').textContent`), '555 this month');
+    assert.equal(await evaluate(`ui('video').querySelector('.total').textContent`), '555');
     assert.equal(await evaluate(`ui('video').querySelectorAll('.chart .data-point').length`), 93);
     await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x + 1, y: point.y }, sessionId);
     assert.equal(await evaluate(`ui('video').querySelector('.panel').hidden`), false);
@@ -118,7 +118,7 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(await evaluate(`[...ui('video').querySelectorAll('.metric')].map(el => el.textContent)`),
       ['Views over time', 'Reactions over time', 'Feed impressions over time']);
     assert.deepEqual(await evaluate(`[...ui('video').querySelectorAll('.total')].map(el => el.textContent)`),
-      ['555 this month', '36 this month', '245,476 this month']);
+      ['555', '36', '245,476']);
     assert.equal(await evaluate(`ui('video').querySelectorAll('.chart svg').length`), 3);
     assert.equal(await evaluate(`ui('video').querySelectorAll('.prev, .next').length`), 0);
     assert(await evaluate(`(() => {
@@ -138,8 +138,8 @@ const server = http.createServer((req, res) => {
       await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...position }, sessionId);
     };
     await hoverDay('series', 6);
-    assert.deepEqual(await evaluate(`[...ui('video').querySelectorAll('.readout')].map(el => [el.hidden,el.textContent])`),
-      [[false,'2026-10-06 · 51'],[false,'2026-10-06 · 4'],[false,'2026-10-06 · 16,523']]);
+    assert.deepEqual(await evaluate(`[...ui('video').querySelectorAll('.readout')].map(el => [el.dataset.date,el.textContent])`),
+      [['2026-10-06','51'],['2026-10-06','4'],['2026-10-06','16,523']]);
     assert(await evaluate(`(() => {
       const lines = [...ui('video').querySelectorAll('.focus-line')];
       const x = lines.map(line => line.getBoundingClientRect().x);
@@ -148,16 +148,34 @@ const server = http.createServer((req, res) => {
     assert.equal(await evaluate(`ui('video').querySelectorAll('.focus-dot[visibility="visible"]').length`), 3);
     await hoverDay('impressionSeries', 31);
     assert.deepEqual(await evaluate(`[...ui('video').querySelectorAll('.readout')].map(el => el.textContent)`),
-      ['2026-10-31 · 0','2026-10-31 · 0','2026-10-31 · 19'], 'A zero count must remain visible');
+      ['0','0','19'], 'A zero count must remain visible');
     await hoverDay('reactionSeries', 12);
     assert.deepEqual(await evaluate(`[...ui('video').querySelectorAll('.readout')].map(el => el.textContent)`),
-      ['2026-10-12 · 46','2026-10-12 · 1','2026-10-12 · 17,787'], 'Any of the three graphs must drive the shared date');
+      ['46','1','17,787'], 'Any of the three graphs must drive the shared date');
+    assert.deepEqual(await evaluate(`[...ui('video').querySelectorAll('.day-label')].map(el => el.textContent)`),
+      ['2026-10-12','2026-10-12','2026-10-12']);
+    assert(await evaluate(`[...ui('video').querySelectorAll('.graph')].every(graph => {
+      const total = graph.querySelector('.total'), daily = graph.querySelector('.readout');
+      const totalRect = total.getBoundingClientRect(), dailyRect = daily.getBoundingClientRect();
+      const chartRect = graph.querySelector('.chart').getBoundingClientRect();
+      return Math.abs(totalRect.right - chartRect.left) < 1 && Math.abs(dailyRect.right - chartRect.left) < 1
+        && totalRect.bottom <= dailyRect.top && parseFloat(getComputedStyle(total).fontSize) >= 22
+        && parseFloat(getComputedStyle(daily).fontSize) >= 22;
+    })`), 'Each graph must have large monthly/daily values in a left column with zero gap before the chart');
+    assert(await evaluate(`[...ui('video').querySelectorAll('.graph')].every(graph => {
+      const total = graph.querySelector('.total'), daily = graph.querySelector('.readout');
+      const footer = ui('video').querySelector('.footer').getBoundingClientRect();
+      return total.scrollWidth <= total.clientWidth && daily.scrollWidth <= daily.clientWidth
+        && total.getBoundingClientRect().height <= 23 && daily.getBoundingClientRect().bottom <= footer.top;
+    })`), 'Large values must remain on one line and clear the footer');
+    assert.deepEqual(await evaluate(`[...ui('video').querySelectorAll('.total')].map(el => el.textContent)`),
+      ['555', '36', '245,476'], 'Hovering must preserve the monthly totals');
     if (process.env.ANALYTICS_SCREENSHOT) {
       const shot = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
       fs.writeFileSync(process.env.ANALYTICS_SCREENSHOT, Buffer.from(shot.data, 'base64'));
     }
     await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1050, y: 800 }, sessionId);
-    assert(await evaluate(`[...ui('video').querySelectorAll('.readout')].every(el => el.hidden)`), 'Leaving the graphs must clear the readouts');
+    assert(await evaluate(`[...ui('video').querySelectorAll('.readout')].every(el => el.textContent === '—' && !el.dataset.date)`), 'Leaving the graphs must clear the readouts');
     assert.equal(await evaluate(`ui('video').querySelectorAll('.focus-line[visibility="visible"]').length`), 0);
     await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point }, sessionId);
     assert.equal(await evaluate(`ui('video').querySelector('.panel').hidden`), true, 'Re-entering must hide');
@@ -186,13 +204,13 @@ const server = http.createServer((req, res) => {
     await until(`ui('video').querySelector('[data-metric="impressionSeries"] .chart')?.textContent.includes('unavailable')`);
     assert.equal(await evaluate(`ui('video').querySelectorAll('.chart svg').length`), 2, 'Missing impressions must keep views and reactions visible');
     await hoverDay('series', 6);
-    assert.equal(await evaluate(`ui('video').querySelector('[data-metric="impressionSeries"] .readout').textContent`), '2026-10-06 · No data');
+    assert.equal(await evaluate(`ui('video').querySelector('[data-metric="impressionSeries"] .readout').textContent`), 'No data');
     await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1050, y: 800 }, sessionId);
     await evaluate(`mode='gaps'; click('video', '.refresh')`);
     await until(`ui('video').querySelectorAll('.chart svg').length === 3`);
-    assert(await evaluate(`[...ui('video').querySelectorAll('.readout')].every(el => el.hidden)`), 'Reloading data must clear the previous reference date');
+    assert(await evaluate(`[...ui('video').querySelectorAll('.readout')].every(el => el.textContent === '—' && !el.dataset.date)`), 'Reloading data must clear the previous reference date');
     await hoverDay('series', 6);
-    assert.equal(await evaluate(`ui('video').querySelector('[data-metric="reactionSeries"] .readout').textContent`), '2026-10-06 · No data', 'Missing days must not select a different day in one metric');
+    assert.equal(await evaluate(`ui('video').querySelector('[data-metric="reactionSeries"] .readout').textContent`), 'No data', 'Missing days must not select a different day in one metric');
     assert.equal(await evaluate(`ui('video').querySelector('[data-metric="reactionSeries"] .focus-dot').getAttribute('visibility')`), 'hidden');
     assert.equal(await evaluate(`ui('video').querySelectorAll('.focus-line[visibility="visible"]').length`), 3);
     assert(await evaluate(`Math.abs(Number(ui('video').querySelector('[data-metric="reactionSeries"] .data-point').getAttribute('cx')) - (43+290/30)) < 0.001`), 'A series missing its first day must share the same date axis');
@@ -217,6 +235,15 @@ const server = http.createServer((req, res) => {
     await until(`ui('viewer')`);
     await evaluate(`click('viewer', '.toggle')`);
     await until(`requests.some(r => r.url.includes('/image/99?'))`);
+    await until(`ui('viewer').querySelectorAll('.chart svg').length === 3`);
+    assert(await evaluate(`(() => {
+      const summaries = [...ui('viewer').querySelectorAll('.summary')];
+      const textWidths = summaries.flatMap(summary => [...summary.querySelectorAll('.value-label,.total,.readout')].map(el => {
+        const range = document.createRange(); range.selectNodeContents(el); return range.getBoundingClientRect().width;
+      }));
+      const widestText = Math.max(...textWidths);
+      return summaries.every(summary => summary.getBoundingClientRect().width <= Math.ceil(widestText) + 1);
+    })()`), 'Wide viewers must size the left column to its text rather than reserving a percentage of the media');
     await evaluate(`history.replaceState({}, '', '/models/1?imageId=100')`);
     await until(`ui('viewer').querySelector('.panel').hidden`);
     await evaluate(`click('viewer', '.toggle')`);
@@ -226,7 +253,7 @@ const server = http.createServer((req, res) => {
     await until(`ui('viewer').querySelector('.chart svg')`);
     await evaluate(`new Promise(resolve => setTimeout(resolve, 250))`);
     assert.equal(await evaluate(`ui('viewer').querySelector('.studio').href`), 'https://creator-studio.civitai.com/analytics/content/image/100?month=2026-08');
-    assert.equal(await evaluate(`ui('viewer').querySelector('.total').textContent`), '27,528 this month', 'A slow old month cannot replace the new chart');
+    assert.equal(await evaluate(`ui('viewer').querySelector('.total').textContent`), '27,528', 'A slow old month cannot replace the new chart');
     await evaluate(`ui('viewer').querySelector('.toggle').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,composed:true}))`);
     assert.equal(await evaluate(`ui('viewer').querySelector('.panel').hidden`), true);
 

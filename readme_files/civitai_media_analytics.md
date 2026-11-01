@@ -12,7 +12,10 @@ Tampermonkey or Violentmonkey. Allow its request permission for
   **Feed impressions over time** vertically, with all three shown together.
   Small media cards allow scrolling when needed. Move the pointer across any
   graph to highlight the same date on all three graphs, with a vertical reference
-  line, highlighted points, and each graph's date and exact count. Missing values
+  line and highlighted points. Each graph has a large-number column on its left:
+  the month's total on top, with the hovered date and daily count below. The
+  column fits its text with zero spacing before the chart. The
+  daily count shows a dash until you hover a date. Missing values
   show “No data”; zero counts show zero. Moving out of the graphs clears the
   markers. These are daily counts, not cumulative counts.
 - The selected month is saved and shared across every overlay, browser tab, and
@@ -63,7 +66,8 @@ can override the executable). It runs a local fixture server, blocks media CDN
 requests, and mocks authenticated Studio transport using the exact daily series
 from the supplied saved page. It checks the centered button, three stacked graphs,
 pointer re-entry, mouse clicks, synchronized reference dates and values across
-all graphs, missing and zero counts, totals, persistent month selection, live updates
+all graphs, large monthly/daily values to the left of each graph, missing and zero
+counts, totals, persistent month selection, live updates
 across open panels and tabs, reload persistence, caching, errors, safe parsing, lazy cards,
 viewer navigation, and delayed responses. Live authenticated Studio access must
 be verified in the installed browser session.

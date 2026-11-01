@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Civitai Media Analytics Overlay
 // @namespace    https://civitai.com/
-// @version      1.3.0
+// @version      1.4.1
 // @description  Hover a bottom-center button to toggle three stacked daily analytics graphs on images and videos.
 // @match        https://civitai.com/*
 // @match        https://civitai.red/*
@@ -228,8 +228,9 @@
             hoveredDate = date;
             for (const chart of charts) {
                 const point = chart.points.get(date);
-                chart.readout.hidden = !date;
-                chart.readout.textContent = date ? `${date} · ${point ? point.value.toLocaleString() : 'No data'}` : '';
+                chart.dayLabel.textContent = date || 'Hover a day';
+                chart.readout.dataset.date = date || '';
+                chart.readout.textContent = date ? (point ? point.value.toLocaleString() : 'No data') : '—';
                 if (!chart.svg) continue;
                 chart.line.setAttribute('visibility', date ? 'visible' : 'hidden');
                 chart.dot.setAttribute('visibility', date && point ? 'visible' : 'hidden');
@@ -249,7 +250,15 @@
             graph.className = 'graph';
             graph.dataset.metric = spec.key;
             graph.setAttribute('aria-label', spec.label);
-            graph.innerHTML = '<div class="heading"><span class="metric"></span><span class="total"></span></div><div class="chart"><output class="readout" hidden></output></div>';
+            graph.innerHTML = `
+                <div class="heading"><span class="metric"></span></div>
+                <div class="graph-row">
+                    <div class="summary">
+                        <div class="month-value"><span class="value-label">Month total</span><span class="total">—</span></div>
+                        <div class="day-value"><span class="value-label day-label">Hover a day</span><output class="readout" data-date="">—</output></div>
+                    </div>
+                    <div class="chart"></div>
+                </div>`;
             graph.querySelector('.metric').textContent = spec.label;
             graphs.append(graph);
             const chart = drawChart(graph, spec, state.data, dates, dayX);
@@ -278,13 +287,15 @@
     function drawChart(graph, spec, data, dates, dayX) {
         const chart = graph.querySelector('.chart');
         const points = data?.[spec.key];
-        const result = { readout: graph.querySelector('.readout'), points: new Map((points || []).map(point => [point.date, point])) };
+        const result = { readout: graph.querySelector('.readout'), dayLabel: graph.querySelector('.day-label'),
+            points: new Map((points || []).map(point => [point.date, point])) };
         if (!points?.length) {
             chart.append(document.createTextNode(points ? 'No daily data for this month.' : 'This metric is unavailable for this media.'));
             return result;
         }
         const total = points.reduce((sum, point) => sum + point.value, 0);
-        graph.querySelector('.total').textContent = `${total.toLocaleString()} this month`;
+        graph.querySelector('.total').textContent = total.toLocaleString();
+        graph.querySelector('.total').setAttribute('aria-label', `${total.toLocaleString()} this month`);
         const svg = svgNode('svg', { viewBox: '0 0 360 100', preserveAspectRatio: 'none', role: 'img', 'aria-label': `${spec.label}: ${total.toLocaleString()} this month` });
         const max = Math.max(1, ...points.map(point => point.value));
         const y = count => 75 - count / max * 65;
@@ -376,18 +387,23 @@
                     display:flex; flex-direction:column; gap:8px;
                     overflow:auto; pointer-events:auto; padding:9px; background:#0f172aee;
                     border:1px solid #64748b; border-radius:8px; box-shadow:0 4px 18px #0009; }
-                .graphs { display:flex; flex-direction:column; flex:1; min-height:232px; gap:8px; }
+                .graphs { display:grid; grid-template-columns:max-content minmax(0,1fr);
+                    grid-template-rows:repeat(3,minmax(0,1fr)); flex:1; min-height:248px; gap:6px 0; }
                 .graphs:empty { display:none; }
-                .graph { display:flex; flex-direction:column; flex:1; min-height:0; }
-                .graph + .graph { border-top:1px solid #ffffff25; padding-top:5px; }
-                .heading { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:2px 6px; }
+                .graph { display:grid; grid-template-columns:subgrid; grid-column:1 / -1;
+                    grid-template-rows:auto minmax(62px,1fr); min-height:0; }
+                .graph + .graph { border-top:1px solid #ffffff25; padding-top:3px; }
+                .heading { grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:2px 6px; }
                 .metric { font-weight:700; font-size:11px; }
-                .total { color:#e2e8f0; font-size:10px; }
-                .chart { position:relative; flex:1; min-height:0; }
+                .graph-row { display:contents; }
+                .summary { display:flex; flex-direction:column; justify-content:center; min-width:0; }
+                .month-value,.day-value { display:flex; flex-direction:column; }
+                .value-label { color:#cbd5e1; font-size:9px; line-height:9px; }
+                .total,.readout { display:block; color:#fff; font-size:22px; line-height:22px; font-weight:750;
+                    font-variant-numeric:tabular-nums; white-space:nowrap; }
+                .readout { color:#93c5fd; }
+                .chart { position:relative; min-width:0; min-height:0; }
                 .chart svg { display:block; width:100%; height:100%; max-height:180px; }
-                .readout { position:absolute; top:0; right:0; z-index:1; pointer-events:none;
-                    padding:1px 4px; border-radius:3px; background:#020617ed; color:#fff;
-                    font-size:11px; line-height:16px; font-variant-numeric:tabular-nums; white-space:nowrap; }
                 .chart:empty,.status:empty,.total:empty { display:none; }
                 .status { color:#fcd34d; padding:9px 0; overflow-wrap:anywhere; }
                 .footer { display:flex; flex-shrink:0; flex-wrap:wrap; align-items:center; gap:6px; color:#cbd5e1; font-size:11px; }
