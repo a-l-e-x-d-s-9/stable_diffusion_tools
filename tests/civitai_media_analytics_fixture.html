@@ -1,0 +1,70 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Media analytics overlay fixture</title>
+<style>
+  body { margin: 20px; background: #242424; color: white; }
+  main { display: flex; gap: 20px; flex-wrap: wrap; }
+  .card { position:relative; width:300px; }
+  .card a { display:block; }
+  img,video { display:block; width:300px; height:360px; object-fit:cover; }
+  #viewer { position:fixed; inset:5px; background:#222; z-index:300; }
+  #viewer > div { width:500px; height:650px; }
+  #viewer img { width:500px; height:650px; }
+  .avatar img { width:45px; height:45px; }
+</style>
+<main>
+  <div class="card" id="image"><a href="https://civitai.red/images/147484519"><img src="https://image.civitai.com/test/image.jpeg"></a></div>
+  <div class="card" id="video"><a href="https://civitai.com/images/143710065"><div><video poster="https://image.civitai.com/test/poster.jpeg"><source src="https://image.civitai.com/test/video.webm"></video></div></a></div>
+  <div class="avatar"><img src="https://image.civitai.com/test/avatar.jpeg"></div>
+</main>
+<script>
+  window.requests = [];
+  window.mode = 'ok';
+  window.delay = 10;
+  window.navigations = 0;
+  // Mimic userscript-wide persistent storage and cross-tab value notifications.
+  window.storageWrites = [];
+  const valueListeners = new Map();
+  const storagePrefix = 'test-userscript:';
+  window.GM_getValue = (key, fallback) => {
+    const raw = localStorage.getItem(storagePrefix + key);
+    return raw === null ? fallback : JSON.parse(raw);
+  };
+  window.GM_setValue = (key, value) => {
+    const oldValue = GM_getValue(key, null);
+    localStorage.setItem(storagePrefix + key, JSON.stringify(value));
+    storageWrites.push({ key, value });
+    valueListeners.get(key)?.(key, oldValue, value, false);
+  };
+  window.GM_addValueChangeListener = (key, callback) => valueListeners.set(key, callback);
+  window.addEventListener('storage', event => {
+    if (!event.key?.startsWith(storagePrefix)) return;
+    const key = event.key.slice(storagePrefix.length);
+    valueListeners.get(key)?.(key, event.oldValue === null ? null : JSON.parse(event.oldValue),
+      event.newValue === null ? null : JSON.parse(event.newValue), true);
+  });
+  document.querySelector('main').addEventListener('click', event => {
+    if (event.target.closest('a')) { event.preventDefault(); navigations++; }
+  });
+  window.GM_xmlhttpRequest = options => {
+    const url = new URL(options.url);
+    requests.push({ url: options.url, month: url.searchParams.get('month'), credentials: options.withCredentials });
+    const mode = window.mode, delay = window.delay;
+    fetch('/response.html').then(res => res.text()).then(html => setTimeout(() => {
+      const id = url.pathname.split('/').at(-1);
+      html = html.replace('imageId:143710065', 'imageId:' + id);
+      if (['2026-07', '2026-08'].includes(url.searchParams.get('month'))) {
+        const value = url.searchParams.get('month') === '2026-07' ? 777 : 888;
+        html = html.replace(/value:\d+/g, 'value:' + value);
+      }
+      if (mode === 'missing') html = html.replace(/,impressionSeries:\[.*?\]/, '');
+      if (mode === 'gaps') html = html.replace(/reactionSeries:\[.*?\]/,
+        series => series.replace(/\{date:"2026-10-(?:01|06)",value:\d+\},?/g, ''));
+      if (mode === 'wrong-id') html = html.replace('imageId:' + id, 'imageId:999999');
+      if (mode === 'injection') html = html.replace('series:[', 'series:(window.compromised=true,[');
+      options.onload({ status: mode === 'forbidden' ? 403 : 200,
+        responseText: mode === 'login' ? '<html><h1>Sign in</h1></html>' : html });
+    }, delay));
+  };
+</script>
+<script src="/userscript.js"></script>

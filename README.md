@@ -50,6 +50,15 @@ Ignore rules do not remove files from earlier Git commits.
 
 # Scripts:
 
+## [Civitai Media Analytics Overlay](civitai_media_analytics.user.js)
+
+Hover a bottom-center button on an image or video to toggle three stacked graphs
+of daily views, reactions, and feed impressions. Hover any graph to see the same
+date and its values across all three. The selected month persists and
+syncs live across overlays and tabs. Supports
+Civitai's `.com`, `.red`, and `.green` domains.
+See [installation and usage](readme_files/civitai_media_analytics.md).
+
 ## [Face extraction](crop_to_face_improved.py)
 
 Extract faces with YuNet, automatic CUDA acceleration, and FaceMesh verification
