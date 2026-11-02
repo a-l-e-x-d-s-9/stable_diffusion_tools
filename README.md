@@ -417,6 +417,16 @@ or Chromium; uses a simulated gallery, without contacting Grok).
 ## [Safetensors Metadata](safetensors_metadata.py)
 ### Features:
 1. Read metadata from Safetensors model files.
+2. Export complete metadata to JSON without modifying model files. Metadata values retain their original strings.
+
+```bash
+python safetensors_metadata.py model.safetensors --output model.json
+python safetensors_metadata.py /path/to/models --output /path/to/models/metadata --recursive
+```
+
+Directory exports create one `<model-name>.json` per model and preserve subdirectories
+with `--recursive`. Use `--overwrite` to replace existing exports. Omit `--output`
+to print metadata. `-h` displays help and exits without processing files.
 
 ## [Search And Replace Multiple](search_and_replace_multiple.py)
 ### Features:

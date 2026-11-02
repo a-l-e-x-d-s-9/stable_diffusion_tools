@@ -2,7 +2,12 @@
 """
 safetensors_metadata.py
 
-Read, replace, clear, or add metadata in .safetensors files.
+Read, export, replace, clear, or add metadata in .safetensors files.
+
+Export metadata without changing models:
+  python safetensors_metadata.py model.safetensors --output model.json
+  python safetensors_metadata.py models/ --output models/metadata/ --recursive
+JSON exports preserve all metadata keys and their original string values.
 
 Safe defaults:
 - Writing is done through a temporary file first, then atomically moved into place.
@@ -31,7 +36,6 @@ from pprint import pprint
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from safetensors import safe_open
-from safetensors.torch import save_file as torch_save_file
 
 
 SAFETENSORS_SUFFIX = ".safetensors"
@@ -166,6 +170,37 @@ def _read_raw_metadata(file_path: Path) -> Dict[str, str]:
         return dict(f.metadata() or {})
 
 
+def _export_metadata_one_file(input_path: Path, output_path: Path, *, overwrite: bool) -> None:
+    if output_path.suffix.lower() != ".json":
+        raise ValueError(f"Metadata export output must have a .json extension: {output_path}")
+    if input_path.resolve() == output_path.resolve():
+        raise ValueError("Metadata export cannot overwrite the input model.")
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"Output file already exists: {output_path} (use --overwrite)")
+
+    metadata = _read_raw_metadata(input_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=output_path.name + ".tmp.",
+            dir=str(output_path.parent), delete=False,
+        ) as tmp_fp:
+            tmp_name = tmp_fp.name
+            json.dump(metadata, tmp_fp, ensure_ascii=False, indent=2, sort_keys=True)
+            tmp_fp.write("\n")
+        if overwrite:
+            os.replace(tmp_name, output_path)
+        else:
+            # Publish atomically without replacing an existing file, even if
+            # another process created it after the initial existence check.
+            os.link(tmp_name, output_path)
+    finally:
+        if tmp_name and Path(tmp_name).exists():
+            Path(tmp_name).unlink()
+    print(f"OK: exported {len(metadata)} metadata keys: {output_path}")
+
+
 def _make_backup(file_path: Path, *, overwrite_backup: bool = True) -> Path:
     backup_path = file_path.with_name(file_path.name + ".bak")
     if backup_path.exists() and not overwrite_backup:
@@ -186,6 +221,8 @@ def _write_metadata_one_file(
     overwrite: bool,
     verify: bool,
 ) -> None:
+    from safetensors.torch import save_file as torch_save_file
+
     if not input_path.is_file():
         raise FileNotFoundError(f"Input file not found: {input_path}")
     if input_path.suffix != SAFETENSORS_SUFFIX:
@@ -284,9 +321,9 @@ def _derive_output_path(input_path: Path, output: Optional[Path], *, multiple_fi
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Read, clear, replace, or add metadata for .safetensors files.")
+    parser = argparse.ArgumentParser(description="Read, export, clear, replace, or add metadata for .safetensors files.")
     parser.add_argument("path", type=Path, help="Path to a .safetensors file or a directory.")
-    parser.add_argument("--read", action="store_true", help="Read and print metadata.")
+    parser.add_argument("--read", action="store_true", help="Read metadata; print it or export JSON with --output.")
     parser.add_argument("--write-json", type=Path, help="Path to JSON metadata to write.")
     parser.add_argument(
         "--set-meta",
@@ -327,7 +364,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        help="Output file path. For directory input, this must be an output directory. Default: in-place.",
+        help=(
+            "When reading, export metadata to a JSON file or directory (one .json per model). "
+            "When writing model metadata, output a .safetensors file or directory; default: in-place. "
+            "Directory input requires an output directory. Recursive JSON exports preserve subdirectories."
+        ),
     )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output file if it exists.")
     parser.add_argument("--recursive", action="store_true", help="Recurse into subdirectories for directory input.")
@@ -352,8 +393,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if not files:
             raise FileNotFoundError(f"No .safetensors files found under: {args.path}")
 
-        if args.output and len(files) > 1 and args.output.exists() and not args.output.is_dir():
-            raise ValueError("When processing multiple files, --output must be a directory.")
+        directory_input = args.path.is_dir()
+        if args.output and directory_input and args.output.exists() and not args.output.is_dir():
+            raise ValueError("For directory input, --output must be a directory.")
 
         metadata = _load_metadata_json(args.write_json) if args.write_json else {}
         # CLI values intentionally override JSON values. Plain --set-meta is last,
@@ -363,12 +405,19 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
         if args.read:
             for file_path in files:
-                print("\n" + "=" * 80)
-                read_sd_metadata(file_path)
+                if args.output is not None and not do_write:
+                    out_path = (
+                        args.output / file_path.relative_to(args.path).with_suffix(".json")
+                        if directory_input else args.output
+                    )
+                    _export_metadata_one_file(file_path, out_path, overwrite=bool(args.overwrite))
+                else:
+                    print("\n" + "=" * 80)
+                    read_sd_metadata(file_path)
 
         if do_write:
             for file_path in files:
-                out_path = _derive_output_path(file_path, args.output, multiple_files=len(files) > 1)
+                out_path = _derive_output_path(file_path, args.output, multiple_files=directory_input)
                 _write_metadata_one_file(
                     file_path,
                     out_path,
