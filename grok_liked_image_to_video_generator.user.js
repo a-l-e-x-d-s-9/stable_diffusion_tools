@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Liked Images to Video (Post Navigation)
 // @namespace    https://grok.com/
-// @version      1.3.2
+// @version      1.3.4
 // @description  Queue liked images bottom-to-top, visit each post, and choose Make Video > Quick Animate with configurable concurrency.
 // @author       alexds9
 // @match        https://grok.com/*
@@ -348,13 +348,20 @@
             /^make video$/i.test(button.getAttribute('aria-label')) && enabled(button));
     }
     function quickAnimate(button) {
-        // Radix renders the menu in a portal. Match its trigger, never a dynamic
-        // radix ID or a document-wide "second menu item".
-        const menus = [...document.querySelectorAll('[role="menu"][data-state="open"]')]
-            .filter(menu => visible(menu) && button.id
-                && (menu.getAttribute('aria-labelledby') || '').split(/\s+/).includes(button.id));
-        return menus.flatMap(menu => [...menu.querySelectorAll('[role="menuitem"]')])
-            .find(item => /^quick animate$/i.test(item.textContent.trim()) && enabled(item));
+        // Base UI links its portalled popup with aria-controls; older Radix
+        // menus use aria-labelledby and data-state. Follow either relationship
+        // without requiring framework-specific open attributes or fixed IDs.
+        const controlledIds = (button.getAttribute('aria-controls') || '').split(/\s+/);
+        const menus = [...document.querySelectorAll('[role="menu"]')]
+            .filter(menu => visible(menu)
+                && !menu.closest('[hidden], [aria-hidden="true"], [inert]')
+                && menu.getAttribute('data-state') !== 'closed'
+                && !menu.hasAttribute('data-closed')
+                && ((menu.id && controlledIds.includes(menu.id))
+                    || (button.id && (menu.getAttribute('aria-labelledby') || '').split(/\s+/).includes(button.id))));
+        return menus.flatMap(menu => [...menu.querySelectorAll('[role="menuitem"], button')])
+            .find(item => /^quick animate$/i.test((item.getAttribute('aria-label') || item.textContent).trim())
+                && enabled(item) && !item.closest('[hidden], [aria-hidden="true"], [inert]'));
     }
     function postHasVideo() {
         return [...document.querySelectorAll('main video, [role="main"] video')].some(video =>
@@ -386,14 +393,25 @@
         if (!button) throw new Error('Post controls changed. Resume to try opening the menu again.');
         const existingErrors = errors();
         if (existingErrors.length) throw new Error(`Grok reports: ${existingErrors[0]}`);
-        if (!quickAnimate(button)) {
-            // Radix DropdownMenu opens on pointerdown, not just click.
+        if (!quickAnimate(button) && button.getAttribute('aria-expanded') !== 'true') {
+            // Radix opens on pointerdown; Base UI opens mouse input on mousedown
+            // and ignores the following click. dispatchEvent(pointerdown) does
+            // not synthesize compatibility mouse events, so send them explicitly.
+            const rect = button.getBoundingClientRect();
+            const mouse = {
+                bubbles: true, cancelable: true, composed: true, view: window,
+                button: 0, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+            };
+            const pointer = { ...mouse, pointerType: 'mouse', pointerId: 1, isPrimary: true };
             button.dispatchEvent(new PointerEvent('pointerdown', {
-                bubbles: true, cancelable: true, pointerType: 'mouse', button: 0, buttons: 1,
+                ...pointer, buttons: 1,
             }));
+            const mouseDown = new MouseEvent('mousedown', { ...mouse, buttons: 1, detail: 1 });
+            if (button.dispatchEvent(mouseDown)) button.focus({ preventScroll: true });
             button.dispatchEvent(new PointerEvent('pointerup', {
-                bubbles: true, cancelable: true, pointerType: 'mouse', button: 0,
+                ...pointer, buttons: 0,
             }));
+            button.dispatchEvent(new MouseEvent('mouseup', { ...mouse, buttons: 0, detail: 1 }));
             await sleep(300);
             guard(token);
             if (!quickAnimate(button) && button.getAttribute('aria-expanded') !== 'true') button.click();
