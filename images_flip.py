@@ -1,85 +1,132 @@
+#!/usr/bin/env python3
+"""Apply independent flips, followed by one probabilistic clockwise rotation."""
+
 import argparse
+import math
 import os
-import sys
-from PIL import Image
+from pathlib import Path
 from random import random
+import shutil
+import sys
+
+from PIL import Image, ImageOps
 
 
-def flip_image(image_path: str, h_flip_chance: float, v_flip_chance: float, make_copy: bool) -> bool:
-    was_flipped = False
+ROTATION_ANGLES = (0, 90, 180, 270)
+DEFAULT_ROTATION_CHANCES = (1.0, 0.0, 0.0, 0.0)
+
+
+def validate_rotation_chances(chances):
+    if len(chances) != 4 or any(not 0 <= chance <= 1 for chance in chances):
+        raise ValueError("Provide a probability between 0 and 1 for each rotation: 0, 90, 180, 270 degrees.")
+    if not math.isclose(sum(chances), 1.0, rel_tol=0, abs_tol=1e-6):
+        raise ValueError("Rotation probabilities must sum to 1 (100%).")
+
+
+def choose_rotation(chances):
+    """Choose one angle, using half-open cumulative probability intervals."""
+    validate_rotation_chances(chances)
+    draw = random() * sum(chances)
+    cumulative = 0.0
+    for angle, chance in zip(ROTATION_ANGLES, chances):
+        cumulative += chance
+        if draw < cumulative:
+            return angle
+    return next(angle for angle, chance in reversed(tuple(zip(ROTATION_ANGLES, chances))) if chance > 0)
+
+
+def flip_image(image_path: str, h_flip_chance: float, v_flip_chance: float,
+               make_copy: bool, rotation_chances=DEFAULT_ROTATION_CHANCES) -> bool:
+    """Return whether transformed; unselected images are left byte-for-byte intact."""
+    validate_rotation_chances(rotation_chances)
+    if not 0 <= h_flip_chance <= 1 or not 0 <= v_flip_chance <= 1:
+        raise ValueError("Flip probabilities must be between 0 and 1.")
+    save_path = None
     try:
-        img = Image.open(image_path)
-        img.load()
+        horizontal = random() < h_flip_chance
+        vertical = random() < v_flip_chance
+        angle = choose_rotation(rotation_chances)
+        if not (horizontal or vertical or angle):
+            return False
 
-        # Flip image horizontally
-        if random() < h_flip_chance:
-            img = img.transpose(Image.FLIP_LEFT_RIGHT)
-            was_flipped = True
+        source = Path(image_path)
+        with Image.open(source) as opened:
+            img = ImageOps.exif_transpose(opened)
+            if horizontal:
+                img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            if vertical:
+                img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+            # Pillow's right-angle transpose is lossless in pixels and expands
+            # dimensions automatically; its rotation names are counterclockwise.
+            operation = {90: Image.Transpose.ROTATE_270, 180: Image.Transpose.ROTATE_180,
+                         270: Image.Transpose.ROTATE_90}.get(angle)
+            if operation is not None:
+                img = img.transpose(operation)
 
-        # Flip image vertically
-        if random() < v_flip_chance:
-            img = img.transpose(Image.FLIP_TOP_BOTTOM)
-            was_flipped = True
+            save_path = source
+            if make_copy:
+                index = 0
+                while True:
+                    suffix = "_f" if index == 0 else f"_f_{index}"
+                    candidate = source.with_name(f"{source.stem}{suffix}{source.suffix}")
+                    if not (candidate.exists() or candidate.is_symlink() or
+                            candidate.with_suffix(".txt").exists() or candidate.with_suffix(".txt").is_symlink()):
+                        save_path = candidate
+                        break
+                    index += 1
 
-        # Decide the path to save the image
-        base, ext = os.path.splitext(image_path)
-        ext_lower = ext.lower()
-
-        if make_copy and was_flipped:
-            save_path = f"{base}_f{ext}"
-        else:
-            save_path = image_path
-
-        # If saving as JPEG, make sure mode is compatible
-        if ext_lower in (".jpg", ".jpeg") and img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-
-        # Save the flipped image
-        img.save(save_path)
-
-        return was_flipped
-
-    except Exception as e:
-        print(f"Error processing {image_path}: {e}")
-        # If we were writing a copy and it ended up as an empty file, delete it
+            if source.suffix.lower() in {".jpg", ".jpeg"} and img.mode not in {"RGB", "L"}:
+                img = img.convert("RGB")
+            img.save(save_path)
+        if make_copy and source.with_suffix(".txt").is_file():
+            shutil.copy2(source.with_suffix(".txt"), save_path.with_suffix(".txt"))
+        return True
+    except Exception as error:
+        print(f"Error processing {image_path}: {error}", file=sys.stderr)
         try:
-            if "save_path" in locals() and save_path != image_path:
-                if os.path.exists(save_path) and os.path.getsize(save_path) == 0:
-                    os.remove(save_path)
-        except Exception:
+            if save_path is not None and save_path != Path(image_path):
+                if save_path.is_file() and save_path.stat().st_size == 0:
+                    save_path.unlink()
+        except OSError:
             pass
         return False
 
 
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--folder_path', type=Path, required=True, help='Folder scanned recursively for images.')
+    parser.add_argument('--h_flip_chance', type=float, default=0.0, help='Independent horizontal flip probability (0 to 1).')
+    parser.add_argument('--v_flip_chance', type=float, default=0.0, help='Independent vertical flip probability (0 to 1).')
+    parser.add_argument('--make_copy', action='store_true', help='Save transformed copies with an _f suffix; keep originals.')
+    for angle, default in zip(ROTATION_ANGLES, DEFAULT_ROTATION_CHANCES):
+        parser.add_argument(f'--rotation-{angle}-chance', f'--rotation_{angle}_chance',
+                            dest=f'rotation_{angle}_chance', type=float, default=default,
+                            help=f'Probability of {angle} degrees clockwise (default: {default:g}); all four must sum to 1.')
+    return parser, parser.parse_args(argv)
+
+
+def main(argv=None):
+    parser, args = parse_args(argv)
+    chances = tuple(getattr(args, f'rotation_{angle}_chance') for angle in ROTATION_ANGLES)
+    try:
+        validate_rotation_chances(chances)
+        if not 0 <= args.h_flip_chance <= 1 or not 0 <= args.v_flip_chance <= 1:
+            raise ValueError("Flip probabilities must be between 0 and 1.")
+        if not args.folder_path.is_dir():
+            raise ValueError(f"Not a folder: {args.folder_path}")
+    except ValueError as error:
+        parser.error(str(error))
+
+    # Snapshot inputs before creating copies so new outputs are not processed.
+    images = [Path(root) / name for root, _, files in os.walk(args.folder_path)
+              for name in sorted(files) if Path(name).suffix.lower() in {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}]
+    transformed = 0
+    for count, image in enumerate(images, 1):
+        transformed += flip_image(str(image), args.h_flip_chance, args.v_flip_chance, args.make_copy, chances)
+        print(f'\rProcessed {count}/{len(images)} images, transformed: {transformed}.', end='', flush=True)
+    print('\nDone.')
+    return 0
+
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Flip images based on given chances.')
-    parser.add_argument('--folder_path', type=str, required=True, help='Path to folder containing images.')
-    parser.add_argument('--h_flip_chance', type=float, default=0.0, help='Chance to flip image horizontally (0 to 1).')
-    parser.add_argument('--v_flip_chance', type=float, default=0.0, help='Chance to flip image vertically (0 to 1).')
-    parser.add_argument('--make_copy', action='store_true', default=False,
-                        help='If set, creates a copy of the flipped image instead of replacing the original.')
-    args = parser.parse_args()
-
-    folder_path = args.folder_path
-
-    if not os.path.isdir(folder_path):
-        print(f'Error: {folder_path} is not a directory')
-        sys.exit(1)
-
-    flipped_counter = 0
-    count = 0
-    total = sum(len(files) for _, _, files in os.walk(folder_path))
-
-    for root, _, files in os.walk(folder_path):
-        for file_name in files:
-            file_path = os.path.join(root, file_name)
-            if file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')):
-                count += 1
-                was_flipped = flip_image(file_path, args.h_flip_chance, args.v_flip_chance, args.make_copy)
-                if was_flipped:
-                    flipped_counter += 1
-                print(f'\rProcessed {count} images, flipped: {flipped_counter}.', end='', flush=True)
-
-    print('\nDone.')  # Print a message to indicate when all images have been processed.
-
-# Run example: python images_flip.py --folder_path /path/to/folder --h_flip_chance 0.5 --v_flip_chance 0.5 --make_copy
+    raise SystemExit(main())

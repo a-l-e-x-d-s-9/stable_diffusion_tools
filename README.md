@@ -114,10 +114,27 @@ enabled by default. See [setup and accuracy/speed controls](readme_files/face_cr
 1.  Check exif data can be read.
 2.  Allow to remove exif from images with problematic exif.
 
-## [Images flip horizontal](images_flip.py)
-### Features:
-1.  Flip images horizontally.
-2.  Option to flip randomly with 50% chance.
+## [Flip and rotate images](images_flip.py)
+
+Apply independent horizontal/vertical flips, then select one clockwise rotation
+of 0, 90, 180, or 270 degrees. Each rotation has a probability between 0 and 1;
+the four values must sum to 1. Defaults are `(1, 0, 0, 0)`, so existing flip-only
+commands retain their behavior. Quarter turns swap width/height without cropping
+or resizing. EXIF orientation is applied before transformations.
+
+```bash
+python images_flip.py --folder_path /path/to/images --make_copy \
+  --h_flip_chance 0.5 --rotation-0-chance 0.5 --rotation-90-chance 0.25 \
+  --rotation-180-chance 0 --rotation-270-chance 0.25
+```
+
+Scanning is recursive. `--make_copy` keeps originals and creates transformed
+`_f` copies with matching `.txt` captions; numbered suffixes preserve existing
+copy filenames. Files with no selected change are not rewritten. Rotation
+arguments also accept underscore spellings, e.g. `--rotation_90_chance`.
+These controls are also available under **Flip images** in the Dataset
+Preparation UI, including probability totals and No rotation / Equal rotation
+chances shortcuts.
 
 ## [Images rename](images_rename.py)
 ### Features:
