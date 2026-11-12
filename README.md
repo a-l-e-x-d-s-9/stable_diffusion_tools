@@ -490,3 +490,52 @@ printf ':smile:\n' | python3 discord_emoji_convert.py
 ## [Visual Sticker](visual_sticker.py)
 ### Features:
 1. GUI tool for adding stickers/overlays to images.
+
+## [Multiple crops from one image](image_multi_crop.py)
+
+Create a crop-only dataset from a single image with one or more aspect ratios,
+a size range, a reproducible seed, and a crop distribution strategy. The total
+count is shared evenly across the selected ratios. Crops retain native pixel
+dimensions and are saved as lossless PNGs in a separate folder. Source images
+and existing outputs are preserved.
+
+```bash
+python image_multi_crop.py photo.jpg --output crops --count 24 \
+  --aspect-ratios 1:1 2:3 3:2 --min-scale 0.5 --max-scale 1.0 \
+  --strategy maximum_separation --seed 42 --copy-captions
+```
+
+Percent mode applies scale to both sides of the largest fitting rectangle for
+each ratio. Pixel mode limits the longest crop edge:
+
+```bash
+python image_multi_crop.py photo.jpg --output crops --count 24 \
+  --aspect-ratios 1:1 2:3 --size-unit pixels --min-pixels 512 --max-pixels 1024
+```
+
+Pixel maximums are capped by the source; oversized minimums are rejected.
+Ratios are width:height; `source` keeps the original ratio. EXIF orientation is
+applied before cropping. The same seed and settings reproduce the plan. A
+request with too few distinct possible boxes fails before writing outputs.
+`--aspect-ratio` remains available for single-ratio commands. `--copy-captions`
+copies the source `.txt` caption to each crop; review cropped-out content.
+
+Strategies: `uniform`, `maximum_separation` (greedy choice from 48 candidates per
+crop, not a global optimum), `stratified_grid`, `low_discrepancy` (Halton),
+`center_weighted`, `edge_weighted`, `rule_of_thirds`, and `golden_spiral`.
+Large crops may still overlap, and distinct boxes can look similar.
+
+Also available through **Multiple crops from one image** in
+`SD_Projects/Thunar_extensions/dataset_preparation.py`, with ratio checkboxes,
+All/None controls, original dimensions, live per-ratio pixel ranges, and a
+preview of the first eight crops.
+
+## [Split one image into a grid](image_split_grid.py)
+
+Split a single image into columns and rows, with optional edge offsets and gaps:
+
+```bash
+python image_split_grid.py photo.png 3 2 --spacing 4
+```
+
+Tiles are written beside the source. Existing tile filenames can be overwritten.
