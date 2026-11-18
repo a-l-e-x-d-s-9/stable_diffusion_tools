@@ -9,6 +9,16 @@ const assert = require('node:assert/strict');
 const source = fs.readFileSync(path.join(__dirname, '../vast_real_cost.user.js'));
 const fixture = fs.readFileSync(path.join(__dirname, 'vast_real_cost_fixture.html'));
 const server = http.createServer((req, res) => {
+  const pathname = new URL(req.url, 'http://localhost').pathname;
+  if (pathname === '/api/v1/instances/' || pathname === '/api/v0/instances/61245825/') {
+    res.setHeader('Content-Type', 'application/json');
+    const instances = pathname.startsWith('/api/v1/') ? [
+      {id:61245824, machine_id:142650, internet_down_cost_per_tb:8, internet_up_cost_per_tb:16},
+      {id:61245826, machine_id:200001, internet_down_cost_per_tb:null, internet_up_cost_per_tb:0},
+    ] : {id:61245825, machine_id:142650, inet_down_cost:0, inet_up_cost:0};
+    res.end(JSON.stringify({ instances }));
+    return;
+  }
   res.setHeader('Content-Type', req.url === '/userscript.js' ? 'text/javascript' : 'text/html');
   res.end(req.url === '/userscript.js' ? source : fixture);
 });
@@ -52,21 +62,22 @@ const server = http.createServer((req, res) => {
   try {
     for (const mode of ['gm', 'fallback', 'gm-throws', 'gm-volatile', 'local-blocked']) {
       const { browserContextId } = await cdp('Target.createBrowserContext');
+      const origin = `http://127.0.0.1:${server.address().port}`;
       const { targetId } = await cdp('Target.createTarget', {
-        url:`http://127.0.0.1:${server.address().port}/?${mode}`, browserContextId,
+        url:`${origin}/create/?${mode}`, browserContextId,
       });
       const { sessionId } = await cdp('Target.attachToTarget', { targetId, flatten:true });
       await cdp('Emulation.setDeviceMetricsOverride', {
         width:1280, height:900, deviceScaleFactor:1, mobile:false,
       }, sessionId);
-      const evaluate = async expression => {
+      const evaluate = async (expression, session = sessionId) => {
         const result = await cdp('Runtime.evaluate', {
           expression, returnByValue:true, awaitPromise:true,
-        }, sessionId);
+        }, session);
         assert(!result.exceptionDetails, JSON.stringify(result.exceptionDetails));
         return result.result?.value;
       };
-      const until = async expression => {
+      const until = async (expression, session = sessionId) => {
         assert(await evaluate(`new Promise(resolve => {
           const deadline = Date.now() + 4000;
           const poll = () => {
@@ -74,7 +85,7 @@ const server = http.createServer((req, res) => {
             if (Date.now() > deadline) return resolve(false);
             setTimeout(poll, 25);
           }; poll();
-        })`), `Timed out: ${expression}`);
+        })`, session), `Timed out: ${expression}`);
       };
       const ready = () => until(`document.querySelectorAll('.vrc-costs:not(.vrc-pending)').length === 5`);
       await ready();
@@ -157,7 +168,7 @@ const server = http.createServer((req, res) => {
         setTimeout(() => { observer.disconnect(); resolve(changes); }, 150);
       })`), 0);
       // Unhiding must also survive a later visit, without reviving old saved IDs.
-      await cdp('Page.navigate', {url:`http://127.0.0.1:${server.address().port}/?${mode}&revisit`}, sessionId);
+      await cdp('Page.navigate', {url:`${origin}/create/?${mode}&revisit`}, sessionId);
       await until(`document.querySelector('.vrc-hidden-toggle')?.textContent === 'Show hidden (1)'`);
       await until(`document.querySelectorAll('.vrc-hide-machine').length === 5`);
       assert.equal(await evaluate(`document.querySelectorAll('.vrc-machine-collapsed').length`), 0);
@@ -217,6 +228,40 @@ const server = http.createServer((req, res) => {
         assert.equal(await evaluate(`document.querySelector('.vrc-refresh-enabled').checked`), false);
         assert.equal(await evaluate('autoRefreshTimers.size'), 0, 'Remember the disabled setting after reload');
         console.log('PASS refresh: 15s default, saved interval/toggle, native data updates, hidden ranks, manual refresh, concurrency, errors, background/offline');
+
+        const { targetId: instancesTarget } = await cdp('Target.createTarget', {
+          url:`${origin}/instances/?gm`, browserContextId,
+        });
+        const { sessionId: instancesSession } = await cdp('Target.attachToTarget', { targetId:instancesTarget, flatten:true });
+        const instanceCards = 'document.querySelectorAll(".instance-list article")';
+        const estimate = index => `${instanceCards}[${index}]?.querySelector('.vrc-instance-costs')`;
+        const hideButton = index => `${instanceCards}[${index}]?.querySelector('.vrc-hide-machine')`;
+        await until(`${estimate(0)}?.textContent.includes('8h $2.006') && ${estimate(1)}?.textContent.includes('Data (once) $0.000')`, instancesSession);
+        assert.deepEqual(await evaluate(`[...${estimate(0)}.querySelectorAll('strong')].map(node => node.textContent)`, instancesSession),
+          ['$0.620', '$0.818', '$1.214', '$2.006', '$0.422']);
+        assert.equal(await evaluate(`${estimate(2)}.textContent`, instancesSession), 'Cost estimate unavailable');
+        assert.equal(await evaluate(`${hideButton(0)}.textContent`, instancesSession), 'Unhide on Create');
+        assert.equal(await evaluate(`document.querySelectorAll('.vrc-refresh-controls, .vrc-machine-collapsed').length`, instancesSession), 0);
+        assert.equal(await evaluate('autoRefreshTimers.size', instancesSession), 0);
+        await evaluate(`${hideButton(0)}.click()`, instancesSession);
+        await cdp('Target.activateTarget', { targetId });
+        await until(`document.querySelectorAll('.vrc-machine-collapsed').length === 0`);
+        await cdp('Target.activateTarget', { targetId:instancesTarget });
+        await until(`${hideButton(1)}.textContent === 'Hide on Create'`, instancesSession);
+        await evaluate(`${hideButton(1)}.click()`, instancesSession);
+        await until(`${hideButton(0)}.getAttribute('aria-pressed') === 'true'`, instancesSession);
+        assert.equal(await evaluate(`[...${instanceCards}].every(card => getComputedStyle(card).display !== 'none')`, instancesSession), true);
+        await evaluate(`drawInstances();
+          ${instanceCards}[0].querySelector('[data-testid="instance-price-badge-61245824"] span').textContent = '$0.300/hr'`, instancesSession);
+        await until(`${hideButton(0)}?.textContent === 'Unhide on Create' && ${estimate(0)}?.textContent.includes('1h $0.722')`, instancesSession);
+        await cdp('Target.activateTarget', { targetId });
+        await until(`document.querySelectorAll('.vrc-machine-collapsed').length === 2`);
+        await evaluate(`document.querySelector('.vrc-hidden-toggle').click()`);
+        await until(`document.querySelector('.vrc-hide-machine')?.textContent === 'Unhide'`);
+        await evaluate(`document.querySelector('.vrc-hide-machine').click()`);
+        await cdp('Target.activateTarget', { targetId:instancesTarget });
+        await until(`${hideButton(0)}.textContent === 'Hide on Create'`, instancesSession);
+        console.log('PASS Instances: separate rental rates, missing rates, card replacement, and live Create hide/unhide across tabs');
       }
       await cdp('Target.disposeBrowserContext', { browserContextId });
       console.log(`PASS ${mode}: machine hiding, ranking, layout, rerenders, row reuse, persistence, unhide, stable DOM`);

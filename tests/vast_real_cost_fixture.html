@@ -19,6 +19,7 @@
   <div data-aid="SearchPage-sort">Price (inc.)</div>
 </div>
 <div class="results-table"></div>
+<div class="instance-list"></div>
 <script>
   // Control the userscript timer without waiting 15 seconds per assertion.
   const nativeTimeout = window.setTimeout, nativeClearTimeout = window.clearTimeout;
@@ -84,6 +85,25 @@
       </div></div>
     </div>`).join('');
   };
+  window.drawInstances = () => {
+    document.querySelector('.instance-list').innerHTML = [
+      [61245824, '142650', '0.198'], [61245825, '142650', '0.205'], [61245826, '200001', '0.250'],
+    ].map(([id, machine, price]) => `<article>
+      <div data-testid="instance-card-header">
+        <div data-testid="pricing-buttons-container">
+          <div data-testid="instance-price-badge-${id}"><span>$${price}/hr</span></div>
+        </div>
+      </div>
+      <div>
+        <div data-testid="instance-card-view-description">
+          <div><span data-testid="instance-id">Instance ID: ${id}</span>
+            <div><span data-testid="machine-id" style="position:static">Machine ID: ${machine}</span></div>
+          </div>
+        </div>
+        <button type="button">Stop</button>
+      </div>
+    </article>`).join('');
+  };
   window.GM_registerMenuCommand = () => {};
   const hiddenKey = 'vast-real-cost-hidden-machines-v1';
   if (!location.search.includes('fallback')) {
@@ -109,10 +129,28 @@
       return setItem.call(this, key, value);
     };
   }
-  window.fetch = async () => ({ ok:true, clone() { return this; }, json:async () => ({
-    offers:[45610815,45610816,45610817,45610818,45610819].map(id => ({id,inet_down_cost:0.007813,inet_up_cost:0.007813})),
-  }) });
-  draw();
+  const nativeFetch = window.fetch;
+  window.fetch = async (...args) => args[0] === '/api/v0/bundles/' ? ({
+    ok:true, clone() { return this; }, json:async () => ({
+      offers:[45610815,45610816,45610817,45610818,45610819].map(id => ({id,inet_down_cost:0.007813,inet_up_cost:0.007813})),
+    }),
+  }) : nativeFetch(...args);
+  if (location.pathname === '/instances/') {
+    document.querySelector('.sort-info').remove();
+    document.querySelector('.results-table').remove();
+    drawInstances();
+  } else {
+    document.querySelector('.instance-list').remove();
+    draw();
+  }
 </script>
 <script src="/userscript.js"></script>
-<script>fetch('/api/v0/bundles/');</script>
+<script>
+  if (location.pathname === '/instances/') {
+    const request = new XMLHttpRequest();
+    request.open('GET', '/api/v1/instances/?limit=25');
+    request.responseType = 'json';
+    request.send();
+    fetch('/api/v0/instances/61245825/');
+  } else fetch('/api/v0/bundles/');
+</script>

@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Vast.ai Real Cost (1h / 2h / 4h / 8h + Bandwidth)
 // @namespace    https://cloud.vast.ai/
-// @version      1.11.1
-// @description  Show rental and transfer totals, highlight the cheapest offers, remember hidden machines, and refresh the marketplace automatically or manually.
+// @version      1.12.0
+// @description  Show rental and transfer totals on Create and Instances, hide machines from Create, and highlight and refresh marketplace offers.
 // @match        https://cloud.vast.ai/create/*
 // @match        https://cloud.vast.ai/create
+// @match        https://cloud.vast.ai/instances/*
+// @match        https://cloud.vast.ai/instances
 // @run-at       document-start
 // @sandbox      raw
 // @grant        unsafeWindow
@@ -20,6 +22,7 @@
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   if (pageWindow.__vastRealCostInstalled) return;
   pageWindow.__vastRealCostInstalled = true;
+  const isCreatePage = () => /^\/create(?:\/|$)/.test(location.pathname);
 
   const KEY = 'vast-real-cost-settings-v1';
   const DEFAULTS = { download: 50, upload: 2 };
@@ -43,21 +46,10 @@
   }
 
   const HIDDEN_KEY = 'vast-real-cost-hidden-machines-v1';
-  let savedHidden;
-  // Keep a browser copy even when userscript storage is available. In raw
-  // page context the GM APIs may be absent or unavailable on a later visit.
-  try {
-    savedHidden = JSON.parse(localStorage.getItem(HIDDEN_KEY) || 'null');
-  } catch { /* try userscript storage independently */ }
-  if (!Array.isArray(savedHidden)) {
-    try {
-      if (typeof GM_getValue === 'function') savedHidden = GM_getValue(HIDDEN_KEY, null);
-    } catch { /* retain an empty list if neither store is readable */ }
-  }
-  const hiddenMachines = new Set((Array.isArray(savedHidden) ? savedHidden : [])
-    .map(String).filter(id => /^\d+$/.test(id)));
+  const savedHidden = readHiddenMachines();
+  let hiddenMachines = savedHidden ?? new Set();
   // Migrate existing saved IDs and repair the backup when possible.
-  if (Array.isArray(savedHidden)) saveHiddenMachines(hiddenMachines);
+  if (savedHidden) saveHiddenMachines(hiddenMachines);
   let showHidden = false;
 
   const REFRESH_KEY = 'vast-real-cost-refresh-v1';
@@ -77,9 +69,15 @@
   let refreshTimer;
   let refreshing = false;
   let refreshStatus = '';
+  let onCreatePage = false;
 
   const offers = new Map();
-  const API = /\/api\/v0\/bundles(?:\/|\?|$)/;
+  const instanceRates = new Map();
+  const BUNDLES_API = /\/api\/v0\/bundles(?:\/|\?|$)/;
+  const INSTANCES_API = /\/api\/v[01]\/instances(?:\/+\d+)?\/?(?:[?#]|$)/;
+  const HOURS = [1, 2, 4, 8];
+  const INSTANCE_DETAILS = '[data-testid="instance-card-view-description"]';
+  const OWN_UI = '.vrc-costs, .vrc-hide-machine, .vrc-hidden-toggle, .vrc-refresh-controls, .vrc-instance-extras, #vrc-dialog, #vrc-style';
   const money = (n) => '$' + n.toFixed(3);
   let scheduled = false;
   let dialog;
@@ -87,7 +85,7 @@
 
   // The marketplace response contains inet_down_cost / inet_up_cost in $ per GB.
   // Keep rates tied to offer ID (the "Type #..." shown on the card).
-  function ingest(json) {
+  function ingestOffers(json) {
     if (!json || !Array.isArray(json.offers)) return;
     for (const offer of json.offers) {
       const id = Number(offer.id);
@@ -99,6 +97,34 @@
     scheduleRender();
   }
 
+  function parseRate(value) {
+    if (typeof value !== 'number' && (typeof value !== 'string' || !value.trim())) return null;
+    const rate = Number(value);
+    return Number.isFinite(rate) && rate >= 0 ? rate : null;
+  }
+
+  function ingestInstances(json) {
+    const instances = Array.isArray(json?.instances) ? json.instances : [json?.instances];
+    for (const instance of instances) {
+      const id = String(instance?.id);
+      if (!/^\d+$/.test(id)) continue;
+      // The instance price breakdown uses the per-TB fields. Vast converts
+      // its rates between $/GB and $/TB using 1024 GB per TB.
+      const downPerTb = parseRate(instance.internet_down_cost_per_tb);
+      const upPerTb = parseRate(instance.internet_up_cost_per_tb);
+      const down = downPerTb === null ? parseRate(instance.inet_down_cost) : downPerTb / 1024;
+      const up = upPerTb === null ? parseRate(instance.inet_up_cost) : upPerTb / 1024;
+      if (down !== null && up !== null) instanceRates.set(id, { down, up });
+    }
+    scheduleRender();
+  }
+
+  function responseHandler(url, method) {
+    if (BUNDLES_API.test(url)) return ingestOffers;
+    if (method.toUpperCase() === 'GET' && INSTANCES_API.test(url)) return ingestInstances;
+    return null;
+  }
+
   // These passive observers read Vast's own HTTP responses without sending
   // requests, accessing credentials, or altering the site's responses.
   const fetchOriginal = pageWindow.fetch;
@@ -107,7 +133,8 @@
       const result = fetchOriginal.apply(this, args);
       try {
         const url = String(args[0]?.url || args[0]);
-        if (API.test(url)) {
+        const ingest = responseHandler(url, String(args[1]?.method ?? args[0]?.method ?? 'GET'));
+        if (ingest) {
           result.then(r => {
             if (r.ok) r.clone().json().then(ingest).catch(() => {});
           }).catch(() => {});
@@ -121,11 +148,12 @@
   const openOriginal = xhrPrototype.open;
   const sendOriginal = xhrPrototype.send;
   xhrPrototype.open = function(method, url, ...args) {
-    this.__vastRealCostWatch = API.test(String(url));
+    this.__vastRealCostWatch = responseHandler(String(url), String(method));
     return openOriginal.call(this, method, url, ...args);
   };
   xhrPrototype.send = function(...args) {
-    if (this.__vastRealCostWatch) {
+    const ingest = this.__vastRealCostWatch;
+    if (ingest) {
       this.addEventListener('load', () => {
         try {
           if (this.status < 200 || this.status >= 300) return;
@@ -133,7 +161,7 @@
             (this.responseType === '' || this.responseType === 'text') ? JSON.parse(this.responseText) : null;
           ingest(json);
         } catch { /* ignore malformed response */ }
-      });
+      }, { once:true });
     }
     return sendOriginal.apply(this, args);
   };
@@ -170,11 +198,20 @@
     }
     .results-table [data-aid="RowElement"].vrc-machine-collapsed { display:none !important; }
     .vrc-hide-machine[aria-pressed="true"] { color:#f0c987; border-color:#b18b50; }
+    .vrc-instance-extras {
+      display:flex; flex-wrap:wrap; align-items:center; gap:4px 12px; font-size:11px;
+    }
+    .vrc-instance-extras .vrc-hide-machine { white-space:nowrap; color:inherit; }
+    .vrc-instance-costs {
+      display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 8px;
+      font-variant-numeric:tabular-nums;
+    }
+    .vrc-instance-costs > span { white-space:nowrap; }
     /* Keep the whole row compact, including on wide screens. Width comes from
        CSS rather than measurements of elements we have already moved. */
     /* The supplied layout needs 1075px for details, hourly price, totals and
        Rent. The previous 1140px left about 65px unused before the price. */
-    .results-table { width:1075px !important; min-width:1075px !important; max-width:1075px !important; }
+    .vrc-create-page .results-table { width:1075px !important; min-width:1075px !important; max-width:1075px !important; }
     .results-table [data-aid="RowElement"],
     .results-table [data-aid="RowElement"] .rentable-card,
     .results-table [data-aid="RowElement"] .machine-row {
@@ -271,13 +308,31 @@
     return persisted;
   }
 
+  function readHiddenMachines() {
+    let saved;
+    // Prefer the browser copy so changes are shared across open tabs.
+    try { saved = JSON.parse(localStorage.getItem(HIDDEN_KEY) || 'null'); }
+    catch { /* try userscript storage independently */ }
+    if (!Array.isArray(saved)) {
+      try {
+        if (typeof GM_getValue === 'function') saved = GM_getValue(HIDDEN_KEY, null);
+      } catch { /* neither store is readable */ }
+    }
+    return Array.isArray(saved) ? new Set(saved.map(String).filter(id => /^\d+$/.test(id))) : null;
+  }
+
   function saveHiddenMachines(ids) {
     return savePersistentValue(HIDDEN_KEY, [...ids]);
   }
 
+  function syncHiddenMachines() {
+    hiddenMachines = readHiddenMachines() ?? new Set();
+    scheduleRender();
+  }
+
   function resetRefreshTimer() {
     clearTimeout(refreshTimer);
-    if (!refreshSettings.enabled) return;
+    if (!isCreatePage() || !refreshSettings.enabled) return;
     refreshTimer = setTimeout(() => {
       // Background tabs and offline periods should not generate requests.
       if (document.visibilityState === 'hidden' || navigator.onLine === false ||
@@ -298,7 +353,7 @@
   }
 
   async function refreshOffers() {
-    if (refreshing) return;
+    if (!isCreatePage() || refreshing) return;
     clearTimeout(refreshTimer);
     const client = findMarketplaceClient();
     if (!client || !client.getQueryCache().findAll({ queryKey:['bundles'], type:'active' }).length) {
@@ -366,16 +421,15 @@
     if (status.textContent !== refreshStatus) status.textContent = refreshStatus;
   }
 
-  function setMachineHidden(id, hidden) {
-    const next = new Set(hiddenMachines);
-    if (hidden) next.add(id);
-    else next.delete(id);
+  function toggleMachineHidden(id) {
+    const next = readHiddenMachines() ?? new Set(hiddenMachines);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
     if (!saveHiddenMachines(next)) {
       alert('Could not save hidden machines. Please try again.');
       return;
     }
-    hiddenMachines.clear();
-    for (const machineId of next) hiddenMachines.add(machineId);
+    hiddenMachines = next;
     scheduleRender();
   }
 
@@ -400,16 +454,16 @@
     toggle.title = 'Saved hidden machines across all searches. Hidden machines never receive best-price highlights.';
   }
 
-  function updateMachineControl(card) {
+  function machineId(card) {
     // Machine IDs survive offer changes; "Type #..." is only an offer ID.
-    const id = card.querySelector('[data-testid="machine-id"]')?.textContent.match(/\bm:\s*(\d+)\b/)?.[1];
-    const hidden = !!id && hiddenMachines.has(id);
-    card.classList.toggle('vrc-machine-collapsed', hidden && !showHidden);
-    const panel = card.querySelector('.rentable-card');
-    let button = panel?.querySelector(':scope > .vrc-hide-machine');
-    if (!id || !panel) {
+    return card.querySelector('[data-testid="machine-id"]')?.textContent.match(/\b(?:m|machine id):\s*(\d+)\b/i)?.[1];
+  }
+
+  function updateHideButton(container, id, suffix = '') {
+    let button = container.querySelector(':scope > .vrc-hide-machine');
+    if (!id) {
       button?.remove();
-      return hidden;
+      return;
     }
     if (!button) {
       button = document.createElement('button');
@@ -417,20 +471,76 @@
       button.className = 'vrc-hide-machine';
       button.addEventListener('click', e => {
         e.stopPropagation();
-        const machineId = button.dataset.machineId;
-        setMachineHidden(machineId, !hiddenMachines.has(machineId));
+        toggleMachineHidden(button.dataset.machineId);
       });
-      if (getComputedStyle(panel).position === 'static') panel.style.position = 'relative';
-      panel.append(button);
+      container.prepend(button);
     }
     // Read the current ID on click because Vast can reuse an existing row.
     button.dataset.machineId = id;
+    const hidden = hiddenMachines.has(id);
     const label = hidden ? 'Unhide' : 'Hide';
-    if (button.textContent !== label) button.textContent = label;
+    if (button.textContent !== label + suffix) button.textContent = label + suffix;
     button.setAttribute('aria-pressed', String(hidden));
-    button.setAttribute('aria-label', `${label} machine ${id}`);
-    button.title = `${label} all offers for machine ${id}`;
+    button.setAttribute('aria-label', `${label} machine ${id}${suffix}`);
+    button.title = `${label} all offers for machine ${id}${suffix}`;
+  }
+
+  function updateMachineControl(card) {
+    const id = machineId(card);
+    const hidden = hiddenMachines.has(id);
+    card.classList.toggle('vrc-machine-collapsed', hidden && !showHidden);
+    const panel = card.querySelector('.rentable-card');
+    if (panel) {
+      if (id && getComputedStyle(panel).position === 'static') panel.style.position = 'relative';
+      updateHideButton(panel, id);
+    }
     return hidden;
+  }
+
+  function readHourlyPrice(text) {
+    const amount = text?.match(/\$\s*([\d,.]+)\s*\/\s*hr/i)?.[1];
+    return parseRate(amount?.replace(/,/g, ''));
+  }
+
+  function estimateTransfer(rates) {
+    return settings.download * rates.down + settings.upload * rates.up;
+  }
+
+  function transferDetails(rates, traffic, gbPerTb) {
+    return `${settings.download} GB download × ${money(rates.down * gbPerTb)}/TB + ` +
+      `${settings.upload} GB upload × ${money(rates.up * gbPerTb)}/TB = ${money(traffic)} transfer.`;
+  }
+
+  function updateInstanceCard(details) {
+    const id = details.querySelector('[data-testid="instance-id"]')?.textContent.match(/\bInstance ID:\s*(\d+)\b/i)?.[1];
+    const machine = machineId(details);
+    let extras = details.parentElement.querySelector(':scope > .vrc-instance-extras');
+    if (!id && !machine) {
+      extras?.remove();
+      return;
+    }
+    if (!extras) {
+      extras = document.createElement('div');
+      extras.className = 'vrc-instance-extras';
+      extras.innerHTML = '<div class="vrc-instance-costs"></div>';
+      details.after(extras);
+    }
+    updateHideButton(extras, machine, ' on Create');
+
+    const output = extras.querySelector('.vrc-instance-costs');
+    const badge = id && document.querySelector(`[data-testid="instance-price-badge-${id}"]`);
+    const hourly = readHourlyPrice(badge?.textContent);
+    const rates = instanceRates.get(id);
+    let markup = id ? '<span>Cost estimate unavailable</span>' : '';
+    let title = '';
+    if (hourly !== null && rates) {
+      const traffic = estimateTransfer(rates);
+      markup = '<span>Est. totals</span>' + HOURS.map(h => `<span>${h}h <strong>${money(hourly * h + traffic)}</strong></span>`).join('') +
+        `<span>Data (once) <strong>${money(traffic)}</strong></span>`;
+      title = transferDetails(rates, traffic, 1024) + ' Estimates use the hourly price shown for this instance.';
+    }
+    if (output.innerHTML !== markup) output.innerHTML = markup;
+    output.title = title;
   }
 
   function updateCard(card, candidates, hidden) {
@@ -447,10 +557,8 @@
     if (!priceBox) return;
     const priceText = Array.from(priceBox.childNodes)
       .filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent).join(' ');
-    const m = priceText.match(/\$\s*([\d,.]+)\s*\/\s*hr/i);
-    if (!m) return;
-    const hourly = Number(m[1].replace(/,/g, ''));
-    if (!Number.isFinite(hourly)) return;
+    const hourly = readHourlyPrice(priceText);
+    if (hourly === null) return;
     const panel = card.querySelector('.rentable-card');
     if (!panel) return;
     // This is a new sibling inside the ORIGINAL card, not inside the price.
@@ -470,15 +578,14 @@
       output.removeAttribute('data-vrc-rank-4');
     } else {
       output.classList.remove('vrc-pending');
-      const traffic = settings.download * offer.down + settings.upload * offer.up;
-      markup = [1, 2, 4, 8].map(h => `<div class="vrc-row"><span class="vrc-duration">${h}h total</span>` +
+      const traffic = estimateTransfer(offer);
+      markup = HOURS.map(h => `<div class="vrc-row"><span class="vrc-duration">${h}h total</span>` +
         `<span class="vrc-value" data-vrc-hours="${h}">${money(hourly * h + traffic)}</span></div>`).join('') +
         `<div class="vrc-row vrc-data"><span class="vrc-duration">Data (once)</span>` +
         `<span class="vrc-value">${money(traffic)}</span></div>`;
       candidates.push({ output, hourly, traffic, hidden });
-      output.title = `${settings.download} GB download × $${(offer.down*1000).toFixed(3)}/TB + ` +
-        `${settings.upload} GB upload × $${(offer.up*1000).toFixed(3)}/TB = ${money(traffic)} transfer. ` +
-        'Totals = advertised hourly price × hours + one-time transfer.';
+      output.title = transferDetails(offer, traffic, 1000) +
+        ' Totals = advertised hourly price × hours + one-time transfer.';
     }
     if (output.innerHTML !== markup) output.innerHTML = markup;
 
@@ -565,6 +672,18 @@
   function render() {
     if (!document.body) return;
     ensureStyles();
+    const create = isCreatePage();
+    if (onCreatePage !== create) {
+      onCreatePage = create;
+      document.documentElement.classList.toggle('vrc-create-page', create);
+      resetRefreshTimer();
+    }
+    if (!create) {
+      if (/^\/instances(?:\/|$)/.test(location.pathname)) {
+        document.querySelectorAll(INSTANCE_DETAILS).forEach(updateInstanceCard);
+      }
+      return;
+    }
     updateHiddenToggle();
     updateRefreshControls();
     const candidates = [];
@@ -637,24 +756,30 @@
   function start() {
     ensureStyles();
     scheduleRender();
-    resetRefreshTimer();
     observer = new MutationObserver((mutations) => {
       // Avoid looping on DOM changes made by our own UI. Removed controls
       // still trigger repair if Vast replaces or clears part of the page.
       const relevant = mutations.some(m => {
         const target = m.target.nodeType === Node.ELEMENT_NODE ? m.target : m.target.parentElement;
-        if (target?.closest('.vrc-costs, .vrc-hide-machine, .vrc-hidden-toggle, .vrc-refresh-controls, #vrc-dialog, #vrc-style')) return false;
+        if (target?.closest(OWN_UI)) return false;
         if (m.type === 'characterData') return true;
         if ([...m.removedNodes].some(n => n.nodeType === Node.ELEMENT_NODE &&
-          n.matches?.('.vrc-hide-machine, .vrc-hidden-toggle, .vrc-refresh-controls'))) return true;
+          n.matches('.vrc-hide-machine, .vrc-hidden-toggle, .vrc-refresh-controls, .vrc-instance-extras'))) return true;
         return [...m.addedNodes, ...m.removedNodes].some(n =>
           n.nodeType === Node.TEXT_NODE || (n.nodeType === Node.ELEMENT_NODE &&
-          !n.matches?.('.vrc-costs, .vrc-hide-machine, .vrc-hidden-toggle, .vrc-refresh-controls, #vrc-dialog, #vrc-style')));
+          !n.matches(OWN_UI)));
       });
       if (relevant) scheduleRender();
     });
     observer.observe(document.body, { subtree:true, childList:true, characterData:true });
     window.addEventListener('resize', scheduleRender, { passive:true });
+    window.addEventListener('popstate', scheduleRender);
+    window.addEventListener('storage', event => {
+      if (event.key === HIDDEN_KEY) syncHiddenMachines();
+    });
+    window.addEventListener('pageshow', event => {
+      if (event.persisted) syncHiddenMachines();
+    });
   }
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Real Cost: Download / upload settings…', () => showDialog());
