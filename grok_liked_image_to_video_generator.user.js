@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Liked Images to Video (Post Navigation)
 // @namespace    https://grok.com/
-// @version      1.3.4
+// @version      1.3.5
 // @description  Queue liked images bottom-to-top, visit each post, and choose Make Video > Quick Animate with configurable concurrency.
 // @author       alexds9
 // @match        https://grok.com/*
@@ -27,7 +27,7 @@
     const EDGE_PASSES = 5;
     const blank = () => ({
         running: false, phase: 'idle', queue: [], index: 0, attempted: [], skipped: [],
-        pending: [], observedVideos: [], knownVideos: [], delay: 15, limit: 0, concurrency: 5, skipVideos: true,
+        pending: [], observedVideos: [], knownVideos: [], delay: 5, limit: 0, concurrency: 2, skipVideos: true,
         picked: null, pickedPreview: '', scan: null,
         submittedAt: 0, status: 'Choose Start or Pick start.',
         navigation: null, backFor: null,
